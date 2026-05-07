@@ -44,6 +44,11 @@ class RegimeIndicators:
     sources: tuple[str, ...]
     vix_60d_max: float | None = None
     spy_off_60d_low: float | None = None
+    copper_gold_ratio: float | None = None
+    copper_gold_60d_avg: float | None = None
+    dxy_3m_change: float | None = None
+    two_year_yield: float | None = None
+    two_year_yield_3m_delta: float | None = None
 
 
 @dataclass(frozen=True)
@@ -286,27 +291,6 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
     )
 
 
-def _check_panic(indicators: RegimeIndicators) -> list[str] | None:
-    triggers = []
-    if indicators.vix is not None and indicators.vix >= 30.0:
-        triggers.append(f"VIX {indicators.vix:.1f} ≥ 30 (elevated fear)")
-    if indicators.spy_drawdown_252d is not None and indicators.spy_drawdown_252d <= -0.12:
-        triggers.append(
-            f"SPY drawdown {indicators.spy_drawdown_252d * 100:.1f}% from 252d high"
-        )
-    if indicators.credit_spread_hy is not None and indicators.credit_spread_hy >= 6.0:
-        triggers.append(
-            f"HY credit spread {indicators.credit_spread_hy:.2f} ≥ 6.0 (stress)"
-        )
-    if len(triggers) >= 2:
-        return triggers
-    if (
-        indicators.vix is not None and indicators.vix >= 35.0
-    ):
-        return triggers or [f"VIX {indicators.vix:.1f} ≥ 35"]
-    return None
-
-
 def _check_recession(indicators: RegimeIndicators) -> list[str] | None:
     """Recession requires labor weakening AND a hard-data confirmation.
 
@@ -470,11 +454,55 @@ def _check_easy_money(indicators: RegimeIndicators) -> list[str] | None:
 def _check_stagflation(indicators: RegimeIndicators) -> list[str] | None:
     cpi_hot = indicators.cpi_yoy is not None and indicators.cpi_yoy >= 3.0
     growth_weak = indicators.indpro_yoy is not None and indicators.indpro_yoy < 1.0
-    if cpi_hot and growth_weak:
-        return [
-            f"CPI {indicators.cpi_yoy:+.1f}% YoY (still hot)",
-            f"INDPRO {indicators.indpro_yoy:+.1f}% YoY (weak growth)",
-        ]
+    if not (cpi_hot and growth_weak):
+        return None
+    triggers = [
+        f"CPI {indicators.cpi_yoy:+.1f}% YoY (still hot)",
+        f"INDPRO {indicators.indpro_yoy:+.1f}% YoY (weak growth)",
+    ]
+    # Forward-signal rejection: copper/gold rising hard means industrial demand
+    # is actually strong and the market is risk-on; don't lock in stagflation.
+    if (
+        indicators.copper_gold_ratio is not None
+        and indicators.copper_gold_60d_avg is not None
+        and indicators.copper_gold_ratio > indicators.copper_gold_60d_avg * 1.10
+    ):
+        return None
+    # Forward-signal rejection: 2y yield falling fast = market pricing imminent
+    # rate cuts, which typically precedes regime shift away from stagflation.
+    if (
+        indicators.two_year_yield_3m_delta is not None
+        and indicators.two_year_yield_3m_delta <= -0.5
+    ):
+        triggers.append(
+            f"2y yield {indicators.two_year_yield_3m_delta:+.2f}ppt 3m (rate cuts priced in - lower confidence)"
+        )
+    return triggers
+
+
+def _check_panic(indicators: RegimeIndicators) -> list[str] | None:
+    # Reset the original panic check; forward signals can ADD to triggers but
+    # the core conditions are unchanged.
+    triggers: list[str] = []
+    if indicators.vix is not None and indicators.vix >= 30.0:
+        triggers.append(f"VIX {indicators.vix:.1f} ≥ 30 (elevated fear)")
+    if indicators.spy_drawdown_252d is not None and indicators.spy_drawdown_252d <= -0.12:
+        triggers.append(
+            f"SPY drawdown {indicators.spy_drawdown_252d * 100:.1f}% from 252d high"
+        )
+    if indicators.credit_spread_hy is not None and indicators.credit_spread_hy >= 6.0:
+        triggers.append(f"HY credit spread {indicators.credit_spread_hy:.2f} ≥ 6.0 (stress)")
+    # DXY surge >5% in 3m alongside other panic signals = global flight to safety
+    if (
+        indicators.dxy_3m_change is not None
+        and indicators.dxy_3m_change >= 5.0
+        and len(triggers) >= 1
+    ):
+        triggers.append(f"DXY +{indicators.dxy_3m_change:.1f}% 3m (USD safe-haven bid)")
+    if len(triggers) >= 2:
+        return triggers
+    if indicators.vix is not None and indicators.vix >= 35.0:
+        return triggers or [f"VIX {indicators.vix:.1f} ≥ 35"]
     return None
 
 
@@ -881,6 +909,77 @@ def _vix_tier_multiplier(vix: float) -> tuple[float, str]:
     if vix > 25.0:
         return -1.0, f"VIX {vix:.1f} > 25 (stress) → equity trimmed"
     return 0.0, ""
+
+
+def blend_templates(
+    primary: PortfolioTemplate,
+    secondary: PortfolioTemplate,
+    primary_weight: float,
+) -> PortfolioTemplate:
+    """Weighted average of two templates' allocations.
+
+    primary_weight in [0.5, 1.0]; the rest goes to secondary. Used when
+    confidence is low to avoid 100%-conviction bets on a borderline regime
+    classification.
+    """
+    if primary_weight >= 0.95:
+        return primary
+    secondary_weight = 1.0 - primary_weight
+    combined: dict[str, list] = {}
+
+    for alloc in primary.allocations:
+        combined.setdefault(alloc.proxy_etf, [None, alloc, 0.0, 0.0])[2] = (
+            alloc.weight_pct * primary_weight
+        )
+        combined[alloc.proxy_etf][1] = alloc
+    for alloc in secondary.allocations:
+        if alloc.proxy_etf not in combined:
+            combined[alloc.proxy_etf] = [None, alloc, 0.0, alloc.weight_pct * secondary_weight]
+        else:
+            combined[alloc.proxy_etf][3] = alloc.weight_pct * secondary_weight
+
+    new_allocs = []
+    for etf, (_, alloc, w_p, w_s) in combined.items():
+        total_weight = w_p + w_s
+        if total_weight <= 0.001:
+            continue
+        rationale = (
+            f"{alloc.rationale} "
+            f"[blend {primary.regime} {primary_weight:.2f} + {secondary.regime} {secondary_weight:.2f}]"
+        )
+        new_allocs.append(
+            TargetAllocation(
+                asset_class=alloc.asset_class,
+                proxy_etf=etf,
+                weight_pct=total_weight,
+                rationale=rationale,
+            )
+        )
+    total = sum(a.weight_pct for a in new_allocs)
+    if total > 0 and abs(total - 100.0) > 0.001:
+        scale = 100.0 / total
+        new_allocs = [
+            TargetAllocation(
+                asset_class=a.asset_class,
+                proxy_etf=a.proxy_etf,
+                weight_pct=a.weight_pct * scale,
+                rationale=a.rationale,
+            )
+            for a in new_allocs
+        ]
+
+    return PortfolioTemplate(
+        regime=f"{primary.regime}+{secondary.regime}",
+        description=(
+            f"Blend of {primary.regime} ({primary_weight*100:.0f}%) + "
+            f"{secondary.regime} ({secondary_weight*100:.0f}%): {primary.description}"
+        ),
+        allocations=tuple(new_allocs),
+        avoid=tuple(set(primary.avoid) | set(secondary.avoid)),
+        exit_triggers=primary.exit_triggers,
+        rebalance=primary.rebalance,
+        vix_throttle=primary.vix_throttle,
+    )
 
 
 def apply_vix_overlay(template: PortfolioTemplate, vix: float | None) -> PortfolioTemplate:

@@ -25,6 +25,7 @@ from .regime import (
     REGIME_LABELS,
     TEMPLATES,
     apply_vix_overlay,
+    blend_templates,
     classify_regime,
 )
 
@@ -121,11 +122,69 @@ def run_backtest(
     points: list[BacktestPoint] = []
     cursor = _normalize_first_of_month(start)
     last_cursor = _normalize_first_of_month(end)
+
+    # Hysteresis state: prevent 1-month classification noise from flip-flopping
+    # the portfolio. A new regime must be confirmed for 2 consecutive months
+    # before it is committed. panic/recovery bypass hysteresis (urgent).
+    prev_regime: str | None = None
+    pending_regime: str | None = None
+    pending_count = 0
+    URGENT_REGIMES = {"panic", "recovery"}
+
     while cursor <= last_cursor:
         indicators = _gather_indicators_at(cursor, macro_series, history_cache)
         reading = classify_regime(indicators)
-        base_template = TEMPLATES.get(reading.primary, TEMPLATES["transition"])
+        candidate_regime = reading.primary
+
+        if prev_regime is None:
+            committed_regime = candidate_regime
+        elif candidate_regime in URGENT_REGIMES or prev_regime in URGENT_REGIMES:
+            committed_regime = candidate_regime
+            pending_regime = None
+            pending_count = 0
+        elif candidate_regime == prev_regime:
+            committed_regime = candidate_regime
+            pending_regime = None
+            pending_count = 0
+        else:
+            if pending_regime == candidate_regime:
+                committed_regime = candidate_regime
+                pending_regime = None
+                pending_count = 0
+            else:
+                pending_regime = candidate_regime
+                pending_count = 1
+                committed_regime = prev_regime
+
+        prev_regime = committed_regime
+        base_template = TEMPLATES.get(committed_regime, TEMPLATES["transition"])
+
+        # Confidence-weighted blending: when reading.confidence < 0.7 and there is
+        # a secondary regime, blend the two templates so a borderline read does
+        # not bet 100% on a coin-flip.
+        if (
+            committed_regime == reading.primary
+            and reading.confidence < 0.7
+            and reading.secondary
+            and reading.secondary[0] in TEMPLATES
+        ):
+            secondary_template = TEMPLATES[reading.secondary[0]]
+            base_template = blend_templates(
+                base_template, secondary_template, reading.confidence
+            )
         template = apply_vix_overlay(base_template, indicators.vix)
+        # Override the regime label in reading for accurate reporting downstream
+        if committed_regime != reading.primary:
+            from .regime import REGIME_LABELS as _LBLS
+            reading = type(reading)(
+                primary=committed_regime,
+                label=_LBLS.get(committed_regime, committed_regime),
+                confidence=reading.confidence * 0.85,  # slightly lower because we held
+                triggers=reading.triggers + (f"(hysteresis held over {reading.primary})",),
+                secondary=reading.secondary,
+                summary=reading.summary,
+                indicators=reading.indicators,
+            )
 
         portfolio_return, coverage = _portfolio_forward_return(
             cursor, template, history_cache, holding_days
@@ -317,6 +376,40 @@ def _gather_indicators_at(
         if trough > 0:
             spy_off_60d_low = (last - trough) / trough
 
+    # Forward-signal indicators
+    copper_gold_ratio: float | None = None
+    copper_gold_60d_avg: float | None = None
+    copx_full = [p for p in history_cache.get("COPX", ()) if p.observed_at <= as_of]
+    gld_full = [p for p in history_cache.get("GLD", ()) if p.observed_at <= as_of]
+    if copx_full and gld_full:
+        copx_last = copx_full[-1].close
+        gld_last = gld_full[-1].close
+        if gld_last > 0:
+            copper_gold_ratio = copx_last / gld_last
+        # 60d average ratio
+        ratios = []
+        copx_60 = {p.observed_at: p.close for p in copx_full[-60:]}
+        for gld_p in gld_full[-60:]:
+            if gld_p.observed_at in copx_60 and gld_p.close > 0:
+                ratios.append(copx_60[gld_p.observed_at] / gld_p.close)
+        if ratios:
+            copper_gold_60d_avg = sum(ratios) / len(ratios)
+
+    dxy_3m_change: float | None = None
+    uup_full = [p for p in history_cache.get("UUP", ()) if p.observed_at <= as_of]
+    if len(uup_full) >= 63:
+        last = uup_full[-1].close
+        ref = uup_full[-63].close
+        if ref > 0:
+            dxy_3m_change = (last - ref) / ref * 100.0
+
+    two_year_yield = None
+    two_year_yield_3m_delta = None
+    dgs2 = macro_series_lookup("DGS2")
+    if dgs2 is not None:
+        two_year_yield = _try_value(dgs2, as_of)
+        two_year_yield_3m_delta = _try_change(dgs2, 3, as_of)
+
     return RegimeIndicators(
         cpi_yoy=cpi_yoy,
         core_cpi_yoy=core_cpi_yoy,
@@ -335,6 +428,11 @@ def _gather_indicators_at(
         spy_off_60d_low=spy_off_60d_low,
         credit_spread_hy=credit_spread_hy,
         sources=(),
+        copper_gold_ratio=copper_gold_ratio,
+        copper_gold_60d_avg=copper_gold_60d_avg,
+        dxy_3m_change=dxy_3m_change,
+        two_year_yield=two_year_yield,
+        two_year_yield_3m_delta=two_year_yield_3m_delta,
     )
 
 
