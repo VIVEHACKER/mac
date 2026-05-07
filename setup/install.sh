@@ -66,6 +66,7 @@ mkdir -p \
   data/ingest \
   data/store/eod data/store/intraday \
   data/store/fundamentals data/store/filings data/store/events \
+  data/store/macro \
   strategies signals engine pod risk dashboard \
   infra tests/test_strategies tests/test_data tests/test_engine
 

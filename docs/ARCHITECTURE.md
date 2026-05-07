@@ -61,29 +61,38 @@ trader/
 │   │   ├── dart_kr.py       # DART OpenAPI (한국 공시 + 임원보고)
 │   │   ├── fmp_earnings.py  # FMP 어닝/가이던스/컨센서스
 │   │   ├── trends_alt.py    # Google Trends (대안 데이터)
-│   │   └── onchain_eth.py   # Etherscan (크립토 온체인)
+│   │   ├── onchain_eth.py   # Etherscan (크립토 온체인)
+│   │   ├── fred_macro.py    # FRED + ALFRED vintage (미국 매크로)
+│   │   ├── ecos_kr.py       # 한국은행 ECOS REST (한국 매크로)
+│   │   └── macro_calendar.py # 발표 캘린더 + surprise 계산
 │   ├── store/               # Parquet (시계열) + DuckDB (메타)
 │   │   ├── eod/             # 일봉
 │   │   ├── intraday/        # 분봉 (크립토 위주)
 │   │   ├── fundamentals/    # 분기 재무제표 (point-in-time)
 │   │   ├── filings/         # 공시 raw 텍스트
 │   │   ├── events/          # 어닝/가이던스/Form 4
+│   │   ├── macro/           # 매크로 시계열 + regime
 │   │   └── catalog.duckdb
 │   └── catalog.py           # 통합 카탈로그 — `as_of=` 강제로 look-ahead 방지
 ├── strategies/
 │   ├── _base.py             # Strategy 추상 클래스
 │   ├── factor_aqr.py        # Value + Momentum + Quality (펀더멘털 활용)
 │   ├── statarb_pairs.py     # 통계적 차익거래 (크립토부터)
-│   ├── risk_parity.py       # Bridgewater식 자산배분
+│   ├── risk_parity.py       # Bridgewater식 자산배분 (regime-aware)
+│   ├── regime_switch.py     # 매크로 4사분면 기반 자산배분 전환
+│   ├── macro_momentum.py    # 매크로 모멘텀 (yield curve, real rate)
+│   ├── macro_event.py       # CPI/FOMC 발표 surprise 단기 트레이딩
 │   ├── momentum_xs.py       # 횡단면 모멘텀
 │   ├── pead.py              # 어닝 서프라이즈 드리프트
 │   ├── revisions.py         # Earnings revision 모멘텀
-│   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 결합
-├── signals/                 # 미시경제 데이터 기반 알파/시그널
+│   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 + 매크로 결합
+├── signals/                 # 미시·거시 데이터 기반 알파/시그널
 │   ├── activist_13f.py      # 13F 신규/증가 — Pershing/Tiger 미러
 │   ├── insider.py           # Form 4 + DART 임원보고 — 클러스터 매수
 │   ├── revisions.py         # 애널리스트 컨센서스 상향
-│   └── trends_nowcast.py    # Google Trends → 매출 선행 예측
+│   ├── trends_nowcast.py    # Google Trends → 매출 선행 예측
+│   ├── recession.py         # Yield curve inversion 침체 선행 신호
+│   └── risk_appetite.py     # Term spread + Credit spread → 위험선호 단계
 ├── engine/
 │   ├── backtest.py          # Nautilus 백테스트 러너
 │   ├── paper.py             # Alpaca paper / Binance testnet
@@ -96,7 +105,8 @@ trader/
 │   ├── exposure.py          # 시장/섹터/팩터 노출 모니터
 │   ├── slippage.py          # 슬리피지 모델
 │   ├── short_interest.py    # 공매도 잔고 급증 모니터
-│   └── option_skew.py       # 옵션 IV skew 하방 신호
+│   ├── option_skew.py       # 옵션 IV skew 하방 신호
+│   └── fx_exposure.py       # DXY/원달러 환율 노출 (한국 수출주)
 ├── dashboard/
 │   └── app.py               # Streamlit 단일 진입점
 ├── infra/

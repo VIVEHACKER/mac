@@ -77,6 +77,19 @@
 | **Short Squeeze 회피** | 공매도 잔고 급증 종목 숏 회피 | `risk/short_interest.py` | KRX + FINRA |
 | **Trends Nowcasting** | 검색량으로 소비재 매출 선행 예측 | `signals/trends_nowcast.py` | Google Trends |
 
+## 거시경제 데이터 기반 추가 전략
+
+거시 시계열로 가능한 자산배분/regime 전략 (자세히는 `MACROECONOMIC_DATA.md`):
+
+| 전략 | 메커니즘 | 모듈 | 데이터 |
+|------|---------|------|--------|
+| **All Weather (Regime-aware)** | 성장×인플레 4사분면 자산배분 | `strategies/risk_parity.py` + `strategies/regime_switch.py` | FRED GDP/CPI |
+| **Macro Momentum** | Yield curve + real rate 모멘텀 | `strategies/macro_momentum.py` | FRED DGS10/DGS2/PCE |
+| **Recession Signal** | 10Y-2Y 역전 시 위험자산 축소 | `signals/recession.py` | FRED T10Y2Y |
+| **Macro Event** | CPI/FOMC 발표 surprise 단기 채권/달러 | `strategies/macro_event.py` | 발표 캘린더 |
+| **Risk Appetite** | Term + Credit spread 위험선호 단계 | `signals/risk_appetite.py` | FRED 스프레드 |
+| **FX Exposure** | DXY/원달러 → 한국 수출주 헤지 | `risk/fx_exposure.py` | FRED DXY + ECOS 환율 |
+
 ## 패턴 정리
 
 | 전략 | 시간단위 | 우위의 원천 |

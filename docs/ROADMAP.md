@@ -45,6 +45,32 @@
 
 ---
 
+## Stage 1.6 — 거시경제 데이터 인프라
+
+**목표**: FRED + 한국은행 ECOS에서 핵심 매크로 시계열을 vintage 보존하며 수집, regime 분류 가능.
+
+**작업**:
+- [ ] `data/ingest/fred_macro.py` — FRED + ALFRED vintage API
+  - 필수 시리즈 15개 (DFF, DGS10, DGS2, T10Y2Y, CPIAUCSL, PCEPILFE, UNRATE, PAYEMS, GDPC1, M2SL, DTWEXBGS, VIXCLS 등)
+- [ ] `data/ingest/ecos_kr.py` — 한국은행 ECOS REST 호출
+  - 필수 시리즈 8개 (정책금리, 국고채 3Y/10Y, CPI, 실업률, 산업생산, 환율, 경상수지)
+- [ ] `data/ingest/macro_calendar.py` — 발표 캘린더 + actual/consensus → surprise 계산
+- [ ] DuckDB 테이블: `macro_series`, `macro_releases`, `macro_regime`
+- [ ] `data/catalog.py`에 `get_macro(series_id, as_of=, use_vintage=True)` 추가
+- [ ] regime classifier: GDP YoY × CPI YoY → 4사분면 + confidence
+- [ ] `tests/test_data/test_macro_pit.py` — vintage 회귀 테스트
+
+**검증 기준**:
+- [ ] FRED 핵심 15개 시리즈 30년치 수집
+- [ ] ECOS 핵심 8개 시리즈 20년치 수집 (한국은 미국보다 짧음)
+- [ ] `get_macro(series_id="GDPC1", as_of="2008-09-15")` → 발표된 적 있는 값만 반환 (vintage 동작 확인)
+- [ ] 2008-2009 침체기 regime이 "성장↓" 사분면으로 분류됨
+- [ ] CPI 발표 시각 lag 적용 — `release_ts` 이전 데이터로 거래 시 회귀 테스트 fail
+
+**왜 Stage 1.5 직후**: AQR 팩터(Stage 2)는 매크로 없이도 가능하지만, Risk Parity와 regime-aware 전략은 매크로가 필수. Stage 4 멀티전략 들어가기 전에 인프라 완성 필요.
+
+---
+
 ## Stage 2 — AQR 팩터 백테스트 (Value + Momentum + Quality)
 
 **목표**: 학술적으로 검증된 3-팩터 전략을 3시장에서 백테스트, Sharpe ≥ 1.0.
@@ -103,16 +129,23 @@
 - [ ] `signals/insider.py` — Form 4 + DART 임원보고
   - CEO/CFO 클러스터 매수 알림 (3명 이상 동시 매수)
 - [ ] `signals/revisions.py` — FMP 컨센서스 변경 모멘텀
+- [ ] `signals/recession.py` — Yield curve inversion 모니터 (Stage 1.6 매크로 활용)
+- [ ] `signals/risk_appetite.py` — Term + Credit spread → 위험선호 단계
+- [ ] `strategies/regime_switch.py` — 매크로 4사분면 기반 자산배분 전환
+- [ ] `strategies/macro_momentum.py` — Yield curve + real rate 모멘텀
 - [ ] `risk/short_interest.py` — 공매도 잔고 급증 모니터 (KRX + FINRA)
-- [ ] `pod/allocator.py` — Vol-target 리스크 예산
+- [ ] `risk/fx_exposure.py` — DXY/원달러 노출 모니터 (한국 수출주)
+- [ ] `pod/allocator.py` — Vol-target + regime-aware 리스크 예산
 - [ ] `pod/monitor.py` — 전략별 Sharpe/DD 실시간 추적
-- [ ] 대시보드 v2 — 전략별 기여도 + 시그널 알림
+- [ ] 대시보드 v2 — 전략별 기여도 + 시그널 알림 + 현재 매크로 regime
 
 **검증 기준**:
-- [ ] 5+ 전략 동시 운용 1주일 무사고
+- [ ] 7+ 전략 동시 운용 1주일 무사고
 - [ ] 통합 포트폴리오 Sharpe > 개별 평균 × 1.1 (분산 효과 입증)
 - [ ] 13F 미러링: 분기별 신규 진입 종목 6개월 보유 시 시장 대비 알파 ≥ 2%/년
 - [ ] 인사이더 클러스터 매수 후 90일 시장 대비 알파 ≥ 5%
+- [ ] regime classifier가 2020-03 (코로나) 시점에 "성장↓ 인플레↓" 사분면으로 분류
+- [ ] regime-aware risk parity가 정적 risk parity 대비 MaxDD ≥ 20% 개선
 - [ ] 시장간 상관계수가 낮음 검증 (미국/한국/크립토 < 0.5)
 
 ---
@@ -157,8 +190,9 @@
 |-------|--------|-----------|
 | 1 (가격 데이터) | 1주 | 3주 |
 | 1.5 (미시경제 데이터) | 1주 | 3주 |
+| 1.6 (거시경제 데이터 + regime) | 1주 | 3주 |
 | 2 (AQR + PEAD 백테스트) | 2주 | 6주 |
 | 3 (페이퍼) | 1주 | 3주 |
-| 4 (Pod + 시그널) | 3주 | 9주 |
+| 4 (Pod + 시그널 + regime-aware) | 4주 | 12주 |
 | 5 (라이브, 관찰 중심) | 4주 | 12주 |
-| **합계** | **12주** | **36주 (~9개월)** |
+| **합계** | **14주** | **42주 (~10개월)** |
