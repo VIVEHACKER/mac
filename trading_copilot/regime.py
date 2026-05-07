@@ -274,7 +274,17 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
 
     candidates: list[tuple[str, float, list[str]]] = []
     if panic_trigger:
-        candidates.append(("panic", 0.85, panic_trigger))
+        # Panic confidence is dynamic: deep panic stays at 0.85 (no blending),
+        # shallow panic drops to 0.65 (confidence_blending kicks in, blending
+        # the panic template with the next-best regime to capture partial
+        # rebound during 2020-05~07-style elevated-but-fading stress).
+        deep_panic = (
+            (indicators.vix is not None and indicators.vix >= 35.0)
+            or (indicators.spy_drawdown_252d is not None and indicators.spy_drawdown_252d <= -0.15)
+            or (indicators.credit_spread_hy is not None and indicators.credit_spread_hy >= 8.0)
+        )
+        panic_confidence = 0.85 if deep_panic else 0.65
+        candidates.append(("panic", panic_confidence, panic_trigger))
     if recovery_trigger:
         candidates.append(("recovery", 0.75, recovery_trigger))
     if recession_trigger:
