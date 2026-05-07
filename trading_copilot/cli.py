@@ -60,6 +60,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "news":
         return emit(workflows.news_report(args.ticker, limit=args.limit), args.output)
 
+    if args.command == "news-fast":
+        return emit(
+            workflows.fast_news_report(args.ticker, limit=args.limit),
+            args.output,
+        )
+
+    if args.command == "calendar":
+        return emit(
+            workflows.earnings_calendar_report(args.ticker, horizon=args.horizon),
+            args.output,
+        )
+
+    if args.command == "fundamentals":
+        return emit(workflows.fundamentals_report(args.ticker), args.output)
+
     if args.command == "signals":
         return emit(
             workflows.signals_report(
@@ -174,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
                 upside_pct=args.upside,
                 downside_pct=args.downside,
                 sector_industry_hint=args.industry,
+                include_fundamentals=not args.skip_fundamentals,
             ),
             args.output,
         )
@@ -246,6 +262,29 @@ def build_parser() -> argparse.ArgumentParser:
     news.add_argument("ticker")
     news.add_argument("--limit", type=int, default=5)
     news.add_argument("--output", type=Path)
+
+    news_fast = sub.add_parser(
+        "news-fast",
+        help="Aggregate faster ticker news from optional wire API, RSS, and SEC events.",
+    )
+    news_fast.add_argument("ticker")
+    news_fast.add_argument("--limit", type=int, default=20)
+    news_fast.add_argument("--output", type=Path)
+
+    calendar = sub.add_parser(
+        "calendar",
+        help="Fetch upcoming earnings calendar events.",
+    )
+    calendar.add_argument("ticker")
+    calendar.add_argument("--horizon", default="3month", choices=["3month", "6month", "12month"])
+    calendar.add_argument("--output", type=Path)
+
+    fundamentals = sub.add_parser(
+        "fundamentals",
+        help="Analyze basic financial statements from SEC companyfacts.",
+    )
+    fundamentals.add_argument("ticker")
+    fundamentals.add_argument("--output", type=Path)
 
     signals = sub.add_parser(
         "signals",
@@ -401,6 +440,11 @@ def build_parser() -> argparse.ArgumentParser:
     playbook.add_argument(
         "--industry",
         help="Industry/sector hint (ETF symbol or name). If omitted, the strongest current sector is used.",
+    )
+    playbook.add_argument(
+        "--skip-fundamentals",
+        action="store_true",
+        help="Skip the SEC EDGAR XBRL fundamentals fetch. Faster but composite reverts to 3-factor.",
     )
     playbook.add_argument("--output", type=Path)
 

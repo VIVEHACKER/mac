@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from datetime import date
 
+from .earnings_calendar import (
+    AlphaVantageEarningsCalendarProvider,
+    EarningsCalendarProvider,
+    format_earnings_calendar_report,
+)
 from .events import (
     EventProvider,
     NewsRssProvider,
     SecEdgarProvider,
     format_events_report,
     format_news_report,
+)
+from .fundamentals import (
+    FundamentalsProvider,
+    HybridFundamentalsProvider,
+    format_fundamentals_report,
 )
 from .industry_rotation import (
     PriceHistoryProvider,
@@ -27,6 +37,13 @@ from .macro import (
     MacroDataProvider,
     build_macro_dashboard,
     format_macro_report,
+)
+from .news_monitor import (
+    EventProviderNewsAdapter,
+    FastNewsProvider,
+    MarketauxNewsProvider,
+    build_fast_news_report,
+    collect_fast_news,
 )
 from .playbook import PlaybookBuilder, format_playbook_report
 from .portfolio import (
@@ -54,6 +71,9 @@ class TradingWorkflows:
         universe: UniverseProvider | None = None,
         macro: MacroDataProvider | None = None,
         industry_history: PriceHistoryProvider | None = None,
+        fast_news_providers: tuple[FastNewsProvider, ...] | None = None,
+        earnings_calendar: EarningsCalendarProvider | None = None,
+        fundamentals: FundamentalsProvider | None = None,
     ):
         self.skills = skills
         self.store = store
@@ -63,6 +83,9 @@ class TradingWorkflows:
         self.universe = universe or NasdaqTraderUniverseProvider()
         self.macro = macro or FredCsvProvider()
         self.industry_history = industry_history or YahooHistoryProvider()
+        self.fast_news_providers = fast_news_providers
+        self.earnings_calendar = earnings_calendar or AlphaVantageEarningsCalendarProvider()
+        self.fundamentals = fundamentals or HybridFundamentalsProvider()
 
     def playbook_report(
         self,
@@ -77,11 +100,13 @@ class TradingWorkflows:
         upside_pct: float = 0.5,
         downside_pct: float = 0.2,
         sector_industry_hint: str | None = None,
+        include_fundamentals: bool = True,
     ) -> str:
         builder = PlaybookBuilder(
             market_data=self.market_data,
             history_provider=self.industry_history,
             macro_provider=self.macro,
+            fundamentals_provider=self.fundamentals if include_fundamentals else None,
         )
         playbook = builder.build(
             ticker,
@@ -180,6 +205,29 @@ class TradingWorkflows:
     def news_report(self, ticker: str, limit: int = 5) -> str:
         normalized = normalize_ticker(ticker)
         return format_news_report(normalized, self._recent_news(normalized, limit))
+
+    def fast_news_report(self, ticker: str, limit: int = 20) -> str:
+        normalized = normalize_ticker(ticker)
+        providers = self.fast_news_providers or (
+            MarketauxNewsProvider(),
+            EventProviderNewsAdapter(self.news, "RSS"),
+            EventProviderNewsAdapter(self.events, "SEC"),
+        )
+        items, data_gaps = collect_fast_news(normalized, providers, limit=limit)
+        return build_fast_news_report(normalized, items, data_gaps=data_gaps)
+
+    def earnings_calendar_report(self, ticker: str, horizon: str = "3month") -> str:
+        normalized = normalize_ticker(ticker)
+        try:
+            events = self.earnings_calendar.earnings(normalized, horizon=horizon)
+            data_gaps = ()
+        except Exception as exc:
+            events = ()
+            data_gaps = (f"{self.earnings_calendar.__class__.__name__}: {exc}",)
+        return format_earnings_calendar_report(normalized, events, data_gaps=data_gaps)
+
+    def fundamentals_report(self, ticker: str) -> str:
+        return format_fundamentals_report(self.fundamentals.analysis(ticker))
 
     def signals_report(self, ticker: str, event_limit: int = 3, news_limit: int = 5) -> str:
         normalized = normalize_ticker(ticker)

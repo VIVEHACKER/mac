@@ -3,6 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+from .fundamentals import (
+    FundamentalsAnalysis,
+    FundamentalsProvider,
+    operating_margin,
+    quality_score as compute_quality_score,
+    return_on_assets,
+    return_on_equity,
+    trailing_pe,
+    value_score as compute_value_score,
+)
 from .industry_rotation import (
     IndustryRotationResult,
     IndustryScore,
@@ -62,11 +72,21 @@ class TechnicalScore:
 
 
 @dataclass(frozen=True)
+class FundamentalsScore:
+    quality: float
+    value: float
+    quality_notes: tuple[str, ...]
+    value_notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CompositeScore:
     cycle: float
     sector: float
     technical: float
     overall: float
+    quality: float | None = None
+    value: float | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +105,9 @@ class TickerPlaybook:
     reasons: tuple[str, ...]
     risks: tuple[str, ...]
     sector_table: tuple[IndustryScore, ...]
+    fundamentals: FundamentalsAnalysis | None = None
+    fundamentals_score: FundamentalsScore | None = None
+    fundamentals_error: str | None = None
 
 
 class PlaybookBuilder:
@@ -93,10 +116,12 @@ class PlaybookBuilder:
         market_data: MarketDataProvider | None = None,
         history_provider: PriceHistoryProvider | None = None,
         macro_provider: MacroDataProvider | None = None,
+        fundamentals_provider: FundamentalsProvider | None = None,
     ):
         self.market_data = market_data or YahooChartProvider()
         self.history_provider = history_provider or YahooHistoryProvider()
         self.macro_provider = macro_provider
+        self.fundamentals_provider = fundamentals_provider
 
     def build(
         self,
@@ -123,12 +148,32 @@ class PlaybookBuilder:
         rotation = analyze_industries(history_provider=self.history_provider)
         macro_dashboard = build_macro_dashboard(self.macro_provider)
 
+        fundamentals: FundamentalsAnalysis | None = None
+        fundamentals_score: FundamentalsScore | None = None
+        fundamentals_error: str | None = None
+        if self.fundamentals_provider is not None:
+            try:
+                fundamentals = self.fundamentals_provider.analysis(normalized)
+                quality, q_notes = compute_quality_score(fundamentals)
+                value, v_notes = compute_value_score(fundamentals, snapshot.price)
+                fundamentals_score = FundamentalsScore(
+                    quality=quality,
+                    value=value,
+                    quality_notes=q_notes,
+                    value_notes=v_notes,
+                )
+            except Exception as exc:
+                fundamentals_error = str(exc)
+                fundamentals = None
+                fundamentals_score = None
+
         cycle = score_cycle(macro_dashboard)
         sector = match_sector(rotation, sector_industry_hint)
         technical_score = score_technical(technical)
-        composite = composite_score(cycle, sector, technical_score)
+        composite = composite_score(cycle, sector, technical_score, fundamentals_score)
         recommendation, reasons, risks = derive_recommendation(
-            cycle, sector, technical_score, composite, technical
+            cycle, sector, technical_score, composite, technical,
+            fundamentals=fundamentals, fundamentals_score=fundamentals_score,
         )
 
         sizing: SizingPlan | None = None
@@ -162,6 +207,9 @@ class PlaybookBuilder:
             reasons=reasons,
             risks=risks,
             sector_table=rotation.current_leaders[:5] + rotation.next_leaders[:3],
+            fundamentals=fundamentals,
+            fundamentals_score=fundamentals_score,
+            fundamentals_error=fundamentals_error,
         )
 
 
@@ -270,8 +318,25 @@ def composite_score(
     cycle: CycleScore,
     sector: SectorScore,
     technical: TechnicalScore,
+    fundamentals: FundamentalsScore | None = None,
 ) -> CompositeScore:
     sector_value = _sector_to_value(sector)
+    if fundamentals is not None:
+        overall = (
+            0.20 * cycle.value
+            + 0.20 * sector_value
+            + 0.20 * technical.composite
+            + 0.20 * fundamentals.quality
+            + 0.20 * fundamentals.value
+        )
+        return CompositeScore(
+            cycle=cycle.value,
+            sector=sector_value,
+            technical=technical.composite,
+            overall=overall,
+            quality=fundamentals.quality,
+            value=fundamentals.value,
+        )
     overall = 0.30 * cycle.value + 0.30 * sector_value + 0.40 * technical.composite
     return CompositeScore(
         cycle=cycle.value,
@@ -298,6 +363,8 @@ def derive_recommendation(
     technical: TechnicalScore,
     composite: CompositeScore,
     profile: TechnicalProfile,
+    fundamentals: FundamentalsAnalysis | None = None,
+    fundamentals_score: FundamentalsScore | None = None,
 ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     reasons: list[str] = []
     risks: list[str] = []
@@ -345,6 +412,31 @@ def derive_recommendation(
             f"Annualized realized vol {profile.realized_vol_annualized * 100:.0f}% — size for survivable drawdown."
         )
 
+    if fundamentals is not None:
+        roe = return_on_equity(fundamentals)
+        op_m = operating_margin(fundamentals)
+        if fundamentals.revenue_growth is not None and fundamentals.revenue_growth >= 15:
+            reasons.append(
+                f"Revenue growth {fundamentals.revenue_growth:+.1f}% YoY indicates a high-growth business."
+            )
+        elif fundamentals.revenue_growth is not None and fundamentals.revenue_growth < 0:
+            risks.append(
+                f"Revenue is contracting ({fundamentals.revenue_growth:+.1f}% YoY). "
+                "Verify the thesis is not relying on a turnaround that has not materialized."
+            )
+        if roe is not None and roe >= 18:
+            reasons.append(f"ROE {roe:+.1f}% — capital is being compounded efficiently.")
+        elif roe is not None and roe < 0:
+            risks.append(f"ROE {roe:+.1f}% — company is destroying book equity.")
+        if op_m is not None and op_m >= 18:
+            reasons.append(f"Operating margin {op_m:+.1f}% supports pricing power thesis.")
+        elif op_m is not None and op_m < 0:
+            risks.append(f"Operating margin {op_m:+.1f}% — company is unprofitable at the operating line.")
+        if fundamentals.liabilities_to_equity is not None and fundamentals.liabilities_to_equity > 3:
+            risks.append(
+                f"Liabilities/Equity {fundamentals.liabilities_to_equity:.2f}x — balance sheet leverage is elevated."
+            )
+
     if composite.overall >= 75 and not cycle.is_risk_off:
         recommendation = "Strong Buy Window"
     elif composite.overall >= 60:
@@ -373,6 +465,7 @@ def format_playbook_report(playbook: TickerPlaybook) -> str:
         f"- Sector: {playbook.composite.sector:.1f} "
         f"({playbook.sector.matched_industry or 'no sector matched'})",
         f"- Technical: {playbook.composite.technical:.1f}",
+        *_format_fundamentals_score_lines(playbook.composite),
         "",
         "## Technicals",
         f"- Last close: {playbook.technical.last_close:.2f}",
@@ -444,6 +537,50 @@ def format_playbook_report(playbook: TickerPlaybook) -> str:
             f"{score.leadership_score:+.1f} |"
         )
 
+    if playbook.fundamentals is not None and playbook.fundamentals_score is not None:
+        analysis = playbook.fundamentals
+        score = playbook.fundamentals_score
+        roe = return_on_equity(analysis)
+        roa = return_on_assets(analysis)
+        op_m = operating_margin(analysis)
+        pe = trailing_pe(analysis, playbook.snapshot.price)
+        lines.extend(
+            [
+                "",
+                "## Fundamentals (SEC EDGAR XBRL, latest 10-K)",
+                f"- Revenue: {_fmt_money(analysis.revenue)}",
+                f"- Revenue growth (YoY): {_fmt_pct(analysis.revenue_growth)}",
+                f"- Net income: {_fmt_money(analysis.net_income)}",
+                f"- Net margin: {_fmt_pct(analysis.net_margin)}",
+                f"- Operating margin: {_fmt_pct(op_m)}",
+                f"- ROE: {_fmt_pct(roe)}",
+                f"- ROA: {_fmt_pct(roa)}",
+                f"- Liabilities/Equity: {_fmt_ratio(analysis.liabilities_to_equity)}",
+                f"- Free cash flow: {_fmt_money(analysis.free_cash_flow)}",
+                f"- Trailing P/E: {pe:.1f}" if pe is not None else "- Trailing P/E: n/a",
+                f"- Source: {analysis.source}",
+                "",
+                f"### Quality Score: {score.quality:.0f} / 100",
+            ]
+        )
+        lines.extend(f"- {n}" for n in score.quality_notes)
+        lines.extend(["", f"### Value Score: {score.value:.0f} / 100"])
+        lines.extend(f"- {n}" for n in score.value_notes)
+    elif playbook.fundamentals_error is not None:
+        lines.extend(
+            [
+                "",
+                "## Fundamentals",
+                f"- Unavailable: {playbook.fundamentals_error}",
+                "- Verify ROE, margin, growth, and P/E manually before sizing.",
+            ]
+        )
+
+    fundamentals_status = (
+        "- Fundamentals: included from SEC XBRL companyfacts."
+        if playbook.fundamentals_score is not None
+        else "- Fundamentals: not in composite (provider not configured or fetch failed)."
+    )
     lines.extend(
         [
             "",
@@ -451,10 +588,37 @@ def format_playbook_report(playbook: TickerPlaybook) -> str:
             "- This is a screen, not a trigger. Confirm catalyst, valuation, and thesis manually.",
             "- Honor the hard stop. Single-name 1000% wins still need an invalidation point.",
             "- Re-run weekly. Macro regime and sector leadership shift; the composite score is not static.",
-            "- Fundamentals (ROE, margin, growth, P/E) are NOT in this version yet — add manually before sizing.",
+            fundamentals_status,
         ]
     )
     return "\n".join(lines)
+
+
+def _format_fundamentals_score_lines(composite: CompositeScore) -> list[str]:
+    if composite.quality is None or composite.value is None:
+        return []
+    return [
+        f"- Quality (fundamentals): {composite.quality:.1f}",
+        f"- Value (P/E and PEG): {composite.value:.1f}",
+    ]
+
+
+def _fmt_money(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if abs(value) >= 1e9:
+        return f"{value / 1e9:,.2f} B"
+    if abs(value) >= 1e6:
+        return f"{value / 1e6:,.2f} M"
+    return f"{value:,.0f}"
+
+
+def _fmt_pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:+.2f}%"
+
+
+def _fmt_ratio(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}"
 
 
 __all__ = [
@@ -462,6 +626,7 @@ __all__ = [
     "CycleScore",
     "SectorScore",
     "TechnicalScore",
+    "FundamentalsScore",
     "CompositeScore",
     "PlaybookBuilder",
     "score_cycle",

@@ -10,13 +10,83 @@ from trading_copilot.macro import (
     MacroObservation,
 )
 from trading_copilot.market_data import MarketSnapshot
+from trading_copilot.fundamentals import analyze_company_facts
 from trading_copilot.playbook import (
+    FundamentalsScore,
     PlaybookBuilder,
     composite_score,
     format_playbook_report,
     score_cycle,
     score_technical,
 )
+
+
+FUNDAMENTALS_FIXTURE = {
+    "facts": {
+        "us-gaap": {
+            "Revenues": {
+                "units": {
+                    "USD": [
+                        {"form": "10-K", "fy": 2025, "fp": "FY", "filed": "2025-07-30", "end": "2025-06-30", "val": 200000.0},
+                        {"form": "10-K", "fy": 2026, "fp": "FY", "filed": "2026-07-30", "end": "2026-06-30", "val": 240000.0},
+                    ]
+                }
+            },
+            "NetIncomeLoss": {
+                "units": {
+                    "USD": [
+                        {"form": "10-K", "fy": 2026, "fp": "FY", "filed": "2026-07-30", "end": "2026-06-30", "val": 60000.0},
+                    ]
+                }
+            },
+            "OperatingIncomeLoss": {
+                "units": {
+                    "USD": [
+                        {"form": "10-K", "fy": 2026, "fp": "FY", "filed": "2026-07-30", "end": "2026-06-30", "val": 72000.0},
+                    ]
+                }
+            },
+            "Assets": {
+                "units": {
+                    "USD": [
+                        {"form": "10-K", "fy": 2026, "fp": "FY", "filed": "2026-07-30", "end": "2026-06-30", "val": 400000.0},
+                    ]
+                }
+            },
+            "Liabilities": {
+                "units": {
+                    "USD": [
+                        {"form": "10-K", "fy": 2026, "fp": "FY", "filed": "2026-07-30", "end": "2026-06-30", "val": 100000.0},
+                    ]
+                }
+            },
+            "StockholdersEquity": {
+                "units": {
+                    "USD": [
+                        {"form": "10-K", "fy": 2026, "fp": "FY", "filed": "2026-07-30", "end": "2026-06-30", "val": 240000.0},
+                    ]
+                }
+            },
+            "EarningsPerShareDiluted": {
+                "units": {
+                    "USD/shares": [
+                        {"form": "10-K", "fy": 2026, "fp": "FY", "filed": "2026-07-30", "end": "2026-06-30", "val": 8.0},
+                    ]
+                }
+            },
+        }
+    }
+}
+
+
+class StaticFundamentalsProvider:
+    def analysis(self, ticker: str):
+        return analyze_company_facts(ticker, FUNDAMENTALS_FIXTURE, source="fixture")
+
+
+class FailingFundamentalsProvider:
+    def analysis(self, ticker: str):
+        raise RuntimeError("simulated SEC fetch failure")
 
 
 def make_history(symbol: str, *, drift: float, days: int = 260) -> tuple[PricePoint, ...]:
@@ -223,6 +293,63 @@ class PlaybookTests(unittest.TestCase):
         self.assertIn("Position Sizing", report)
         self.assertIn("Sector Context", report)
         self.assertIn("Not investment advice", report)
+
+    def test_playbook_includes_fundamentals_when_provider_supplied(self):
+        history = StaticHistoryProvider(
+            {
+                "MSFT": make_history("MSFT", drift=0.003),
+                "SPY": make_history("SPY", drift=0.001),
+            }
+        )
+        for proxy in DEFAULT_INDUSTRY_PROXIES:
+            history.mapping.setdefault(proxy.symbol.upper(), make_history(proxy.symbol, drift=0.0005))
+
+        builder = PlaybookBuilder(
+            market_data=StaticMarketData(last_close=80.0),  # P/E = 80/8 = 10 -> cheap
+            history_provider=history,
+            macro_provider=disinflationary_macro(),
+            fundamentals_provider=StaticFundamentalsProvider(),
+        )
+        playbook = builder.build("MSFT", aum=100_000)
+
+        self.assertIsNotNone(playbook.fundamentals)
+        self.assertIsNotNone(playbook.fundamentals_score)
+        self.assertIsNotNone(playbook.composite.quality)
+        self.assertIsNotNone(playbook.composite.value)
+        # Quality fixture: ROE=60000/240000=25%, op margin 30%, growth 20%, ROA 15%, L/E 0.42 -> high
+        self.assertGreaterEqual(playbook.fundamentals_score.quality, 80.0)
+        # Value fixture at price 80: P/E = 10 -> 50/50, PEG = 10/20 = 0.5 -> 50/50 -> 100/100
+        self.assertGreaterEqual(playbook.fundamentals_score.value, 90.0)
+
+        report = format_playbook_report(playbook)
+        self.assertIn("Quality Score:", report)
+        self.assertIn("Value Score:", report)
+        self.assertIn("Trailing P/E", report)
+
+    def test_playbook_falls_back_when_fundamentals_provider_fails(self):
+        history = StaticHistoryProvider(
+            {
+                "MSFT": make_history("MSFT", drift=0.003),
+                "SPY": make_history("SPY", drift=0.001),
+            }
+        )
+        for proxy in DEFAULT_INDUSTRY_PROXIES:
+            history.mapping.setdefault(proxy.symbol.upper(), make_history(proxy.symbol, drift=0.0005))
+
+        builder = PlaybookBuilder(
+            market_data=StaticMarketData(last_close=420.0),
+            history_provider=history,
+            macro_provider=disinflationary_macro(),
+            fundamentals_provider=FailingFundamentalsProvider(),
+        )
+        playbook = builder.build("MSFT")
+
+        self.assertIsNone(playbook.fundamentals)
+        self.assertIsNone(playbook.fundamentals_score)
+        self.assertIsNone(playbook.composite.quality)
+        self.assertIsNone(playbook.composite.value)
+        self.assertIsNotNone(playbook.fundamentals_error)
+        self.assertIn("simulated", playbook.fundamentals_error)
 
 
 if __name__ == "__main__":

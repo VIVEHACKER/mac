@@ -16,6 +16,9 @@ python -m trading_copilot thesis set MSFT --direction long --statement "Azure gr
 python -m trading_copilot quote MSFT --output out\quote-MSFT.md
 python -m trading_copilot events MSFT --limit 5 --output out\events-MSFT.md
 python -m trading_copilot news MSFT --limit 5 --output out\news-MSFT.md
+python -m trading_copilot news-fast MSFT --limit 20 --output out\fast-news-MSFT.md
+python -m trading_copilot calendar MSFT --horizon 3month --output out\calendar-MSFT.md
+python -m trading_copilot fundamentals MSFT --output out\fundamentals-MSFT.md
 python -m trading_copilot signals MSFT --event-limit 3 --news-limit 5 --output out\signals-MSFT.md
 python -m trading_copilot macro --output out\macro-cycle.md
 python -m trading_copilot industries --current-limit 10 --next-limit 10 --output out\industry-leadership.md --csv-output out\industry-leadership.csv
@@ -32,6 +35,9 @@ python -m trading_copilot pretrade MSFT --side buy --risk-budget "1% portfolio r
 - `quote`: sourced quote snapshot from Yahoo Finance chart data
 - `events`: recent SEC EDGAR filing events by ticker
 - `news`: recent RSS news headlines by ticker
+- `news-fast`: faster headline monitor combining optional Marketaux ticker news, RSS, and SEC filing events
+- `calendar`: upcoming earnings calendar events through Alpha Vantage when `ALPHAVANTAGE_API_KEY` is set
+- `fundamentals`: basic SEC companyfacts financial statement analysis: revenue growth, margin, balance sheet leverage, and free cash flow
 - `signals`: earnings-forecast leading signals from contracts, guidance, demand, margin, regulatory, and filing events
 - `macro`: FRED-based macro cycle dashboard covering CPI, core CPI, unemployment, Fed funds, the 10Y-2Y yield curve, industrial production, and retail sales
 - `industries`: ETF-proxy rotation radar that separates current leading industries from next-leader candidates using 1M/3M/6M relative strength and acceleration
@@ -63,8 +69,31 @@ The sizing is the minimum of three constraints:
 2. Volatility-targeted weight (target vol / asset's 60-day realized vol)
 3. Hard risk cap (max loss as % of AUM if stop is hit)
 
-Plus a hard concentration cap (`--max-position`). Fundamentals (ROE, margin,
-revenue growth, P/E) are NOT yet built in; verify those manually before sizing.
+Plus a hard concentration cap (`--max-position`).
+
+When `fundamentals_provider` is configured (default uses SEC EDGAR XBRL
+`companyfacts`), the composite score becomes a 5-factor weighted average:
+20% Macro Cycle + 20% Sector + 20% Technical + 20% Quality + 20% Value.
+
+- **Quality (0-100)**: ROE (25), operating or net margin (25), revenue growth
+  YoY (20), ROA (15), Liabilities/Equity (15).
+- **Value (0-100)**: Trailing P/E (50) + PEG (50). PEG defaults to 25/50 when
+  earnings are negative or growth is non-positive.
+
+Pass `--skip-fundamentals` to disable the SEC fetch (faster; reverts to the
+3-factor 30/30/40 composite). Set `TRADING_COPILOT_CONTACT="Your Name email@host"`
+to identify yourself to SEC EDGAR per their fair-access policy.
+
+### Optional API keys
+
+```powershell
+$env:MARKETAUX_API_KEY="your-key"
+$env:ALPHAVANTAGE_API_KEY="your-key"
+```
+
+Without `MARKETAUX_API_KEY`, `news-fast` still uses RSS and SEC events but reports
+the missing wire/news API as a data gap. Without `ALPHAVANTAGE_API_KEY`,
+`calendar` emits a data-gap section instead of failing the run.
 
 `macro` tries the FRED CSV endpoint first. If the local network times out or
 blocks FRED, it falls back to GovSpending JSON exports that mirror FRED series
