@@ -206,6 +206,7 @@ def _credit_spread(provider: MacroDataProvider) -> tuple[float | None, str | Non
 
 REGIME_LABELS = {
     "panic": "Panic / Risk-Off Crisis",
+    "recovery": "V-Bottom Recovery",
     "recession": "Recession",
     "stagflation": "Stagflation Risk",
     "inflation_shock": "Inflation Shock",
@@ -224,6 +225,7 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
     confidence = 0.5
 
     panic_trigger = _check_panic(indicators)
+    recovery_trigger = _check_recovery(indicators) if not panic_trigger else None
     recession_trigger = _check_recession(indicators)
     inflation_trigger = _check_inflation_shock(indicators)
     deflation_trigger = _check_deflation(indicators)
@@ -234,6 +236,8 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
     candidates: list[tuple[str, float, list[str]]] = []
     if panic_trigger:
         candidates.append(("panic", 0.85, panic_trigger))
+    if recovery_trigger:
+        candidates.append(("recovery", 0.75, recovery_trigger))
     if recession_trigger:
         candidates.append(("recession", 0.75, recession_trigger))
     if inflation_trigger:
@@ -289,24 +293,79 @@ def _check_panic(indicators: RegimeIndicators) -> list[str] | None:
 
 
 def _check_recession(indicators: RegimeIndicators) -> list[str] | None:
+    """Recession requires labor weakening AND a hard-data confirmation.
+
+    Tightened from the original 'any 2 of 4 signals' rule which produced false
+    positives in 2024 (rising unemployment off historic lows + flat curve was
+    enough to fire even though INDPRO/retail were both expanding).
+    """
     triggers = []
-    if indicators.unemployment_6m_delta >= 0.5:
+    sahm_zone = indicators.unemployment_6m_delta >= 0.5
+    labor_absolute_high = (
+        indicators.unemployment is not None and indicators.unemployment >= 4.5
+    )
+    indpro_contracting = (
+        indicators.indpro_yoy is not None and indicators.indpro_yoy < 0
+    )
+    retail_contracting = (
+        indicators.retail_yoy is not None and indicators.retail_yoy < 0
+    )
+    curve_deeply_inverted = (
+        indicators.yield_curve_spread is not None
+        and indicators.yield_curve_spread < -0.3
+    )
+
+    labor_breaking = sahm_zone or (
+        labor_absolute_high and indicators.unemployment_6m_delta >= 0.3
+    )
+    hard_data_confirms = indpro_contracting or retail_contracting
+
+    if not (labor_breaking and hard_data_confirms):
+        return None
+
+    if sahm_zone:
         triggers.append(
             f"Unemployment +{indicators.unemployment_6m_delta:.2f}ppt 6m (Sahm trigger zone)"
         )
-    if indicators.indpro_yoy is not None and indicators.indpro_yoy < 0:
+    if labor_absolute_high and indicators.unemployment is not None:
+        triggers.append(
+            f"Unemployment level {indicators.unemployment:.1f}% (≥4.5%, off cycle low)"
+        )
+    if indpro_contracting:
         triggers.append(f"INDPRO {indicators.indpro_yoy:+.1f}% YoY (contracting)")
-    if indicators.retail_yoy is not None and indicators.retail_yoy < 0:
+    if retail_contracting:
         triggers.append(f"Retail sales {indicators.retail_yoy:+.1f}% YoY (contracting)")
-    if (
-        indicators.yield_curve_spread is not None
-        and indicators.yield_curve_spread < -0.3
-    ):
+    if curve_deeply_inverted:
         triggers.append(
             f"10Y-2Y curve {indicators.yield_curve_spread:+.2f}ppt (deeply inverted)"
         )
-    if len(triggers) >= 2:
-        return triggers
+    return triggers
+
+
+def _check_recovery(indicators: RegimeIndicators) -> list[str] | None:
+    """V-bottom recovery: panic has passed but the market is still off recent highs.
+
+    Tries to capture the post-2009-March / post-2020-April / post-2022-October
+    pattern where SPY is no longer in -12% drawdown but VIX is still elevated
+    relative to its 20d trailing average's earlier peak.
+    """
+    if indicators.vix is None or indicators.vix_20d_avg is None:
+        return None
+    if indicators.spy_drawdown_252d is None:
+        return None
+    vix = indicators.vix
+    drawdown = indicators.spy_drawdown_252d
+    vix_20d = indicators.vix_20d_avg
+
+    drawdown_in_recovery_band = -0.18 < drawdown < -0.03
+    vix_still_elevated = vix > 18.0
+    vix_descending = vix < vix_20d * 0.95
+
+    if drawdown_in_recovery_band and vix_still_elevated and vix_descending:
+        return [
+            f"SPY drawdown {drawdown * 100:.1f}% (off the lows but not at highs)",
+            f"VIX {vix:.1f} below 20d avg {vix_20d:.1f} (fear unwinding)",
+        ]
     return None
 
 
@@ -394,6 +453,11 @@ def _build_summary(primary: str, indicators: RegimeIndicators) -> str:
             "Risk-off crisis conditions: elevated VIX, equity drawdown, or credit "
             "stress. Capital preservation outweighs upside chasing."
         )
+    if primary == "recovery":
+        return (
+            "Post-panic V-bottom recovery: SPY off the lows, VIX falling but still "
+            "elevated. Risk-on but with fast-revert hedges in case the recovery aborts."
+        )
     if primary == "recession":
         return (
             "Recession signals firing: rising unemployment plus contracting "
@@ -442,6 +506,36 @@ def _alloc(asset: str, etf: str, weight: float, rationale: str) -> TargetAllocat
 
 
 TEMPLATES: dict[str, PortfolioTemplate] = {
+    "recovery": PortfolioTemplate(
+        regime="recovery",
+        description=(
+            "V-bottom recovery playbook. Panic has passed (drawdown easing, VIX "
+            "falling) but the market is not yet at new highs. Lean risk-on with "
+            "fast hedges in case the recovery aborts."
+        ),
+        allocations=(
+            _alloc("US large-cap", "VOO", 22.0, "Standard recovery beneficiary."),
+            _alloc("Growth tech", "QQQ", 16.0, "Multiple expansion as fear unwinds."),
+            _alloc("Semiconductors", "SMH", 10.0, "High-beta cyclical leverage in early cycle."),
+            _alloc("Small-cap", "IWM", 8.0, "Highest beta to recovery; cheap valuations."),
+            _alloc("Quality dividend", "SCHD", 6.0, "Stable cash flow during the rebuild."),
+            _alloc("Energy", "XLE", 5.0, "Late-cycle confirmation; cyclical earnings."),
+            _alloc("Long Treasuries", "TLT", 6.0, "Mild duration if recovery aborts."),
+            _alloc("Gold", "GLD", 7.0, "Tail hedge if Fed has to ease again."),
+            _alloc("Cash / T-bills", "BIL", 20.0, "Optionality if the V-bottom turns into W."),
+        ),
+        avoid=(
+            "Pure defensives at full size (XLU, XLP, UUP overweight)",
+            "Long-vol products at full size (VIXY decays fast)",
+        ),
+        exit_triggers=(
+            "VIX < 18 sustained 2+ weeks → upgrade to easy_money / disinflation_expansion",
+            "SPY makes a new 252d high → upgrade to expansion regime",
+            "VIX spikes back above 30 → revert to panic template",
+        ),
+        rebalance="Bi-weekly during the recovery; daily monitor VIX and credit spreads.",
+        vix_throttle="VIX > 25 → trim QQQ/SMH 25%; VIX > 30 → revert toward panic.",
+    ),
     "panic": PortfolioTemplate(
         regime="panic",
         description=(
@@ -699,11 +793,92 @@ def build_regime_report(
     macro_dashboard = build_macro_dashboard(macro)
     indicators = gather_indicators(macro_dashboard, macro_provider, history)
     reading = classify_regime(indicators)
-    template = TEMPLATES.get(reading.primary, TEMPLATES["transition"])
+    base_template = TEMPLATES.get(reading.primary, TEMPLATES["transition"])
+    template = apply_vix_overlay(base_template, indicators.vix)
     return RegimeReport(
         as_of=macro_dashboard.as_of,
         reading=reading,
         template=template,
+    )
+
+
+# Regimes whose risk profile is sensitive to VIX (calm = lean risk-on, stress = lean risk-off).
+# Stable / explicit-stance regimes (panic, inflation_shock, deflation_risk) are NOT overlaid
+# because their templates already encode the risk posture.
+_VIX_SENSITIVE_REGIMES = frozenset(
+    {"transition", "disinflation_expansion", "easy_money", "recovery", "stagflation"}
+)
+_VIX_OVERLAY_RULES: dict[str, int] = {
+    "BIL": -10,
+    "SHV": -8,
+    "VOO": +5,
+    "QQQ": +4,
+    "IWM": +2,
+    "SMH": +2,
+    "VTV": +2,
+}
+
+
+def apply_vix_overlay(template: PortfolioTemplate, vix: float | None) -> PortfolioTemplate:
+    """Adjust template weights based on VIX level.
+
+    VIX < 18 (calm): reduce cash/short-duration sleeves and boost risk-on equity.
+    VIX > 25 (stress): the opposite — boost cash, trim equity.
+    Only applies to risk-on / mixed regimes; explicit panic and inflation/deflation
+    templates are left untouched because their stance is already deliberate.
+    """
+    if vix is None or template.regime not in _VIX_SENSITIVE_REGIMES:
+        return template
+
+    if vix < 18.0:
+        direction = +1
+        label = f"VIX {vix:.1f} < 18 → cash trimmed, equity boosted"
+    elif vix > 25.0:
+        direction = -1
+        label = f"VIX {vix:.1f} > 25 → equity trimmed, cash boosted"
+    else:
+        return template
+
+    new_allocs = []
+    for alloc in template.allocations:
+        delta = _VIX_OVERLAY_RULES.get(alloc.proxy_etf, 0) * direction
+        new_weight = alloc.weight_pct + delta
+        if new_weight < 0:
+            new_weight = 0.0
+        if delta != 0:
+            note = f"{alloc.rationale} [VIX overlay {delta:+d}pp]"
+        else:
+            note = alloc.rationale
+        new_allocs.append(
+            TargetAllocation(
+                asset_class=alloc.asset_class,
+                proxy_etf=alloc.proxy_etf,
+                weight_pct=new_weight,
+                rationale=note,
+            )
+        )
+
+    total = sum(a.weight_pct for a in new_allocs)
+    if total > 0 and abs(total - 100.0) > 0.001:
+        scale = 100.0 / total
+        new_allocs = [
+            TargetAllocation(
+                asset_class=a.asset_class,
+                proxy_etf=a.proxy_etf,
+                weight_pct=a.weight_pct * scale,
+                rationale=a.rationale,
+            )
+            for a in new_allocs
+        ]
+
+    return PortfolioTemplate(
+        regime=template.regime,
+        description=f"{template.description} [{label}]",
+        allocations=tuple(new_allocs),
+        avoid=template.avoid,
+        exit_triggers=template.exit_triggers,
+        rebalance=template.rebalance,
+        vix_throttle=template.vix_throttle,
     )
 
 
@@ -930,4 +1105,5 @@ __all__ = [
     "classify_regime",
     "build_regime_report",
     "format_regime_report",
+    "apply_vix_overlay",
 ]

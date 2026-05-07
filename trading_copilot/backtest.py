@@ -24,6 +24,7 @@ from .regime import (
     RegimeIndicators,
     REGIME_LABELS,
     TEMPLATES,
+    apply_vix_overlay,
     classify_regime,
 )
 
@@ -118,7 +119,8 @@ def run_backtest(
     while cursor <= last_cursor:
         indicators = _gather_indicators_at(cursor, macro_series, history_cache)
         reading = classify_regime(indicators)
-        template = TEMPLATES.get(reading.primary, TEMPLATES["transition"])
+        base_template = TEMPLATES.get(reading.primary, TEMPLATES["transition"])
+        template = apply_vix_overlay(base_template, indicators.vix)
 
         portfolio_return, coverage = _portfolio_forward_return(
             cursor, template, history_cache, holding_days
