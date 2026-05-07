@@ -13,6 +13,7 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 **거시경제 데이터**: FRED + ALFRED vintage + 한국은행 ECOS (regime/yield curve/CPI)
 **Sentiment & Flow**: KRX 투자자별 매매 + CFTC COT + GDELT + Reddit
 **파생·마이크로구조**: Crypto funding/OI/L-S (CCXT) + CBOE VIX·SKEW·Put-Call + Deribit
+**Valuation·진입**: DCF + Peer Multiples + RIM (주식) / NVT·MVRV (크립토) → MoS ladder
 **파이프라인**: Backtest → Paper → Live (동일 코드)
 
 ## 첫 액션 순서
@@ -31,6 +32,7 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 5. **Stage 1.6** — FRED + ECOS 거시 데이터 + vintage(ALFRED) + regime classifier
 6. **Stage 1.7** — KRX flows + CFTC COT + GDELT + Reddit (sentiment & flow)
 7. **Stage 1.8** — Crypto funding/OI + CBOE VIX/SKEW/Put-Call + Deribit (파생/마이크로구조)
+8. **Stage 2.5** — DCF/Multiples/RIM + MoS ladder (적정가/고저평가/진입가)
 
 ## 문서 우선순위
 
@@ -43,7 +45,8 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 6. `docs/MACROECONOMIC_DATA.md` — FRED/ECOS 거시 + vintage + regime 4사분면
 7. `docs/SENTIMENT_FLOW.md` — KRX 투자자별 매매 + CFTC COT + GDELT + Reddit
 8. `docs/DERIVATIVES_DATA.md` — Crypto perp 마이크로구조 + 옵션 sentiment + IV
-9. `docs/ROADMAP.md` — 8단계 로드맵 + 검증 기준 (Stage 1.5~1.8 포함)
+9. `docs/VALUATION.md` — DCF/Multiples/RIM/크립토 NVT-MVRV + MoS ladder 진입가
+10. `docs/ROADMAP.md` — 9단계 로드맵 + 검증 기준 (Stage 1.5~1.8, 2.5 포함)
 
 ## 작업 규칙 (이전 세션에서 합의)
 
@@ -55,6 +58,8 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 - **Point-in-time 강제** — 펀더멘털/공시는 발표일(asof) 이후만 사용. catalog.py가 `as_of=` 파라미터 강제
 - **매크로 vintage 사용** — FRED ALFRED로 발표 시점 값 조회. 현재 revision 값으로 과거 백테스트 금지
 - **데이터 소스 교차검증** — yfinance ↔ SEC EDGAR ±5% 이상 차이 시 EDGAR 신뢰
+- **Valuation 입력값 기록 필수** — DCF의 WACC/growth, peer 리스트 모두 valuations 테이블에 저장. 재현 안 되면 신뢰 불가
+- **Fair value ≠ 진입가** — 적정가에 도달한다는 보장 없음. 항상 MoS + ATR ladder로 분할 진입
 
 ## 가장 먼저 구현할 전략
 

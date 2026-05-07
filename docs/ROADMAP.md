@@ -162,6 +162,43 @@
 
 ---
 
+## Stage 2.5 — Valuation & Entry 추천
+
+**목표**: 적정가/고저평가 점수/진입가 ladder 자동 산출. 백테스트 검증된 종목에 대해 "얼마에 사야 하는가" 결정.
+
+**작업**:
+- [ ] `valuation/dcf.py` — DCF 계산
+  - 과거 5년 FCF 성장률 → fade to GDP growth (FRED)
+  - WACC 자동 계산 (FRED 무위험금리 + 자체 베타 + ERP 가정)
+  - 민감도 매트릭스 (WACC ±1%, g ±1%)
+- [ ] `valuation/multiples.py` — Peer 상대 평가
+  - GICS Sector + Industry + 시총 ±50% peer 자동 선택 (5~15개)
+  - P/E, EV/EBITDA, P/B, P/S median multiples
+- [ ] `valuation/rim.py` — Residual Income Model (은행/보험)
+- [ ] `valuation/crypto_valuation.py` — NVT, MVRV, S2F, DeFi PE
+- [ ] `valuation/peer_groups.py` — GICS 매핑 캐시
+- [ ] `valuation/composite.py` — 산업별 가중 통합 fair value + dispersion
+- [ ] `valuation/score.py` — z-score → -3~+3 rating + 신뢰도
+- [ ] `valuation/entry.py` — MoS + ATR ladder + 손절/목표가
+- [ ] DuckDB 테이블: `valuations`, `valuation_scores`, `entry_plans`, `peer_groups`
+- [ ] 분기 어닝 후 24h 내 자동 재계산 cron
+- [ ] 일일 valuation_scores 갱신 (시장가 변동 따라)
+- [ ] `strategies/value_long.py` — rating ≥ +2 종목 매수 전략
+- [ ] 대시보드 v3 — 보유/관심 종목별 fair value, score, entry plan 표시
+
+**검증 기준**:
+- [ ] AAPL/MSFT/JPM/005930(삼성전자) DCF fair value가 컨센서스 평균 ± 30% 이내
+- [ ] 2008-09 시점에서 미국 대형주 절반 이상이 rating ≥ +2 (저평가)로 분류
+- [ ] 2021-12 시점에서 성장주 (TSLA 등) rating ≤ -2 (고평가)로 분류
+- [ ] DCF 입력값 (WACC, growth) 모두 valuations 테이블에 기록되어 재계산 가능
+- [ ] Peer median 산출 시 5개 미만이면 score 신뢰도 = low로 자동 표기
+- [ ] BTC NVT > 90 percentile 시점에서 다음 90일 평균 수익률 음수 검증
+- [ ] Entry ladder 권장가가 항상 current 이하, 손절 < 진입가 < 목표가 정합성
+
+**Why 이 시점**: Stage 2 백테스트로 알파 검증 → 검증된 종목에 valuation으로 진입 시점 추가 알파 → Stage 3 페이퍼에서 ladder 실제 동작 확인.
+
+---
+
 ## Stage 3 — Alpaca 페이퍼 트레이딩
 
 **목표**: Stage 2 검증된 전략을 Alpaca 페이퍼 계정에서 실시간 시그널 송출, 7일 무사고.
@@ -265,7 +302,8 @@
 | 1.7 (sentiment & flow) | 1주 | 3주 |
 | 1.8 (파생/마이크로구조) | 0.5주 | 2주 |
 | 2 (AQR + PEAD 백테스트) | 2주 | 6주 |
+| 2.5 (Valuation & Entry) | 1.5주 | 4주 |
 | 3 (페이퍼) | 1주 | 3주 |
 | 4 (Pod + 시그널 + regime + flow) | 4주 | 12주 |
 | 5 (라이브, 관찰 중심) | 4주 | 12주 |
-| **합계** | **15.5주** | **47주 (~11개월)** |
+| **합계** | **17주** | **51주 (~12개월)** |

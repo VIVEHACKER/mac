@@ -84,6 +84,16 @@ trader/
 │   │   ├── derivatives/     # Crypto funding/OI/L-S, 옵션 sentiment, 옵션 체인
 │   │   └── catalog.duckdb
 │   └── catalog.py           # 통합 카탈로그 — `as_of=` 강제로 look-ahead 방지
+├── valuation/               # 신규: 적정가/평가/진입가 모듈
+│   ├── _base.py             # Valuator 추상 클래스
+│   ├── dcf.py               # DCF 계산 + WACC/growth 민감도
+│   ├── multiples.py         # P/E, EV/EBITDA, P/B, P/S peer 비교
+│   ├── rim.py               # Residual Income Model (금융주 강함)
+│   ├── crypto_valuation.py  # NVT, MVRV, S2F, DeFi PE
+│   ├── peer_groups.py       # GICS + 시총 ±50% peer 선택
+│   ├── composite.py         # 산업별 가중 통합 fair value
+│   ├── score.py             # z-score → -3~+3 rating
+│   └── entry.py             # MoS + technical + ATR ladder
 ├── strategies/
 │   ├── _base.py             # Strategy 추상 클래스
 │   ├── factor_aqr.py        # Value + Momentum + Quality (펀더멘털 활용)
@@ -97,7 +107,8 @@ trader/
 │   ├── revisions.py         # Earnings revision 모멘텀
 │   ├── funding_arb.py       # Crypto perp 펀딩-스팟 차익 (펀딩 받으며 spot 매수)
 │   ├── iv_crush.py          # 어닝 임박 IV 급등 → 발표 후 매도
-│   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 + 매크로 결합
+│   ├── value_long.py        # valuation rating ≥ +2 종목 매수 (Buffett-style)
+│   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 + 매크로 + valuation 결합
 ├── signals/                 # 미시·거시·sentiment 기반 알파/시그널
 │   ├── activist_13f.py      # 13F 신규/증가 — Pershing/Tiger 미러
 │   ├── insider.py           # Form 4 + DART 임원보고 — 클러스터 매수
@@ -174,5 +185,6 @@ trader/
 2. **데이터 카탈로그 중앙집중** — 시장별 데이터 형태 차이를 catalog.py가 흡수
 3. **Point-in-time 보장** — 펀더멘털·공시는 발표일(asof) 이후만 사용. look-ahead bias 차단
 4. **Pod 모듈 분리** — 전략은 알파 생성만, 자본배분/리스크는 pod/risk가 담당
-5. **Kill switch 기본 활성** — 라이브에선 일일 DD/포지션 한도 강제
-6. **테스트 우선** — strategies/는 모두 fixture 기반 테스트 (TDD)
+5. **Valuation 분리** — fair value 계산은 strategies/와 독립. 입력값(WACC/growth/peer) 모두 기록해 재현성 보장
+6. **Kill switch 기본 활성** — 라이브에선 일일 DD/포지션 한도 강제
+7. **테스트 우선** — strategies/는 모두 fixture 기반 테스트 (TDD)

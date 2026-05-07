@@ -120,6 +120,18 @@
 | **Tail Risk Monitor** | CBOE SKEW > 140 → 헤지 비중 ↑ | `risk/tail_risk.py` | CBOE |
 | **BTC Vol Mean Reversion** | DVOL 극단 → 평균회귀 | `signals/btc_vol.py` | Deribit |
 
+## Valuation 기반 추가 전략
+
+DCF/Multiples/RIM 통합 fair value로 가능한 전략 (자세히는 `VALUATION.md`):
+
+| 전략 | 메커니즘 | 모듈 | 데이터 |
+|------|---------|------|--------|
+| **Value Long (Buffett-style)** | rating ≥ +2 (저평가) 종목 매수, MoS ladder 진입 | `strategies/value_long.py` | valuation_scores + entry_plans |
+| **Overvalued Short Filter** | rating ≤ -2 (고평가) 종목은 매수 금지 | `risk/exposure.py` 통합 | valuation_scores |
+| **Pair Trade (Value vs Growth)** | 같은 섹터 저평가 매수 + 고평가 매도 | `strategies/value_pair.py` | composite fair value |
+| **Crypto NVT Mean Reversion** | NVT > 90 percentile → 매도, < 10 → 매수 | `strategies/crypto_nvt.py` | crypto_valuation |
+| **Earnings Quality Reversal** | DCF dispersion 큰 (확신 낮은) 종목 회피 | `risk/exposure.py` | dispersion_pct |
+
 ## 패턴 정리
 
 | 전략 | 시간단위 | 우위의 원천 |
