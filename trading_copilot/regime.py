@@ -56,6 +56,7 @@ class RegimeIndicators:
     vix_12m_percentile: float | None = None
     spy_3m_return: float | None = None
     spy_6m_return: float | None = None
+    sector_breadth_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -363,6 +364,29 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
                 candidates[i] = (name, min(conf + 0.05, 0.95), trig + [
                     f"SPY {indicators.spy_vs_200d_ma_pct:.1f}% below 200d MA (trend bear)"
                 ])
+
+    # Sector breadth confirmation: % of 11 sector ETFs above their 50d MA.
+    # Broad participation (>70%) = healthy bull, raises risk-on confidence.
+    # Narrow market (<35%) = weakness, lowers risk-on confidence.
+    if indicators.sector_breadth_pct is not None:
+        breadth = indicators.sector_breadth_pct
+        if breadth >= 0.70:
+            for i, (name, conf, trig) in enumerate(candidates):
+                if name in {"easy_money", "disinflation_expansion", "recovery"}:
+                    candidates[i] = (name, min(conf + 0.05, 0.95), trig + [
+                        f"Sector breadth {breadth * 100:.0f}% above 50d MA (broad bull)"
+                    ])
+        elif breadth <= 0.35:
+            for i, (name, conf, trig) in enumerate(candidates):
+                if name in {"easy_money", "disinflation_expansion"}:
+                    candidates[i] = (name, max(conf - 0.10, 0.50), trig + [
+                        f"Sector breadth only {breadth * 100:.0f}% above 50d MA (narrow market)"
+                    ])
+            for i, (name, conf, trig) in enumerate(candidates):
+                if name in {"recession", "stagflation"}:
+                    candidates[i] = (name, min(conf + 0.05, 0.95), trig + [
+                        f"Sector breadth only {breadth * 100:.0f}% above 50d MA (narrow market)"
+                    ])
 
     # Re-sort candidates by confidence after trend filter adjustments.
     candidates.sort(key=lambda c: c[1], reverse=True)

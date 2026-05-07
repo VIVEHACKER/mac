@@ -74,6 +74,34 @@ class RegimeClassifierTests(unittest.TestCase):
         )
         self.assertEqual(reading.primary, "easy_money")
 
+    def test_broad_sector_breadth_boosts_risk_on_confidence(self):
+        reading = classify_regime(
+            make_indicators(
+                fed_funds_6m_delta=-1.0,
+                vix=14.0,
+                cpi_yoy=2.2,
+                sector_breadth_pct=0.82,
+            )
+        )
+
+        self.assertEqual(reading.primary, "easy_money")
+        self.assertAlmostEqual(reading.confidence, 0.75)
+        self.assertIn("Sector breadth 82% above 50d MA", " ".join(reading.triggers))
+
+    def test_narrow_sector_breadth_penalizes_risk_on_confidence(self):
+        reading = classify_regime(
+            make_indicators(
+                fed_funds_6m_delta=-1.0,
+                vix=14.0,
+                cpi_yoy=2.2,
+                sector_breadth_pct=0.27,
+            )
+        )
+
+        self.assertEqual(reading.primary, "easy_money")
+        self.assertAlmostEqual(reading.confidence, 0.60)
+        self.assertIn("Sector breadth only 27% above 50d MA", " ".join(reading.triggers))
+
     def test_stagflation_when_cpi_hot_and_growth_weak(self):
         reading = classify_regime(
             make_indicators(cpi_yoy=3.8, indpro_yoy=0.2, cpi_6m_delta=0.0)

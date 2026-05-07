@@ -427,6 +427,19 @@ def _gather_indicators_at(
         if ref > 0:
             spy_3m_return = (last - ref) / ref
 
+    sector_breadth_pct: float | None = None
+    breadth_etfs = ("XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLC", "XLRE")
+    breadth_signals: list[bool] = []
+    for etf_symbol in breadth_etfs:
+        etf_full = [p for p in history_cache.get(etf_symbol, ()) if p.observed_at <= as_of]
+        etf_50 = etf_full[-50:]
+        if len(etf_50) >= 50:
+            ma = sum(p.close for p in etf_50) / len(etf_50)
+            last = etf_50[-1].close
+            breadth_signals.append(last > ma)
+    if len(breadth_signals) >= 6:
+        sector_breadth_pct = sum(breadth_signals) / len(breadth_signals)
+
     spy_5y_return: float | None = None
     if len(spy_full) >= 252 * 5:
         last = spy_full[-1].close
@@ -505,6 +518,7 @@ def _gather_indicators_at(
         vix_12m_percentile=vix_12m_percentile,
         spy_6m_return=spy_6m_return,
         spy_3m_return=spy_3m_return,
+        sector_breadth_pct=sector_breadth_pct,
     )
 
 
