@@ -73,6 +73,9 @@ def max_drawdown(closes: tuple[float, ...]) -> float:
     return worst
 
 
+_BETA_VAR_FLOOR = 1e-12
+
+
 def beta_and_correlation(
     asset_returns: tuple[float, ...],
     benchmark_returns: tuple[float, ...],
@@ -87,7 +90,7 @@ def beta_and_correlation(
     cov = sum((a[i] - a_mean) * (b[i] - b_mean) for i in range(n)) / (n - 1)
     var_b = sum((b[i] - b_mean) ** 2 for i in range(n)) / (n - 1)
     var_a = sum((a[i] - a_mean) ** 2 for i in range(n)) / (n - 1)
-    if var_b <= 0 or var_a <= 0:
+    if var_b < _BETA_VAR_FLOOR or var_a < _BETA_VAR_FLOOR:
         return 0.0, 0.0
     beta = cov / var_b
     correlation = cov / math.sqrt(var_a * var_b)
