@@ -1,0 +1,669 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import Iterable
+
+from datetime import timedelta as _timedelta
+
+from .industry_rotation import (
+    PriceHistoryProvider,
+    PricePoint,
+    YahooHistoryProvider,
+)
+from .long_history import YahooDailyHistoryProvider
+from .macro import (
+    FredCsvProvider,
+    MacroDataError,
+    MacroDataProvider,
+    observation_on_or_before,
+    percent_change_since_months,
+    subtract_months,
+)
+from .regime import (
+    RegimeIndicators,
+    REGIME_LABELS,
+    TEMPLATES,
+    apply_vix_overlay,
+    blend_templates,
+    classify_regime,
+)
+
+
+# Symbols that appear in any portfolio template + the benchmark.
+# Tickers we cannot reliably fetch (notes like "VIXY (caution)") are stripped to base.
+TEMPLATE_ETFS: tuple[str, ...] = (
+    "SPY", "VOO", "BIL", "SHV", "TLT", "TIP",
+    "GLD", "SLV", "DBC", "XLE", "XLB", "XLF",
+    "XLP", "XLU", "XLV", "XLI", "XLY", "XLC", "XLRE",
+    "QQQ", "SMH", "IGV", "IWM", "EEM",
+    "VTV", "SCHD", "UUP", "VIXY", "IBIT",
+)
+BENCHMARK = "SPY"
+DEFAULT_HOLDING_DAYS = 21
+
+
+@dataclass(frozen=True)
+class BacktestPoint:
+    as_of: date
+    regime: str
+    regime_label: str
+    confidence: float
+    triggers: tuple[str, ...]
+    portfolio_return: float
+    benchmark_return: float
+    coverage_pct: float
+
+
+@dataclass(frozen=True)
+class BacktestResult:
+    start: date
+    end: date
+    benchmark: str
+    holding_days: int
+    points: tuple[BacktestPoint, ...]
+    cumulative_portfolio: float
+    cumulative_benchmark: float
+    avg_portfolio_return: float
+    avg_benchmark_return: float
+    portfolio_max_drawdown: float
+    benchmark_max_drawdown: float
+    portfolio_win_rate: float
+    portfolio_beats_benchmark_rate: float
+    regime_counts: dict[str, int]
+    regime_returns: dict[str, tuple[float, float, int]]
+
+
+def run_backtest(
+    start: date,
+    end: date,
+    *,
+    history_provider: PriceHistoryProvider | None = None,
+    macro_provider: MacroDataProvider | None = None,
+    holding_days: int = DEFAULT_HOLDING_DAYS,
+    long_history: bool = False,
+) -> BacktestResult:
+    if history_provider is None:
+        if long_history:
+            fetch_start = date(start.year - 1, start.month, 1)
+            fetch_end = end + _timedelta(days=int(holding_days * 1.6) + 30)
+            history = YahooDailyHistoryProvider(fetch_start, fetch_end)
+        else:
+            history = YahooHistoryProvider()
+    else:
+        history = history_provider
+    macro = macro_provider or FredCsvProvider()
+
+    fallback_symbols: set[str] = set()
+    for fb_list in ETF_FALLBACKS.values():
+        fallback_symbols.update(fb_list)
+    all_symbols = {BENCHMARK, "^VIX", *TEMPLATE_ETFS, *fallback_symbols}
+
+    history_cache: dict[str, tuple[PricePoint, ...]] = {}
+    for symbol in all_symbols:
+        try:
+            history_cache[symbol] = history.history(symbol, range_period="5y", interval="1d")
+        except Exception:
+            history_cache[symbol] = ()
+
+    macro_cache: dict[str, object] = {}
+
+    def macro_series(series_id: str):
+        if series_id in macro_cache:
+            value = macro_cache[series_id]
+            return value if value is not None else None
+        try:
+            value = macro.series(series_id)
+        except Exception:
+            value = None
+        macro_cache[series_id] = value
+        return value
+
+    points: list[BacktestPoint] = []
+    cursor = _normalize_first_of_month(start)
+    last_cursor = _normalize_first_of_month(end)
+
+    # Hysteresis state: prevent 1-month classification noise from flip-flopping
+    # the portfolio. A new regime must be confirmed for 2 consecutive months
+    # before it is committed. panic/recovery bypass hysteresis (urgent).
+    prev_regime: str | None = None
+    pending_regime: str | None = None
+    pending_count = 0
+    URGENT_REGIMES = {"panic", "recovery"}
+
+    # Portfolio drawdown stop-loss: track equity curve. When cumulative
+    # portfolio drawdown breaches -8%, force the next month into panic
+    # template (cash-heavy). Releases when drawdown recovers above -3%.
+    equity_curve: list[float] = [1.0]
+    stop_loss_active = False
+
+    while cursor <= last_cursor:
+        indicators = _gather_indicators_at(cursor, macro_series, history_cache)
+        reading = classify_regime(indicators)
+        candidate_regime = reading.primary
+
+        if prev_regime is None:
+            committed_regime = candidate_regime
+        elif candidate_regime in URGENT_REGIMES or prev_regime in URGENT_REGIMES:
+            committed_regime = candidate_regime
+            pending_regime = None
+            pending_count = 0
+        elif candidate_regime == prev_regime:
+            committed_regime = candidate_regime
+            pending_regime = None
+            pending_count = 0
+        else:
+            if pending_regime == candidate_regime:
+                committed_regime = candidate_regime
+                pending_regime = None
+                pending_count = 0
+            else:
+                pending_regime = candidate_regime
+                pending_count = 1
+                committed_regime = prev_regime
+
+        prev_regime = committed_regime
+
+        # Drawdown stop-loss override: if cumulative portfolio drawdown is
+        # below -8%, force panic template until recovery above -3%.
+        peak_equity = max(equity_curve)
+        current_dd = (equity_curve[-1] - peak_equity) / peak_equity if peak_equity > 0 else 0.0
+        if not stop_loss_active and current_dd <= -0.08:
+            stop_loss_active = True
+        elif stop_loss_active and current_dd > -0.03:
+            stop_loss_active = False
+
+        if stop_loss_active:
+            base_template = TEMPLATES["panic"]
+        else:
+            base_template = TEMPLATES.get(committed_regime, TEMPLATES["transition"])
+
+            # Confidence-weighted blending: when reading.confidence < 0.7 and
+            # there is a secondary regime, blend the two templates so a borderline
+            # read does not bet 100% on a coin-flip.
+            if (
+                committed_regime == reading.primary
+                and reading.confidence < 0.7
+                and reading.secondary
+                and reading.secondary[0] in TEMPLATES
+            ):
+                secondary_template = TEMPLATES[reading.secondary[0]]
+                base_template = blend_templates(
+                    base_template, secondary_template, reading.confidence
+                )
+        template = apply_vix_overlay(base_template, indicators.vix)
+        # Override the regime label in reading for accurate reporting downstream
+        if committed_regime != reading.primary:
+            from .regime import REGIME_LABELS as _LBLS
+            reading = type(reading)(
+                primary=committed_regime,
+                label=_LBLS.get(committed_regime, committed_regime),
+                confidence=reading.confidence * 0.85,  # slightly lower because we held
+                triggers=reading.triggers + (f"(hysteresis held over {reading.primary})",),
+                secondary=reading.secondary,
+                summary=reading.summary,
+                indicators=reading.indicators,
+            )
+
+        portfolio_return, coverage = _portfolio_forward_return(
+            cursor, template, history_cache, holding_days
+        )
+        benchmark_return = _ticker_forward_return(cursor, BENCHMARK, history_cache, holding_days)
+
+        if portfolio_return is not None and benchmark_return is not None:
+            points.append(
+                BacktestPoint(
+                    as_of=cursor,
+                    regime=reading.primary,
+                    regime_label=reading.label,
+                    confidence=reading.confidence,
+                    triggers=reading.triggers,
+                    portfolio_return=portfolio_return,
+                    benchmark_return=benchmark_return,
+                    coverage_pct=coverage,
+                )
+            )
+            equity_curve.append(equity_curve[-1] * (1.0 + portfolio_return))
+
+        cursor = _add_months(cursor, 1)
+
+    cumulative_portfolio = _compound([p.portfolio_return for p in points])
+    cumulative_benchmark = _compound([p.benchmark_return for p in points])
+    avg_port = _mean([p.portfolio_return for p in points])
+    avg_bench = _mean([p.benchmark_return for p in points])
+    port_dd = _max_drawdown_from_returns([p.portfolio_return for p in points])
+    bench_dd = _max_drawdown_from_returns([p.benchmark_return for p in points])
+    win_rate = _share(p.portfolio_return > 0 for p in points) if points else 0.0
+    beat_rate = _share(p.portfolio_return > p.benchmark_return for p in points) if points else 0.0
+
+    regime_counts: dict[str, int] = {}
+    regime_buckets: dict[str, list[tuple[float, float]]] = {}
+    for p in points:
+        regime_counts[p.regime] = regime_counts.get(p.regime, 0) + 1
+        regime_buckets.setdefault(p.regime, []).append((p.portfolio_return, p.benchmark_return))
+    regime_returns: dict[str, tuple[float, float, int]] = {}
+    for name, pairs in regime_buckets.items():
+        port_avg = sum(x[0] for x in pairs) / len(pairs)
+        bench_avg = sum(x[1] for x in pairs) / len(pairs)
+        regime_returns[name] = (port_avg, bench_avg, len(pairs))
+
+    return BacktestResult(
+        start=start,
+        end=end,
+        benchmark=BENCHMARK,
+        holding_days=holding_days,
+        points=tuple(points),
+        cumulative_portfolio=cumulative_portfolio,
+        cumulative_benchmark=cumulative_benchmark,
+        avg_portfolio_return=avg_port,
+        avg_benchmark_return=avg_bench,
+        portfolio_max_drawdown=port_dd,
+        benchmark_max_drawdown=bench_dd,
+        portfolio_win_rate=win_rate,
+        portfolio_beats_benchmark_rate=beat_rate,
+        regime_counts=regime_counts,
+        regime_returns=regime_returns,
+    )
+
+
+def format_backtest_report(result: BacktestResult) -> str:
+    lines = [
+        f"# Macro Regime Backtest - {result.start.isoformat()} to {result.end.isoformat()}",
+        "",
+        "Not investment advice. This is an out-of-sample style review of the regime "
+        "classifier and the portfolio templates against historical ETF prices. "
+        "Past performance does not predict future results.",
+        "",
+        f"Benchmark: {result.benchmark}",
+        f"Holding window: {result.holding_days} trading days (~1 month forward).",
+        f"Periods sampled: {len(result.points)}",
+        "",
+        "## Aggregate Performance",
+        f"- Cumulative portfolio: {result.cumulative_portfolio * 100:+.2f}%",
+        f"- Cumulative benchmark ({result.benchmark}): {result.cumulative_benchmark * 100:+.2f}%",
+        f"- Excess vs benchmark: {(result.cumulative_portfolio - result.cumulative_benchmark) * 100:+.2f}%",
+        f"- Avg monthly portfolio return: {result.avg_portfolio_return * 100:+.2f}%",
+        f"- Avg monthly benchmark return: {result.avg_benchmark_return * 100:+.2f}%",
+        f"- Portfolio max drawdown (compounded path): {result.portfolio_max_drawdown * 100:.2f}%",
+        f"- Benchmark max drawdown (compounded path): {result.benchmark_max_drawdown * 100:.2f}%",
+        f"- Portfolio win rate (positive months): {result.portfolio_win_rate * 100:.1f}%",
+        f"- Beat-benchmark rate (months): {result.portfolio_beats_benchmark_rate * 100:.1f}%",
+        "",
+        "## Regime Distribution and Per-Regime Returns",
+        "| Regime | Count | Avg Portfolio | Avg Benchmark | Excess |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for regime in sorted(result.regime_counts.keys(), key=lambda r: -result.regime_counts[r]):
+        port_avg, bench_avg, count = result.regime_returns.get(regime, (0.0, 0.0, 0))
+        lines.append(
+            f"| {REGIME_LABELS.get(regime, regime)} | {count} | "
+            f"{port_avg * 100:+.2f}% | {bench_avg * 100:+.2f}% | "
+            f"{(port_avg - bench_avg) * 100:+.2f}% |"
+        )
+
+    lines.extend(["", "## Period Detail", "| As Of | Regime | Coverage | Portfolio | Benchmark | Excess |", "|---|---|---:|---:|---:|---:|"])
+    for p in result.points:
+        lines.append(
+            f"| {p.as_of.isoformat()} | {p.regime_label} | {p.coverage_pct:.0f}% | "
+            f"{p.portfolio_return * 100:+.2f}% | {p.benchmark_return * 100:+.2f}% | "
+            f"{(p.portfolio_return - p.benchmark_return) * 100:+.2f}% |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Caveats",
+            "- Each period uses the macro / VIX / drawdown data available on or before "
+            "the as-of date; lookahead bias is avoided.",
+            "- Portfolio coverage <100% means some template ETFs had no usable price "
+            "history; weights of missing assets are dropped and remaining weights are "
+            "normalized to 100.",
+            "- VIX call spread, IBIT, and other thin proxies are treated as cash if "
+            "history is unavailable.",
+            "- Transaction costs, spread, and tax are not modelled.",
+            "- 21-day forward window means each month is evaluated as buy-at-open / "
+            "sell-21d-later; real rebalancing has frictions this misses.",
+            "- The classifier and template thresholds were authored with current "
+            "market structure in mind, so the recent backtest is partly in-sample.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def backtest_to_csv(result: BacktestResult) -> str:
+    lines = ["as_of,regime,confidence,coverage_pct,portfolio_return,benchmark_return,excess"]
+    for p in result.points:
+        lines.append(
+            f"{p.as_of.isoformat()},{p.regime},{p.confidence:.2f},{p.coverage_pct:.1f},"
+            f"{p.portfolio_return:.6f},{p.benchmark_return:.6f},"
+            f"{p.portfolio_return - p.benchmark_return:.6f}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------------------
+# Helpers (point-in-time indicator lookup, forward returns, math)
+# --------------------------------------------------------------------------------------
+
+
+def _gather_indicators_at(
+    as_of: date,
+    macro_series_lookup,
+    history_cache: dict[str, tuple[PricePoint, ...]],
+) -> RegimeIndicators:
+    cpi = macro_series_lookup("CPIAUCSL")
+    core_cpi = macro_series_lookup("CPILFESL")
+    unemp = macro_series_lookup("UNRATE")
+    fedf = macro_series_lookup("FEDFUNDS")
+    curve = macro_series_lookup("T10Y2Y")
+    indpro = macro_series_lookup("INDPRO")
+    retail = macro_series_lookup("RSAFS")
+    credit = macro_series_lookup("BAMLH0A0HYM2")
+
+    cpi_yoy = _try_pct(cpi, 12, as_of)
+    core_cpi_yoy = _try_pct(core_cpi, 12, as_of)
+    cpi_6m_delta = _yoy_delta(cpi, 6, as_of)
+    unemployment = _try_value(unemp, as_of)
+    unemployment_6m_delta = _try_change(unemp, 6, as_of)
+    fed_funds = _try_value(fedf, as_of)
+    fed_funds_6m_delta = _try_change(fedf, 6, as_of)
+    yield_curve = _try_value(curve, as_of)
+    indpro_yoy = _try_pct(indpro, 12, as_of)
+    retail_yoy = _try_pct(retail, 12, as_of)
+    credit_spread_hy = _try_value(credit, as_of)
+
+    vix_full = [p for p in history_cache.get("^VIX", ()) if p.observed_at <= as_of]
+    vix = vix_full[-1].close if vix_full else None
+    vix_window = vix_full[-20:] if vix_full else []
+    vix_20d_avg = (sum(p.close for p in vix_window) / len(vix_window)) if vix_window else None
+    vix_60d_window = vix_full[-60:] if vix_full else []
+    vix_60d_max = max((p.close for p in vix_60d_window), default=None)
+
+    spy_full = [p for p in history_cache.get(BENCHMARK, ()) if p.observed_at <= as_of]
+    spy_252 = spy_full[-252:]
+    spy_drawdown_252d = None
+    if len(spy_252) >= 2:
+        peak = max(p.close for p in spy_252)
+        last = spy_252[-1].close
+        if peak > 0:
+            spy_drawdown_252d = (last - peak) / peak
+
+    spy_off_60d_low: float | None = None
+    spy_60 = spy_full[-60:]
+    if len(spy_60) >= 2:
+        trough = min(p.close for p in spy_60)
+        last = spy_60[-1].close
+        if trough > 0:
+            spy_off_60d_low = (last - trough) / trough
+
+    spy_above_200d_ma: bool | None = None
+    spy_vs_200d_ma_pct: float | None = None
+    spy_200 = spy_full[-200:]
+    if len(spy_200) >= 200:
+        ma = sum(p.close for p in spy_200) / len(spy_200)
+        last = spy_200[-1].close
+        if ma > 0:
+            spy_vs_200d_ma_pct = (last - ma) / ma * 100.0
+            spy_above_200d_ma = last > ma
+
+    spy_12m_return: float | None = None
+    if len(spy_full) >= 252:
+        last = spy_full[-1].close
+        ref = spy_full[-252].close
+        if ref > 0:
+            spy_12m_return = (last - ref) / ref
+
+    spy_5y_return: float | None = None
+    if len(spy_full) >= 252 * 5:
+        last = spy_full[-1].close
+        ref = spy_full[-252 * 5].close
+        if ref > 0:
+            spy_5y_return = (last - ref) / ref
+
+    vix_12m_percentile: float | None = None
+    vix_12m_window = vix_full[-252:] if vix_full else []
+    if len(vix_12m_window) >= 60 and vix is not None:
+        sorted_vix = sorted(p.close for p in vix_12m_window)
+        rank = sum(1 for c in sorted_vix if c <= vix)
+        vix_12m_percentile = rank / len(sorted_vix)
+
+    # Forward-signal indicators
+    copper_gold_ratio: float | None = None
+    copper_gold_60d_avg: float | None = None
+    copx_full = [p for p in history_cache.get("COPX", ()) if p.observed_at <= as_of]
+    gld_full = [p for p in history_cache.get("GLD", ()) if p.observed_at <= as_of]
+    if copx_full and gld_full:
+        copx_last = copx_full[-1].close
+        gld_last = gld_full[-1].close
+        if gld_last > 0:
+            copper_gold_ratio = copx_last / gld_last
+        # 60d average ratio
+        ratios = []
+        copx_60 = {p.observed_at: p.close for p in copx_full[-60:]}
+        for gld_p in gld_full[-60:]:
+            if gld_p.observed_at in copx_60 and gld_p.close > 0:
+                ratios.append(copx_60[gld_p.observed_at] / gld_p.close)
+        if ratios:
+            copper_gold_60d_avg = sum(ratios) / len(ratios)
+
+    dxy_3m_change: float | None = None
+    uup_full = [p for p in history_cache.get("UUP", ()) if p.observed_at <= as_of]
+    if len(uup_full) >= 63:
+        last = uup_full[-1].close
+        ref = uup_full[-63].close
+        if ref > 0:
+            dxy_3m_change = (last - ref) / ref * 100.0
+
+    two_year_yield = None
+    two_year_yield_3m_delta = None
+    dgs2 = macro_series_lookup("DGS2")
+    if dgs2 is not None:
+        two_year_yield = _try_value(dgs2, as_of)
+        two_year_yield_3m_delta = _try_change(dgs2, 3, as_of)
+
+    return RegimeIndicators(
+        cpi_yoy=cpi_yoy,
+        core_cpi_yoy=core_cpi_yoy,
+        cpi_6m_delta=cpi_6m_delta or 0.0,
+        unemployment=unemployment,
+        unemployment_6m_delta=unemployment_6m_delta or 0.0,
+        fed_funds=fed_funds,
+        fed_funds_6m_delta=fed_funds_6m_delta or 0.0,
+        yield_curve_spread=yield_curve,
+        indpro_yoy=indpro_yoy,
+        retail_yoy=retail_yoy,
+        vix=vix,
+        vix_20d_avg=vix_20d_avg,
+        vix_60d_max=vix_60d_max,
+        spy_drawdown_252d=spy_drawdown_252d,
+        spy_off_60d_low=spy_off_60d_low,
+        credit_spread_hy=credit_spread_hy,
+        sources=(),
+        copper_gold_ratio=copper_gold_ratio,
+        copper_gold_60d_avg=copper_gold_60d_avg,
+        dxy_3m_change=dxy_3m_change,
+        two_year_yield=two_year_yield,
+        two_year_yield_3m_delta=two_year_yield_3m_delta,
+        spy_above_200d_ma=spy_above_200d_ma,
+        spy_vs_200d_ma_pct=spy_vs_200d_ma_pct,
+        spy_12m_return=spy_12m_return,
+        spy_5y_return=spy_5y_return,
+        vix_12m_percentile=vix_12m_percentile,
+    )
+
+
+def _try_pct(series, months: int, as_of: date) -> float | None:
+    if series is None:
+        return None
+    try:
+        return percent_change_since_months(series, months, as_of=as_of)
+    except (MacroDataError, Exception):
+        return None
+
+
+def _try_value(series, as_of: date) -> float | None:
+    if series is None:
+        return None
+    try:
+        obs = observation_on_or_before(series, as_of)
+        return obs.value
+    except Exception:
+        return None
+
+
+def _try_change(series, months: int, as_of: date) -> float | None:
+    if series is None:
+        return None
+    try:
+        latest = observation_on_or_before(series, as_of)
+        ref_date = subtract_months(as_of, months)
+        ref = observation_on_or_before(series, ref_date)
+        return latest.value - ref.value
+    except Exception:
+        return None
+
+
+def _yoy_delta(series, months_back: int, as_of: date) -> float | None:
+    if series is None:
+        return None
+    latest_yoy = _try_pct(series, 12, as_of)
+    if latest_yoy is None:
+        return None
+    ref_date = subtract_months(as_of, months_back)
+    ref_yoy = _try_pct(series, 12, ref_date)
+    if ref_yoy is None:
+        return None
+    return latest_yoy - ref_yoy
+
+
+def _portfolio_forward_return(
+    as_of: date,
+    template,
+    history_cache: dict[str, tuple[PricePoint, ...]],
+    holding_days: int,
+) -> tuple[float | None, float]:
+    weighted_return = 0.0
+    used_weight = 0.0
+    total_weight = 0.0
+    for alloc in template.allocations:
+        symbol = _normalize_etf_symbol(alloc.proxy_etf)
+        total_weight += alloc.weight_pct
+        ret = _ticker_forward_return(as_of, symbol, history_cache, holding_days)
+        if ret is None:
+            continue
+        weighted_return += alloc.weight_pct * ret
+        used_weight += alloc.weight_pct
+    if used_weight <= 0 or total_weight <= 0:
+        return None, 0.0
+    normalized = weighted_return / used_weight
+    coverage = used_weight / total_weight * 100.0
+    return normalized, coverage
+
+
+# Fallbacks for ETFs that may not exist for the entire backtest window.
+# Keep this list MINIMAL: only true near-equivalents whose absence would
+# otherwise force the weight to be normalized into other assets. Risky
+# fallbacks (e.g. VOO -> SPY in 2008) inflate equity exposure during pre-
+# launch crisis windows and hurt the protective stance, so we leave them
+# out and let the period skip the leg (weight is dropped + renormalized).
+ETF_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "IBIT": ("BIL",),
+    "VIXY": ("BIL",),
+    "UUP": ("BIL",),
+    "SHV": ("BIL",),
+}
+
+
+def _ticker_forward_return(
+    as_of: date,
+    symbol: str,
+    history_cache: dict[str, tuple[PricePoint, ...]],
+    holding_days: int,
+) -> float | None:
+    history = history_cache.get(symbol)
+    candidates = [symbol] + list(ETF_FALLBACKS.get(symbol, ()))
+    for candidate in candidates:
+        history = history_cache.get(candidate)
+        if not history:
+            continue
+        entry_index = None
+        for i, point in enumerate(history):
+            if point.observed_at >= as_of:
+                entry_index = i
+                break
+        if entry_index is None:
+            continue
+        exit_index = entry_index + holding_days
+        if exit_index >= len(history):
+            continue
+        entry_price = history[entry_index].close
+        exit_price = history[exit_index].close
+        if entry_price <= 0:
+            continue
+        return (exit_price - entry_price) / entry_price
+    return None
+
+
+def _normalize_etf_symbol(label: str) -> str:
+    """Strip parenthetical caveats like 'VIXY (caution)' or 'IBIT (or BTC direct)'."""
+    base = label.strip().split("(", 1)[0].strip()
+    return base.upper()
+
+
+def _normalize_first_of_month(d: date) -> date:
+    return date(d.year, d.month, 1)
+
+
+def _add_months(d: date, months: int) -> date:
+    month_index = d.year * 12 + d.month - 1 + months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    return date(year, month, 1)
+
+
+def _compound(returns: Iterable[float]) -> float:
+    value = 1.0
+    for r in returns:
+        value *= (1.0 + r)
+    return value - 1.0
+
+
+def _mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _share(condition_iter: Iterable[bool]) -> float:
+    items = list(condition_iter)
+    if not items:
+        return 0.0
+    return sum(1 for v in items if v) / len(items)
+
+
+def _max_drawdown_from_returns(returns: list[float]) -> float:
+    if not returns:
+        return 0.0
+    equity = 1.0
+    peak = 1.0
+    worst = 0.0
+    for r in returns:
+        equity *= (1.0 + r)
+        if equity > peak:
+            peak = equity
+        drawdown = (equity - peak) / peak
+        if drawdown < worst:
+            worst = drawdown
+    return worst
+
+
+__all__ = [
+    "BacktestPoint",
+    "BacktestResult",
+    "TEMPLATE_ETFS",
+    "BENCHMARK",
+    "DEFAULT_HOLDING_DAYS",
+    "run_backtest",
+    "format_backtest_report",
+    "backtest_to_csv",
+]
