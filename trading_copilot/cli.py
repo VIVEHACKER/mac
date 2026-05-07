@@ -91,6 +91,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "regime":
         return emit(workflows.regime_report(), args.output)
 
+    if args.command == "backtest":
+        from datetime import date as _date
+        start = _date.fromisoformat(args.start)
+        end = _date.fromisoformat(args.end)
+        report = workflows.backtest_regime_report(
+            start, end, holding_days=args.holding_days
+        )
+        if args.csv_output:
+            csv_text = workflows.backtest_regime_csv(
+                start, end, holding_days=args.holding_days
+            )
+            args.csv_output.parent.mkdir(parents=True, exist_ok=True)
+            args.csv_output.write_text(csv_text, encoding="utf-8")
+            print(f"Wrote {args.csv_output}")
+        return emit(report, args.output)
+
     if args.command == "economic-calendar":
         return emit(workflows.economic_calendar_report(days=args.days), args.output)
 
@@ -101,6 +117,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.csv_output:
             csv_text = workflows.industry_leadership_csv()
+            args.csv_output.parent.mkdir(parents=True, exist_ok=True)
+            args.csv_output.write_text(csv_text, encoding="utf-8")
+            print(f"Wrote {args.csv_output}")
+        return emit(report, args.output)
+
+    if args.command == "patterns":
+        assets = parse_csv_strings(args.assets)
+        horizons = parse_csv_ints(args.horizons)
+        report = workflows.patterns_report(
+            assets=assets,
+            horizons=horizons,
+            min_samples=args.min_samples,
+            limit=args.limit,
+        )
+        if args.csv_output:
+            csv_text = workflows.patterns_csv(
+                assets=assets,
+                horizons=horizons,
+                min_samples=args.min_samples,
+            )
             args.csv_output.parent.mkdir(parents=True, exist_ok=True)
             args.csv_output.write_text(csv_text, encoding="utf-8")
             print(f"Wrote {args.csv_output}")
@@ -314,6 +350,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     regime.add_argument("--output", type=Path)
 
+    backtest = sub.add_parser(
+        "backtest",
+        help="Backtest the regime classifier + portfolio templates over a historical window.",
+    )
+    backtest.add_argument("--start", required=True, help="Start date (YYYY-MM-DD).")
+    backtest.add_argument("--end", required=True, help="End date (YYYY-MM-DD).")
+    backtest.add_argument(
+        "--holding-days", type=int, default=21,
+        help="Forward holding window in trading days. Default 21 (~1 month).",
+    )
+    backtest.add_argument("--csv-output", type=Path)
+    backtest.add_argument("--output", type=Path)
+
     economic_calendar = sub.add_parser(
         "economic-calendar",
         help="Track upcoming FOMC and major BLS macro release dates.",
@@ -329,6 +378,25 @@ def build_parser() -> argparse.ArgumentParser:
     industries.add_argument("--next-limit", type=int, default=10)
     industries.add_argument("--csv-output", type=Path)
     industries.add_argument("--output", type=Path)
+
+    patterns = sub.add_parser(
+        "patterns",
+        help="Mine historical macro/market condition patterns with win rates and confidence bounds.",
+    )
+    patterns.add_argument(
+        "--assets",
+        default="SPY,QQQ,IWM,TLT,GLD",
+        help="Comma-separated assets to test. Default: SPY,QQQ,IWM,TLT,GLD.",
+    )
+    patterns.add_argument(
+        "--horizons",
+        default="21,63,126,252",
+        help="Comma-separated forward trading-day horizons. Default: 21,63,126,252.",
+    )
+    patterns.add_argument("--min-samples", type=int, default=5)
+    patterns.add_argument("--limit", type=int, default=25)
+    patterns.add_argument("--csv-output", type=Path)
+    patterns.add_argument("--output", type=Path)
 
     recommend = sub.add_parser(
         "recommend",
@@ -479,6 +547,20 @@ def emit(text: str, output: Path | None) -> int:
     output.write_text(text + "\n", encoding="utf-8")
     print(f"Wrote {output}")
     return 0
+
+
+def parse_csv_strings(value: str) -> tuple[str, ...]:
+    return tuple(item.strip().upper() for item in value.split(",") if item.strip())
+
+
+def parse_csv_ints(value: str) -> tuple[int, ...]:
+    parsed: list[int] = []
+    for item in value.split(","):
+        stripped = item.strip()
+        if not stripped:
+            continue
+        parsed.append(int(stripped))
+    return tuple(parsed)
 
 
 if __name__ == "__main__":

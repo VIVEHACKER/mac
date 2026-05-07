@@ -50,9 +50,22 @@ from .news_monitor import (
     build_fast_news_report,
     collect_fast_news,
 )
+from .pattern_mining import (
+    DEFAULT_ASSETS,
+    DEFAULT_HORIZONS,
+    format_pattern_report,
+    mine_default_patterns,
+    pattern_results_to_csv,
+)
 from .playbook import PlaybookBuilder, format_playbook_report
 from .quote_summary import QuoteSummaryProvider, YahooQuoteSummaryProvider
 from .regime import build_regime_report, format_regime_report
+from .backtest import (
+    DEFAULT_HOLDING_DAYS,
+    backtest_to_csv,
+    format_backtest_report,
+    run_backtest,
+)
 from .portfolio import (
     DEFAULT_SINGLE_STOCK_POOL,
     build_aggressive_portfolio,
@@ -104,6 +117,38 @@ class TradingWorkflows:
             history_provider=self.industry_history,
         )
         return format_regime_report(report)
+
+    def backtest_regime_report(
+        self,
+        start: date,
+        end: date,
+        *,
+        holding_days: int = DEFAULT_HOLDING_DAYS,
+    ) -> str:
+        result = run_backtest(
+            start=start,
+            end=end,
+            history_provider=self.industry_history,
+            macro_provider=self.macro,
+            holding_days=holding_days,
+        )
+        return format_backtest_report(result)
+
+    def backtest_regime_csv(
+        self,
+        start: date,
+        end: date,
+        *,
+        holding_days: int = DEFAULT_HOLDING_DAYS,
+    ) -> str:
+        result = run_backtest(
+            start=start,
+            end=end,
+            history_provider=self.industry_history,
+            macro_provider=self.macro,
+            holding_days=holding_days,
+        )
+        return backtest_to_csv(result)
 
     def playbook_report(
         self,
@@ -284,6 +329,37 @@ class TradingWorkflows:
     def industry_leadership_csv(self) -> str:
         result = analyze_industries(history_provider=self.industry_history)
         return industry_scores_to_csv(result.scores)
+
+    def patterns_report(
+        self,
+        assets: tuple[str, ...] = DEFAULT_ASSETS,
+        horizons: tuple[int, ...] = DEFAULT_HORIZONS,
+        min_samples: int = 5,
+        limit: int = 25,
+    ) -> str:
+        result = mine_default_patterns(
+            macro_provider=self.macro,
+            history_provider=self.industry_history,
+            assets=assets,
+            horizons=horizons,
+            min_samples=min_samples,
+        )
+        return format_pattern_report(result, limit=limit)
+
+    def patterns_csv(
+        self,
+        assets: tuple[str, ...] = DEFAULT_ASSETS,
+        horizons: tuple[int, ...] = DEFAULT_HORIZONS,
+        min_samples: int = 5,
+    ) -> str:
+        result = mine_default_patterns(
+            macro_provider=self.macro,
+            history_provider=self.industry_history,
+            assets=assets,
+            horizons=horizons,
+            min_samples=min_samples,
+        )
+        return pattern_results_to_csv(result)
 
     def screen_prompt(self, criteria: str, direction: str = "both") -> str:
         bundle = self.skills.bundle_for("screen")
