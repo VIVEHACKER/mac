@@ -1,0 +1,47 @@
+# 시크릿 — 절대 커밋 금지
+.env
+.env.local
+.env.*.local
+secrets.env
+*.pem
+*.key
+
+# 데이터 — Parquet/DB는 로컬에만
+data/store/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# uv
+.python-version
+uv.lock  # 선택: 락파일 공유하려면 제거
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# 백테스트 결과
+results/
+backtests/
+reports/
