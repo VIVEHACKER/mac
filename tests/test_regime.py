@@ -76,10 +76,9 @@ class RegimeClassifierTests(unittest.TestCase):
 
     def test_stagflation_when_cpi_hot_and_growth_weak(self):
         reading = classify_regime(
-            make_indicators(cpi_yoy=3.5, indpro_yoy=0.5, cpi_6m_delta=0.0)
+            make_indicators(cpi_yoy=3.8, indpro_yoy=0.2, cpi_6m_delta=0.0)
         )
-        # Note: inflation_shock requires acceleration, so 3.5 + flat delta + weak growth
-        # routes to stagflation as the primary regime.
+        # Tightened thresholds: CPI ≥ 3.5 AND INDPRO < 0.5 with no SPY 200d-MA bull.
         self.assertIn(reading.primary, {"stagflation", "inflation_shock"})
 
     def test_disinflation_expansion_when_cooling_and_growing(self):
@@ -189,6 +188,41 @@ def disinflation_macro() -> "StaticMacroProvider":
                 (date(2025, 1, 1), 600000.0),
                 (date(2025, 7, 1), 610000.0),
                 (date(2026, 1, 1), 620000.0),
+            ),
+            "DTWEXBGS": monthly(
+                "DTWEXBGS",
+                (date(2025, 7, 1), 115.0),
+                (date(2026, 1, 1), 113.0),
+            ),
+            "DEXUSEU": monthly(
+                "DEXUSEU",
+                (date(2025, 7, 1), 1.05),
+                (date(2026, 1, 1), 1.08),
+            ),
+            "DEXJPUS": monthly(
+                "DEXJPUS",
+                (date(2025, 7, 1), 145.0),
+                (date(2026, 1, 1), 142.0),
+            ),
+            "DEXUSUK": monthly(
+                "DEXUSUK",
+                (date(2025, 7, 1), 1.25),
+                (date(2026, 1, 1), 1.29),
+            ),
+            "DEXSZUS": monthly(
+                "DEXSZUS",
+                (date(2025, 7, 1), 0.90),
+                (date(2026, 1, 1), 0.88),
+            ),
+            "DEXCHUS": monthly(
+                "DEXCHUS",
+                (date(2025, 7, 1), 7.20),
+                (date(2026, 1, 1), 7.10),
+            ),
+            "PMAIZMTUSDM": monthly(
+                "PMAIZMTUSDM",
+                (date(2025, 7, 1), 180.0),
+                (date(2026, 1, 1), 185.0),
             ),
             "BAMLH0A0HYM2": monthly(
                 "BAMLH0A0HYM2",

@@ -49,6 +49,9 @@ class RegimeIndicators:
     dxy_3m_change: float | None = None
     two_year_yield: float | None = None
     two_year_yield_3m_delta: float | None = None
+    spy_above_200d_ma: bool | None = None
+    spy_vs_200d_ma_pct: float | None = None
+    spy_12m_return: float | None = None
 
 
 @dataclass(frozen=True)
@@ -245,7 +248,19 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
     confidence = 0.5
 
     panic_trigger = _check_panic(indicators)
-    recovery_trigger = _check_recovery(indicators) if not panic_trigger else None
+    recovery_trigger = _check_recovery(indicators)
+    # If both panic and recovery fire, recovery wins when SPY drawdown is
+    # already recovering (drawdown shallower than -10%). This catches the
+    # 2009-March / 2020-April V-bottom where VIX is still elevated but the
+    # market has already turned.
+    if panic_trigger and recovery_trigger:
+        if (
+            indicators.spy_drawdown_252d is not None
+            and indicators.spy_drawdown_252d > -0.10
+        ):
+            panic_trigger = None
+        else:
+            recovery_trigger = None
     recession_trigger = _check_recession(indicators)
     inflation_trigger = _check_inflation_shock(indicators)
     deflation_trigger = _check_deflation(indicators)
@@ -270,6 +285,55 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
         candidates.append(("stagflation", 0.65, stagflation_trigger))
     if disinflation_trigger:
         candidates.append(("disinflation_expansion", 0.65, disinflation_trigger))
+
+    # SPY 200d MA trend filter: when the market is in a clear uptrend
+    # (SPY > 200d MA by 2%+) and no urgent regime is firing, prefer the
+    # risk-on regimes; when in a clear downtrend (-2% below MA), prefer
+    # risk-off. This nudges borderline classifications toward the trend.
+    # Anti-bubble guard: 12-month SPY return >= 30% means we're in a mature
+    # bull / late-cycle euphoria phase. The trend filter weakens here because
+    # historic precedent (1999, 2007 lite, 2021) shows trend bulls keep going
+    # only briefly before correction. Better to default to neutral classification.
+    bubble_zone = (
+        indicators.spy_12m_return is not None
+        and indicators.spy_12m_return >= 0.25
+    )
+    trend_bull = (
+        indicators.spy_above_200d_ma is True
+        and indicators.spy_vs_200d_ma_pct is not None
+        and indicators.spy_vs_200d_ma_pct >= 2.0
+        and not bubble_zone
+    )
+    trend_bear = (
+        indicators.spy_above_200d_ma is False
+        and indicators.spy_vs_200d_ma_pct is not None
+        and indicators.spy_vs_200d_ma_pct <= -2.0
+    )
+    if trend_bull and not panic_trigger and not recovery_trigger:
+        # If easy_money or disinflation_expansion is fire, give it confidence boost.
+        for i, (name, conf, trig) in enumerate(candidates):
+            if name in ("easy_money", "disinflation_expansion"):
+                candidates[i] = (name, min(conf + 0.10, 0.95), trig + [
+                    f"SPY +{indicators.spy_vs_200d_ma_pct:.1f}% above 200d MA (trend bull)"
+                ])
+        # If transition would be primary in a clear bull trend, prefer disinflation_expansion
+        # template if no other risk-on regime is present.
+        if not candidates:
+            candidates.append((
+                "disinflation_expansion",
+                0.55,
+                [f"SPY +{indicators.spy_vs_200d_ma_pct:.1f}% above 200d MA (trend bull, no other signal)"],
+            ))
+    if trend_bear:
+        # In trend bear, recession / stagflation get slight confidence boost
+        for i, (name, conf, trig) in enumerate(candidates):
+            if name in ("recession", "stagflation"):
+                candidates[i] = (name, min(conf + 0.05, 0.95), trig + [
+                    f"SPY {indicators.spy_vs_200d_ma_pct:.1f}% below 200d MA (trend bear)"
+                ])
+
+    # Re-sort candidates by confidence after trend filter adjustments.
+    candidates.sort(key=lambda c: c[1], reverse=True)
 
     if candidates:
         primary, confidence, primary_triggers = candidates[0]
@@ -452,13 +516,17 @@ def _check_easy_money(indicators: RegimeIndicators) -> list[str] | None:
 
 
 def _check_stagflation(indicators: RegimeIndicators) -> list[str] | None:
-    cpi_hot = indicators.cpi_yoy is not None and indicators.cpi_yoy >= 3.0
-    growth_weak = indicators.indpro_yoy is not None and indicators.indpro_yoy < 1.0
+    cpi_hot = indicators.cpi_yoy is not None and indicators.cpi_yoy >= 3.5
+    growth_weak = indicators.indpro_yoy is not None and indicators.indpro_yoy < 0.5
     if not (cpi_hot and growth_weak):
         return None
+    # Additional rejection: SPY > 200d MA means market disagrees with stagflation
+    # narrative. Skip stagflation in clear uptrends; let trend filter dominate.
+    if indicators.spy_above_200d_ma is True:
+        return None
     triggers = [
-        f"CPI {indicators.cpi_yoy:+.1f}% YoY (still hot)",
-        f"INDPRO {indicators.indpro_yoy:+.1f}% YoY (weak growth)",
+        f"CPI {indicators.cpi_yoy:+.1f}% YoY (≥3.5%, hot)",
+        f"INDPRO {indicators.indpro_yoy:+.1f}% YoY (<0.5%, weak growth)",
     ]
     # Forward-signal rejection: copper/gold rising hard means industrial demand
     # is actually strong and the market is risk-on; don't lock in stagflation.

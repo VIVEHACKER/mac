@@ -376,6 +376,23 @@ def _gather_indicators_at(
         if trough > 0:
             spy_off_60d_low = (last - trough) / trough
 
+    spy_above_200d_ma: bool | None = None
+    spy_vs_200d_ma_pct: float | None = None
+    spy_200 = spy_full[-200:]
+    if len(spy_200) >= 200:
+        ma = sum(p.close for p in spy_200) / len(spy_200)
+        last = spy_200[-1].close
+        if ma > 0:
+            spy_vs_200d_ma_pct = (last - ma) / ma * 100.0
+            spy_above_200d_ma = last > ma
+
+    spy_12m_return: float | None = None
+    if len(spy_full) >= 252:
+        last = spy_full[-1].close
+        ref = spy_full[-252].close
+        if ref > 0:
+            spy_12m_return = (last - ref) / ref
+
     # Forward-signal indicators
     copper_gold_ratio: float | None = None
     copper_gold_60d_avg: float | None = None
@@ -433,6 +450,9 @@ def _gather_indicators_at(
         dxy_3m_change=dxy_3m_change,
         two_year_yield=two_year_yield,
         two_year_yield_3m_delta=two_year_yield_3m_delta,
+        spy_above_200d_ma=spy_above_200d_ma,
+        spy_vs_200d_ma_pct=spy_vs_200d_ma_pct,
+        spy_12m_return=spy_12m_return,
     )
 
 
