@@ -93,8 +93,13 @@ def run_backtest(
         history = history_provider
     macro = macro_provider or FredCsvProvider()
 
+    fallback_symbols: set[str] = set()
+    for fb_list in ETF_FALLBACKS.values():
+        fallback_symbols.update(fb_list)
+    all_symbols = {BENCHMARK, "^VIX", *TEMPLATE_ETFS, *fallback_symbols}
+
     history_cache: dict[str, tuple[PricePoint, ...]] = {}
-    for symbol in (BENCHMARK, "^VIX", *TEMPLATE_ETFS):
+    for symbol in all_symbols:
         try:
             history_cache[symbol] = history.history(symbol, range_period="5y", interval="1d")
         except Exception:
@@ -288,18 +293,29 @@ def _gather_indicators_at(
     retail_yoy = _try_pct(retail, 12, as_of)
     credit_spread_hy = _try_value(credit, as_of)
 
-    vix_hist = [p for p in history_cache.get("^VIX", ()) if p.observed_at <= as_of]
-    vix = vix_hist[-1].close if vix_hist else None
-    vix_window = vix_hist[-20:] if vix_hist else []
+    vix_full = [p for p in history_cache.get("^VIX", ()) if p.observed_at <= as_of]
+    vix = vix_full[-1].close if vix_full else None
+    vix_window = vix_full[-20:] if vix_full else []
     vix_20d_avg = (sum(p.close for p in vix_window) / len(vix_window)) if vix_window else None
+    vix_60d_window = vix_full[-60:] if vix_full else []
+    vix_60d_max = max((p.close for p in vix_60d_window), default=None)
 
-    spy_hist = [p for p in history_cache.get(BENCHMARK, ()) if p.observed_at <= as_of][-252:]
+    spy_full = [p for p in history_cache.get(BENCHMARK, ()) if p.observed_at <= as_of]
+    spy_252 = spy_full[-252:]
     spy_drawdown_252d = None
-    if len(spy_hist) >= 2:
-        peak = max(p.close for p in spy_hist)
-        last = spy_hist[-1].close
+    if len(spy_252) >= 2:
+        peak = max(p.close for p in spy_252)
+        last = spy_252[-1].close
         if peak > 0:
             spy_drawdown_252d = (last - peak) / peak
+
+    spy_off_60d_low: float | None = None
+    spy_60 = spy_full[-60:]
+    if len(spy_60) >= 2:
+        trough = min(p.close for p in spy_60)
+        last = spy_60[-1].close
+        if trough > 0:
+            spy_off_60d_low = (last - trough) / trough
 
     return RegimeIndicators(
         cpi_yoy=cpi_yoy,
@@ -314,7 +330,9 @@ def _gather_indicators_at(
         retail_yoy=retail_yoy,
         vix=vix,
         vix_20d_avg=vix_20d_avg,
+        vix_60d_max=vix_60d_max,
         spy_drawdown_252d=spy_drawdown_252d,
+        spy_off_60d_low=spy_off_60d_low,
         credit_spread_hy=credit_spread_hy,
         sources=(),
     )
@@ -388,6 +406,20 @@ def _portfolio_forward_return(
     return normalized, coverage
 
 
+# Fallbacks for ETFs that may not exist for the entire backtest window.
+# Keep this list MINIMAL: only true near-equivalents whose absence would
+# otherwise force the weight to be normalized into other assets. Risky
+# fallbacks (e.g. VOO -> SPY in 2008) inflate equity exposure during pre-
+# launch crisis windows and hurt the protective stance, so we leave them
+# out and let the period skip the leg (weight is dropped + renormalized).
+ETF_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "IBIT": ("BIL",),
+    "VIXY": ("BIL",),
+    "UUP": ("BIL",),
+    "SHV": ("BIL",),
+}
+
+
 def _ticker_forward_return(
     as_of: date,
     symbol: str,
@@ -395,23 +427,27 @@ def _ticker_forward_return(
     holding_days: int,
 ) -> float | None:
     history = history_cache.get(symbol)
-    if not history:
-        return None
-    entry_index = None
-    for i, point in enumerate(history):
-        if point.observed_at >= as_of:
-            entry_index = i
-            break
-    if entry_index is None:
-        return None
-    exit_index = entry_index + holding_days
-    if exit_index >= len(history):
-        return None
-    entry_price = history[entry_index].close
-    exit_price = history[exit_index].close
-    if entry_price <= 0:
-        return None
-    return (exit_price - entry_price) / entry_price
+    candidates = [symbol] + list(ETF_FALLBACKS.get(symbol, ()))
+    for candidate in candidates:
+        history = history_cache.get(candidate)
+        if not history:
+            continue
+        entry_index = None
+        for i, point in enumerate(history):
+            if point.observed_at >= as_of:
+                entry_index = i
+                break
+        if entry_index is None:
+            continue
+        exit_index = entry_index + holding_days
+        if exit_index >= len(history):
+            continue
+        entry_price = history[entry_index].close
+        exit_price = history[exit_index].close
+        if entry_price <= 0:
+            continue
+        return (exit_price - entry_price) / entry_price
+    return None
 
 
 def _normalize_etf_symbol(label: str) -> str:

@@ -42,6 +42,8 @@ class RegimeIndicators:
     spy_drawdown_252d: float | None
     credit_spread_hy: float | None
     sources: tuple[str, ...]
+    vix_60d_max: float | None = None
+    spy_off_60d_low: float | None = None
 
 
 @dataclass(frozen=True)
@@ -104,11 +106,11 @@ def gather_indicators(
     indpro_yoy = _try(macro_dashboard.growth_cycle, lambda m: m[0].value if m else None)
     retail_yoy = _try(macro_dashboard.growth_cycle, lambda m: m[1].value if len(m) > 1 else None)
 
-    vix, vix_20d_avg, vix_source = _vix_metrics(history_provider)
+    vix, vix_20d_avg, vix_60d_max, vix_source = _vix_metrics(history_provider)
     if vix_source:
         sources.append(vix_source)
 
-    spy_drawdown, spy_source = _spy_drawdown(history_provider)
+    spy_drawdown, spy_off_low, spy_source = _spy_drawdown(history_provider)
     if spy_source:
         sources.append(spy_source)
 
@@ -131,7 +133,9 @@ def gather_indicators(
         retail_yoy=retail_yoy,
         vix=vix,
         vix_20d_avg=vix_20d_avg,
+        vix_60d_max=vix_60d_max,
         spy_drawdown_252d=spy_drawdown,
+        spy_off_60d_low=spy_off_low,
         credit_spread_hy=credit_spread,
         sources=tuple(sources),
     )
@@ -160,34 +164,45 @@ def _safe_change(provider: MacroDataProvider, series_id: str, months: int) -> fl
         return 0.0
 
 
-def _vix_metrics(history_provider: PriceHistoryProvider) -> tuple[float | None, float | None, str | None]:
+def _vix_metrics(
+    history_provider: PriceHistoryProvider,
+) -> tuple[float | None, float | None, float | None, str | None]:
     try:
         history = history_provider.history(VIX_SYMBOL, range_period="3mo", interval="1d")
     except Exception:
-        return None, None, None
+        return None, None, None, None
     if len(history) < 2:
-        return None, None, None
+        return None, None, None, None
     closes = tuple(point.close for point in history)
     last = closes[-1]
     avg_window = closes[-20:] if len(closes) >= 20 else closes
     avg = sum(avg_window) / len(avg_window)
-    return float(last), float(avg), f"Yahoo chart {VIX_SYMBOL}"
+    peak_window = closes[-60:] if len(closes) >= 60 else closes
+    peak = max(peak_window)
+    return float(last), float(avg), float(peak), f"Yahoo chart {VIX_SYMBOL}"
 
 
-def _spy_drawdown(history_provider: PriceHistoryProvider) -> tuple[float | None, str | None]:
+def _spy_drawdown(
+    history_provider: PriceHistoryProvider,
+) -> tuple[float | None, float | None, str | None]:
     try:
         history = history_provider.history(SPY_SYMBOL, range_period="1y", interval="1d")
     except Exception:
-        return None, None
+        return None, None, None
     if len(history) < 2:
-        return None, None
+        return None, None, None
     closes = tuple(point.close for point in history)
     peak = max(closes)
     last = closes[-1]
     if peak <= 0:
-        return None, None
+        return None, None, None
     drawdown = (last - peak) / peak
-    return float(drawdown), f"Yahoo chart {SPY_SYMBOL} 1y"
+    off_low = None
+    recent = closes[-60:] if len(closes) >= 60 else closes
+    trough = min(recent)
+    if trough > 0:
+        off_low = (last - trough) / trough
+    return float(drawdown), off_low, f"Yahoo chart {SPY_SYMBOL} 1y"
 
 
 def _credit_spread(provider: MacroDataProvider) -> tuple[float | None, str | None]:
@@ -343,30 +358,58 @@ def _check_recession(indicators: RegimeIndicators) -> list[str] | None:
 
 
 def _check_recovery(indicators: RegimeIndicators) -> list[str] | None:
-    """V-bottom recovery: panic has passed but the market is still off recent highs.
+    """V-bottom recovery: panic peaked recently and the market is starting back up.
 
-    Tries to capture the post-2009-March / post-2020-April / post-2022-October
-    pattern where SPY is no longer in -12% drawdown but VIX is still elevated
-    relative to its 20d trailing average's earlier peak.
+    Three independent paths so the V can be caught even when one signal lags:
+    A) VIX is well off its 60d peak (<= 60% of peak) — fear unwinding
+    B) SPY has bounced >=5% off its 60d low while drawdown is still negative
+    C) Original conservative path: VIX descending vs 20d avg + drawdown band
+    Any single path is enough; multiple paths raise confidence implicitly.
     """
-    if indicators.vix is None or indicators.vix_20d_avg is None:
-        return None
-    if indicators.spy_drawdown_252d is None:
+    if indicators.vix is None or indicators.spy_drawdown_252d is None:
         return None
     vix = indicators.vix
     drawdown = indicators.spy_drawdown_252d
-    vix_20d = indicators.vix_20d_avg
 
-    drawdown_in_recovery_band = -0.18 < drawdown < -0.03
-    vix_still_elevated = vix > 18.0
-    vix_descending = vix < vix_20d * 0.95
+    triggers: list[str] = []
 
-    if drawdown_in_recovery_band and vix_still_elevated and vix_descending:
-        return [
-            f"SPY drawdown {drawdown * 100:.1f}% (off the lows but not at highs)",
-            f"VIX {vix:.1f} below 20d avg {vix_20d:.1f} (fear unwinding)",
-        ]
-    return None
+    # Path A: VIX off panic-level peak — peak must have hit 50+ (true crisis),
+    # current VIX <= 45% of peak, drawdown still negative. This deliberately
+    # only fires after 2008/2020-grade events; quieter pullbacks fall to Path C.
+    if (
+        indicators.vix_60d_max is not None
+        and indicators.vix_60d_max >= 50.0
+        and drawdown < -0.05
+    ):
+        peak = indicators.vix_60d_max
+        if vix <= peak * 0.45 and vix > 18.0:
+            triggers.append(
+                f"VIX {vix:.1f} is {(1 - vix / peak) * 100:.0f}% off 60d peak {peak:.1f} (crisis-grade)"
+            )
+
+    # Path B: SPY bounced from trough — require >=10% off-low (real bounce,
+    # not noise) and drawdown -8% to -25% (must have been real sell-off).
+    if (
+        indicators.spy_off_60d_low is not None
+        and indicators.spy_off_60d_low >= 0.10
+        and drawdown < -0.08
+        and drawdown > -0.25
+    ):
+        triggers.append(
+            f"SPY +{indicators.spy_off_60d_low * 100:.1f}% off 60d low, "
+            f"still {drawdown * 100:.1f}% from highs"
+        )
+
+    # Path C: original conservative VIX vs 20d avg
+    if indicators.vix_20d_avg is not None:
+        vix_20d = indicators.vix_20d_avg
+        drawdown_band = -0.18 < drawdown < -0.03
+        if vix > 18.0 and vix < vix_20d * 0.92 and drawdown_band:
+            triggers.append(
+                f"VIX {vix:.1f} below 20d avg {vix_20d:.1f} (fear unwinding)"
+            )
+
+    return triggers if triggers else None
 
 
 def _check_inflation_shock(indicators: RegimeIndicators) -> list[str] | None:
@@ -819,24 +862,38 @@ _VIX_OVERLAY_RULES: dict[str, int] = {
 }
 
 
-def apply_vix_overlay(template: PortfolioTemplate, vix: float | None) -> PortfolioTemplate:
-    """Adjust template weights based on VIX level.
+def _vix_tier_multiplier(vix: float) -> tuple[float, str]:
+    """Return (direction multiplier, label) for VIX-based weight shift.
 
-    VIX < 18 (calm): reduce cash/short-duration sleeves and boost risk-on equity.
-    VIX > 25 (stress): the opposite — boost cash, trim equity.
+    Four tiers:
+      VIX < 14    : very calm   -> +1.5x risk-on
+      14 <= VIX < 18 : calm     -> +1.0x risk-on
+      18 <= VIX <= 25 : normal  -> 0 (no overlay)
+      25 < VIX <= 32 : stress   -> -1.0x risk-off
+      VIX > 32    : crisis      -> -1.5x risk-off (panic territory; rarely hits sensitive regimes)
+    """
+    if vix < 14.0:
+        return 1.5, f"VIX {vix:.1f} < 14 (very calm) → equity boosted 1.5x"
+    if vix < 18.0:
+        return 1.0, f"VIX {vix:.1f} < 18 (calm) → equity boosted"
+    if vix > 32.0:
+        return -1.5, f"VIX {vix:.1f} > 32 (crisis) → equity trimmed 1.5x"
+    if vix > 25.0:
+        return -1.0, f"VIX {vix:.1f} > 25 (stress) → equity trimmed"
+    return 0.0, ""
+
+
+def apply_vix_overlay(template: PortfolioTemplate, vix: float | None) -> PortfolioTemplate:
+    """Adjust template weights based on VIX level (4-tier).
+
     Only applies to risk-on / mixed regimes; explicit panic and inflation/deflation
     templates are left untouched because their stance is already deliberate.
     """
     if vix is None or template.regime not in _VIX_SENSITIVE_REGIMES:
         return template
 
-    if vix < 18.0:
-        direction = +1
-        label = f"VIX {vix:.1f} < 18 → cash trimmed, equity boosted"
-    elif vix > 25.0:
-        direction = -1
-        label = f"VIX {vix:.1f} > 25 → equity trimmed, cash boosted"
-    else:
+    direction, label = _vix_tier_multiplier(vix)
+    if direction == 0.0:
         return template
 
     new_allocs = []
@@ -846,7 +903,7 @@ def apply_vix_overlay(template: PortfolioTemplate, vix: float | None) -> Portfol
         if new_weight < 0:
             new_weight = 0.0
         if delta != 0:
-            note = f"{alloc.rationale} [VIX overlay {delta:+d}pp]"
+            note = f"{alloc.rationale} [VIX overlay {delta:+.1f}pp]"
         else:
             note = alloc.rationale
         new_allocs.append(
