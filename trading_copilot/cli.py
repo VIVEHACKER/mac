@@ -88,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "macro":
         return emit(workflows.macro_report(), args.output)
 
+    if args.command == "regime":
+        return emit(workflows.regime_report(), args.output)
+
+    if args.command == "economic-calendar":
+        return emit(workflows.economic_calendar_report(days=args.days), args.output)
+
     if args.command == "industries":
         report = workflows.industry_leadership_report(
             current_limit=args.current_limit,
@@ -281,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fundamentals = sub.add_parser(
         "fundamentals",
-        help="Analyze basic financial statements from SEC companyfacts.",
+        help="Analyze basic financial statements from SEC companyfacts with Yahoo fallback.",
     )
     fundamentals.add_argument("ticker")
     fundamentals.add_argument("--output", type=Path)
@@ -300,6 +306,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate a FRED-based macro cycle dashboard.",
     )
     macro.add_argument("--output", type=Path)
+
+    regime = sub.add_parser(
+        "regime",
+        help="Classify current macro regime (panic, inflation_shock, deflation_risk, easy_money, "
+             "stagflation, recession, disinflation_expansion, transition) and propose a portfolio template.",
+    )
+    regime.add_argument("--output", type=Path)
+
+    economic_calendar = sub.add_parser(
+        "economic-calendar",
+        help="Track upcoming FOMC and major BLS macro release dates.",
+    )
+    economic_calendar.add_argument("--days", type=int, default=60)
+    economic_calendar.add_argument("--output", type=Path)
 
     industries = sub.add_parser(
         "industries",
@@ -347,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
         "screen-all",
         help="Rank a market universe with quote data and optional event signals.",
     )
-    screen_all.add_argument("--market", default="us", choices=["us"])
+    screen_all.add_argument("--market", default="us", choices=["us", "kospi", "kosdaq", "kr"])
     screen_all.add_argument(
         "--max-tickers",
         type=int,

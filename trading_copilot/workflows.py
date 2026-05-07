@@ -52,6 +52,7 @@ from .news_monitor import (
 )
 from .playbook import PlaybookBuilder, format_playbook_report
 from .quote_summary import QuoteSummaryProvider, YahooQuoteSummaryProvider
+from .regime import build_regime_report, format_regime_report
 from .portfolio import (
     DEFAULT_SINGLE_STOCK_POOL,
     build_aggressive_portfolio,
@@ -96,6 +97,13 @@ class TradingWorkflows:
         self.fundamentals = fundamentals or HybridFundamentalsProvider()
         self.economic_calendar_providers = economic_calendar_providers
         self.quote_summary = quote_summary or YahooQuoteSummaryProvider()
+
+    def regime_report(self) -> str:
+        report = build_regime_report(
+            macro_provider=self.macro,
+            history_provider=self.industry_history,
+        )
+        return format_regime_report(report)
 
     def playbook_report(
         self,
