@@ -54,6 +54,8 @@ class RegimeIndicators:
     spy_12m_return: float | None = None
     spy_5y_return: float | None = None
     vix_12m_percentile: float | None = None
+    spy_3m_return: float | None = None
+    spy_6m_return: float | None = None
 
 
 @dataclass(frozen=True)
@@ -669,19 +671,20 @@ TEMPLATES: dict[str, PortfolioTemplate] = {
         regime="recovery",
         description=(
             "V-bottom recovery playbook. Panic has passed (drawdown easing, VIX "
-            "falling) but the market is not yet at new highs. Lean risk-on with "
-            "fast hedges in case the recovery aborts."
+            "falling) but the market is not yet at new highs. Lean risk-on hard "
+            "to capture the rebound; backtest showed the prior conservative template "
+            "underperformed SPY by 1-2% in 2020-04 and 2024 V-bottoms."
         ),
         allocations=(
-            _alloc("US large-cap", "VOO", 22.0, "Standard recovery beneficiary."),
-            _alloc("Growth tech", "QQQ", 16.0, "Multiple expansion as fear unwinds."),
-            _alloc("Semiconductors", "SMH", 10.0, "High-beta cyclical leverage in early cycle."),
-            _alloc("Small-cap", "IWM", 8.0, "Highest beta to recovery; cheap valuations."),
-            _alloc("Quality dividend", "SCHD", 6.0, "Stable cash flow during the rebuild."),
-            _alloc("Energy", "XLE", 5.0, "Late-cycle confirmation; cyclical earnings."),
-            _alloc("Long Treasuries", "TLT", 6.0, "Mild duration if recovery aborts."),
-            _alloc("Gold", "GLD", 7.0, "Tail hedge if Fed has to ease again."),
-            _alloc("Cash / T-bills", "BIL", 20.0, "Optionality if the V-bottom turns into W."),
+            _alloc("US large-cap", "VOO", 25.0, "Standard recovery beneficiary."),
+            _alloc("Growth tech", "QQQ", 18.0, "Multiple expansion as fear unwinds."),
+            _alloc("Semiconductors", "SMH", 11.0, "High-beta cyclical leverage in early cycle."),
+            _alloc("Small-cap", "IWM", 9.0, "Highest beta to recovery; cheap valuations."),
+            _alloc("Quality dividend", "SCHD", 5.0, "Stable cash flow during the rebuild."),
+            _alloc("Energy", "XLE", 4.0, "Late-cycle confirmation; cyclical earnings."),
+            _alloc("Long Treasuries", "TLT", 5.0, "Mild duration if recovery aborts."),
+            _alloc("Gold", "GLD", 6.0, "Tail hedge if Fed has to ease again."),
+            _alloc("Cash / T-bills", "BIL", 17.0, "Optionality if the V-bottom turns into W."),
         ),
         avoid=(
             "Pure defensives at full size (XLU, XLP, UUP overweight)",
