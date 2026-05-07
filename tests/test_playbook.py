@@ -174,6 +174,13 @@ def disinflationary_macro() -> StaticMacroProvider:
             "T10Y2Y": point("T10Y2Y", 0.6),
             "INDPRO": monthly("INDPRO", 100.0, 102.5),
             "RSAFS": monthly("RSAFS", 600000.0, 618000.0),
+            "DTWEXBGS": monthly("DTWEXBGS", 115.0, 113.0),
+            "DEXUSEU": monthly("DEXUSEU", 1.05, 1.08),
+            "DEXJPUS": monthly("DEXJPUS", 145.0, 142.0),
+            "DEXUSUK": monthly("DEXUSUK", 1.25, 1.29),
+            "DEXSZUS": monthly("DEXSZUS", 0.90, 0.88),
+            "DEXCHUS": monthly("DEXCHUS", 7.20, 7.10),
+            "PMAIZMTUSDM": monthly("PMAIZMTUSDM", 180.0, 185.0),
         }
     )
 

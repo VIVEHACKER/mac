@@ -37,11 +37,16 @@ from .market_data import (
     format_quote_report,
     format_snapshot_line,
 )
+from .metrics import build_technical_profile
 from .macro import (
     FredCsvProvider,
     MacroDataProvider,
     build_macro_dashboard,
     format_macro_report,
+)
+from .ml_recommendations import (
+    build_ml_recommendation,
+    format_ml_recommendation_report,
 )
 from .news_monitor import (
     EventProviderNewsAdapter,
@@ -58,7 +63,7 @@ from .pattern_mining import (
     pattern_results_to_csv,
 )
 from .playbook import PlaybookBuilder, format_playbook_report
-from .quote_summary import QuoteSummaryProvider, YahooQuoteSummaryProvider
+from .quote_summary import QuoteSummaryProvider, YahooQuoteSummaryProvider, map_to_sector_etf
 from .regime import build_regime_report, format_regime_report
 from .backtest import (
     DEFAULT_HOLDING_DAYS,
@@ -266,6 +271,112 @@ class TradingWorkflows:
         )
         return build_recommendation_report(result)
 
+    def ml_recommendation_report(
+        self,
+        ticker: str,
+        target_price: float | None,
+        stop_price: float | None,
+        horizon: str,
+        context: str,
+        include_sec_events: bool = False,
+        include_news: bool = False,
+        include_signals: bool = False,
+        event_limit: int = 3,
+        news_limit: int = 3,
+        pattern_horizon: int = 63,
+        min_pattern_samples: int = 3,
+        risk_budget_pct: float = 2.0,
+        max_position_pct: float = 12.0,
+        include_fundamentals: bool = True,
+        include_patterns: bool = True,
+    ) -> str:
+        normalized = normalize_ticker(ticker)
+        if include_signals:
+            include_sec_events = True
+            include_news = True
+
+        events = ()
+        if include_sec_events:
+            events += self._recent_sec_events(normalized, event_limit)
+        if include_news:
+            events += self._recent_news(normalized, news_limit)
+
+        data_gaps: list[str] = []
+        snapshot = self.market_data.snapshot(normalized)
+        history = self.industry_history.history(normalized, range_period="2y", interval="1d")
+        benchmark = self.industry_history.history("SPY", range_period="2y", interval="1d")
+        technical = build_technical_profile(
+            tuple(point.close for point in history),
+            benchmark_closes=tuple(point.close for point in benchmark),
+        )
+        macro_dashboard = build_macro_dashboard(self.macro, price_provider=self.industry_history)
+        data_gaps.extend(macro_dashboard.data_gaps)
+
+        fundamentals = None
+        if include_fundamentals:
+            try:
+                fundamentals = self.fundamentals.analysis(normalized)
+            except Exception as exc:
+                data_gaps.append(f"fundamentals: {exc}")
+
+        sector_score = None
+        try:
+            sector_symbol = map_to_sector_etf(None, normalized)
+            if sector_symbol is None:
+                try:
+                    summary = self.quote_summary.summary(normalized)
+                except Exception as exc:
+                    summary = None
+                    data_gaps.append(f"quoteSummary: {exc}")
+                sector_symbol = map_to_sector_etf(summary, normalized)
+            if sector_symbol is not None:
+                rotation = analyze_industries(history_provider=self.industry_history)
+                sector_score = next(
+                    (score for score in rotation.scores if score.symbol == sector_symbol.upper()),
+                    None,
+                )
+                data_gaps.extend(rotation.errors)
+                if sector_score is None:
+                    data_gaps.append(f"sector fit: {sector_symbol} not found in rotation scores")
+            else:
+                data_gaps.append("sector fit: no sector/industry proxy mapping")
+        except Exception as exc:
+            data_gaps.append(f"sector fit: {exc}")
+
+        pattern_results = ()
+        if include_patterns:
+            try:
+                pattern_report = mine_default_patterns(
+                    macro_provider=self.macro,
+                    history_provider=self.industry_history,
+                    assets=(normalized,),
+                    horizons=(pattern_horizon,),
+                    min_samples=min_pattern_samples,
+                )
+                pattern_results = pattern_report.results
+                data_gaps.extend(pattern_report.errors)
+            except Exception as exc:
+                data_gaps.append(f"patterns: {exc}")
+
+        result = build_ml_recommendation(
+            ticker=normalized,
+            snapshot=snapshot,
+            technical=technical,
+            macro_dashboard=macro_dashboard,
+            fundamentals=fundamentals,
+            signals=detect_forecast_signals(events),
+            pattern_results=pattern_results,
+            sector_score=sector_score,
+            target_price=target_price,
+            stop_price=stop_price,
+            horizon=horizon,
+            context=context,
+            risk_budget_pct=risk_budget_pct,
+            max_position_pct=max_position_pct,
+            data_gaps=tuple(data_gaps),
+        )
+        return format_ml_recommendation_report(result)
+
     def events_report(self, ticker: str, limit: int = 5) -> str:
         normalized = normalize_ticker(ticker)
         return format_events_report(normalized, self._recent_sec_events(normalized, limit))
@@ -304,7 +415,9 @@ class TradingWorkflows:
         return format_signals_report(normalized, detect_forecast_signals(events))
 
     def macro_report(self) -> str:
-        return format_macro_report(build_macro_dashboard(self.macro))
+        return format_macro_report(
+            build_macro_dashboard(self.macro, price_provider=self.industry_history)
+        )
 
     def economic_calendar_report(
         self,

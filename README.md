@@ -14,6 +14,7 @@ python -m trading_copilot init
 python -m trading_copilot watchlist add MSFT --note "Cloud earnings revision watch"
 python -m trading_copilot thesis set MSFT --direction long --statement "Azure growth and operating leverage can support revisions." --invalidation "Cloud growth decelerates below peer median."
 python -m trading_copilot quote MSFT --output out\quote-MSFT.md
+python -m trading_copilot quote 005930 --output out\quote-005930.md
 python -m trading_copilot events MSFT --limit 5 --output out\events-MSFT.md
 python -m trading_copilot news MSFT --limit 5 --output out\news-MSFT.md
 python -m trading_copilot news-fast MSFT --limit 20 --output out\fast-news-MSFT.md
@@ -21,8 +22,13 @@ python -m trading_copilot calendar MSFT --horizon 3month --output out\calendar-M
 python -m trading_copilot fundamentals MSFT --output out\fundamentals-MSFT.md
 python -m trading_copilot signals MSFT --event-limit 3 --news-limit 5 --output out\signals-MSFT.md
 python -m trading_copilot macro --output out\macro-cycle.md
+python -m trading_copilot economic-calendar --days 90 --output out\economic-calendar.md
 python -m trading_copilot industries --current-limit 10 --next-limit 10 --output out\industry-leadership.md --csv-output out\industry-leadership.csv
+python -m trading_copilot patterns --asset-set macro --horizons 21,63,126,252 --min-samples 5 --output out\patterns.md --csv-output out\patterns.csv
+python -m trading_copilot recommend-ml MSFT --target-price 520 --stop-price 390 --with-news --with-signals --output out\recommend-ml-MSFT.md
 python -m trading_copilot screen-all --market us --max-tickers 50 --limit 25 --with-news --output out\screen-us.md --csv-output out\screen-us.csv
+python -m trading_copilot screen-all --market kospi --max-tickers 50 --limit 25 --output out\screen-kospi.md --csv-output out\screen-kospi.csv
+python -m trading_copilot screen-all --market kosdaq --max-tickers 50 --limit 25 --output out\screen-kosdaq.md --csv-output out\screen-kosdaq.csv
 python -m trading_copilot portfolio-100 --single-stock-pool NVDA,AVGO,AMD,MSFT,META,AMZN,TSLA,PLTR,CRWD,ARM --output out\portfolio-100.md --csv-output out\portfolio-100.csv
 python -m trading_copilot morning MSFT --with-market-data --output out\morning-with-market.md
 python -m trading_copilot recommend MSFT --target-price 520 --stop-price 390 --horizon swing --with-signals --context "Only after earnings reaction stabilizes" --output out\recommend-MSFT.md
@@ -32,18 +38,21 @@ python -m trading_copilot pretrade MSFT --side buy --risk-budget "1% portfolio r
 ## Workflows
 
 - `morning`: daily watchlist checklist
-- `quote`: sourced quote snapshot from Yahoo Finance chart data
+- `quote`: sourced quote snapshot from Yahoo Finance chart data. Korean numeric tickers are resolved through Yahoo suffixes by trying KOSPI `.KS` then KOSDAQ `.KQ`; index aliases `KOSPI` and `KOSDAQ` resolve to Yahoo's Korean index symbols
 - `events`: recent SEC EDGAR filing events by ticker
 - `news`: recent RSS news headlines by ticker
 - `news-fast`: faster headline monitor combining optional Marketaux ticker news, RSS, and SEC filing events
-- `calendar`: upcoming earnings calendar events through Alpha Vantage when `ALPHAVANTAGE_API_KEY` is set
-- `fundamentals`: basic SEC companyfacts financial statement analysis: revenue growth, margin, balance sheet leverage, and free cash flow
+- `calendar`: upcoming earnings calendar events through Alpha Vantage when `ALPHAVANTAGE_API_KEY` is set, with a no-key Nasdaq calendar fallback
+- `fundamentals`: basic financial statement analysis from SEC companyfacts, with Yahoo fundamentals-timeseries fallback: revenue growth, margin, balance sheet leverage, and free cash flow
 - `signals`: earnings-forecast leading signals from contracts, guidance, demand, margin, regulatory, and filing events
-- `macro`: FRED-based macro cycle dashboard covering CPI, core CPI, unemployment, Fed funds, the 10Y-2Y yield curve, industrial production, and retail sales
+- `macro`: FRED/Yahoo-based macro cycle dashboard covering CPI, core CPI, unemployment, Fed funds, the 10Y-2Y yield curve, industrial production, retail sales, broad dollar trend, reserve-currency strength, global corn prices, and a Yahoo corn-futures proxy when FRED commodity data is slow or blocked
+- `economic-calendar`: upcoming FOMC decisions plus major BLS releases such as Employment Situation, CPI, PPI, and JOLTS
 - `industries`: ETF-proxy rotation radar that separates current leading industries from next-leader candidates using 1M/3M/6M relative strength and acceleration
-- `screen-all`: ranked market-universe screen with quote data and optional news/SEC signal checks
+- `patterns`: historical macro/market condition miner for VIX spikes, CPI, Fed funds, broad dollar trend, euro/yen/pound/franc/yuan strength, corn-price shocks, unemployment, and 10Y-2Y yield-curve inversion. It can test asset presets such as `core`, `bonds`, `em_bonds`, `cash`/`mmf`, `precious`, `energy`, `metals`, `critical_minerals`, `coal`, `agriculture`, `commodities`, and `macro`. It reports sample count, win rate, Wilson 95% lower bound, forward returns, drawdown, and multiple-testing warnings. A 100% historical sample is explicitly not treated as a future guarantee
+- `screen-all`: ranked market-universe screen with quote data and optional news/SEC signal checks. Supported markets are `us`, `kospi`, `kosdaq`, and combined Korea `kr`
 - `portfolio-100`: aggressive target-100%-annual-return portfolio draft with leverage, commodities, bonds, and exactly 3 single stocks
 - `recommend`: research-only investment view using quote data, stored thesis, target price, stop price, optional SEC/news events, and optional forecast signals
+- `recommend-ml`: guarded ML+AI research recommendation that blends technical momentum, fundamentals, macro regime, sector/industry rotation fit, historical pattern statistics, forecast signals, reward/risk, data-quality scoring, and position sizing into a scored `Consider Buy` / `Watch` / `Wait` / `Avoid Add` view. Weak data quality caps the action, thin perfect historical samples are penalized, and the report emits counterarguments, an AI review packet, and a human approval gate; it does not route orders
 - `screen`: idea screen prompt
 - `thesis set/review`: falsifiable thesis storage and review
 - `pretrade`: guarded pre-trade checklist
@@ -86,14 +95,26 @@ to identify yourself to SEC EDGAR per their fair-access policy.
 
 ### Optional API keys
 
+See [API_KEYS_AND_FALLBACKS.md](docs/API_KEYS_AND_FALLBACKS.md) for exact signup
+locations, environment variable names, and the fallback ladder used when a keyed
+provider is unavailable.
+
 ```powershell
 $env:MARKETAUX_API_KEY="your-key"
 $env:ALPHAVANTAGE_API_KEY="your-key"
+$env:TRADING_COPILOT_CONTACT="Your Name your.email@example.com"
 ```
 
 Without `MARKETAUX_API_KEY`, `news-fast` still uses RSS and SEC events but reports
 the missing wire/news API as a data gap. Without `ALPHAVANTAGE_API_KEY`,
-`calendar` emits a data-gap section instead of failing the run.
+`calendar` falls back to Nasdaq's no-key earnings calendar endpoint. The Nasdaq
+endpoint is not a documented contract, so cache results and treat failures as
+data gaps rather than hard failures.
+
+KOSPI/KOSDAQ support uses KRX/KIND's public listed-company download for the stock
+universe and Yahoo Finance chart data for prices (`.KS` for KOSPI, `.KQ` for
+KOSDAQ). It requires no API key, but the Yahoo side is still an unofficial data
+source and should be cached and treated as a data gap if blocked.
 
 `macro` tries the FRED CSV endpoint first. If the local network times out or
 blocks FRED, it falls back to GovSpending JSON exports that mirror FRED series

@@ -4,9 +4,12 @@ import csv
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
+import json
 from typing import Callable, Protocol
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+from .industry_rotation import PriceHistoryProvider
 
 
 DEFAULT_SERIES_NAMES = {
@@ -17,6 +20,13 @@ DEFAULT_SERIES_NAMES = {
     "T10Y2Y": "10Y-2Y Treasury Spread",
     "INDPRO": "Industrial Production",
     "RSAFS": "Retail Sales",
+    "DTWEXBGS": "Nominal Broad U.S. Dollar Index",
+    "DEXUSEU": "Euro vs USD",
+    "DEXJPUS": "Japanese Yen vs USD",
+    "DEXUSUK": "British Pound vs USD",
+    "DEXSZUS": "Swiss Franc vs USD",
+    "DEXCHUS": "Chinese Yuan vs USD",
+    "PMAIZMTUSDM": "Global Corn Price",
 }
 
 
@@ -66,7 +76,9 @@ class MacroDashboard:
     inflation: tuple[MacroMetric, ...]
     labor_policy: tuple[MacroMetric, ...]
     growth_cycle: tuple[MacroMetric, ...]
-    sources: tuple[str, ...]
+    currencies_commodities: tuple[MacroMetric, ...] = ()
+    sources: tuple[str, ...] = ()
+    data_gaps: tuple[str, ...] = ()
 
 
 class MacroDataError(RuntimeError):
@@ -75,6 +87,8 @@ class MacroDataError(RuntimeError):
 
 class FredCsvProvider:
     BASE_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+    TEXT_BASE_URL = "https://fred.stlouisfed.org/data"
+    FALLBACK_BASE_URL = "https://govspending.org/api/export/fred"
 
     def __init__(
         self,
@@ -83,11 +97,28 @@ class FredCsvProvider:
     ):
         self.fetch_text = fetch_text or default_fetch_text
         self.series_names = series_names or DEFAULT_SERIES_NAMES
+        self._prefer_fallback = False
 
     def series(self, series_id: str) -> FredSeries:
         normalized = series_id.strip().upper()
         source = f"{self.BASE_URL}?id={quote(normalized)}"
-        parsed = parse_fred_csv(self.fetch_text(source), normalized, source)
+        if self._prefer_fallback:
+            try:
+                parsed = self._fallback_series(normalized)
+            except Exception:
+                try:
+                    parsed = self._text_series(normalized)
+                except Exception:
+                    parsed = parse_fred_csv(self.fetch_text(source), normalized, source)
+        else:
+            try:
+                parsed = parse_fred_csv(self.fetch_text(source), normalized, source)
+            except Exception:
+                self._prefer_fallback = True
+                try:
+                    parsed = self._fallback_series(normalized)
+                except Exception:
+                    parsed = self._text_series(normalized)
         return FredSeries(
             series_id=parsed.series_id,
             name=self.series_names.get(normalized, normalized),
@@ -95,8 +126,37 @@ class FredCsvProvider:
             observations=parsed.observations,
         )
 
+    def _fallback_series(self, series_id: str) -> FredSeries:
+        fallback_source = f"{self.FALLBACK_BASE_URL}/{quote(series_id)}.json"
+        try:
+            return parse_govspending_json(
+                self.fetch_text(fallback_source),
+                series_id,
+                fallback_source,
+            )
+        except Exception as fallback_error:
+            raise MacroDataError(
+                f"{series_id}: unable to fetch FRED CSV or fallback JSON"
+            ) from fallback_error
 
-def build_macro_dashboard(provider: MacroDataProvider | None = None) -> MacroDashboard:
+    def _text_series(self, series_id: str) -> FredSeries:
+        text_source = f"{self.TEXT_BASE_URL}/{quote(series_id)}"
+        try:
+            return parse_fred_text_table(
+                self.fetch_text(text_source),
+                series_id,
+                text_source,
+            )
+        except Exception as text_error:
+            raise MacroDataError(
+                f"{series_id}: unable to fetch FRED CSV, fallback JSON, or FRED text"
+            ) from text_error
+
+
+def build_macro_dashboard(
+    provider: MacroDataProvider | None = None,
+    price_provider: PriceHistoryProvider | None = None,
+) -> MacroDashboard:
     provider = provider or FredCsvProvider()
     cpi = provider.series("CPIAUCSL")
     core_cpi = provider.series("CPILFESL")
@@ -105,6 +165,13 @@ def build_macro_dashboard(provider: MacroDataProvider | None = None) -> MacroDas
     yield_curve = provider.series("T10Y2Y")
     industrial_production = provider.series("INDPRO")
     retail_sales = provider.series("RSAFS")
+    optional_series: dict[str, FredSeries] = {}
+    data_gaps: list[str] = []
+    for series_id in ("DTWEXBGS", "DEXUSEU", "DEXJPUS", "DEXUSUK", "DEXSZUS", "DEXCHUS", "PMAIZMTUSDM"):
+        try:
+            optional_series[series_id] = provider.series(series_id)
+        except Exception as exc:
+            data_gaps.append(f"{series_id}: {exc}")
 
     headline_cpi_yoy = percent_change_since_months(cpi, 12)
     core_cpi_yoy = percent_change_since_months(core_cpi, 12)
@@ -115,7 +182,6 @@ def build_macro_dashboard(provider: MacroDataProvider | None = None) -> MacroDas
     yield_curve_spread = latest_observation(yield_curve).value
     industrial_production_yoy = percent_change_since_months(industrial_production, 12)
     retail_sales_yoy = percent_change_since_months(retail_sales, 12)
-
     regime = classify_macro_regime(
         headline_cpi_yoy=headline_cpi_yoy,
         core_cpi_yoy=core_cpi_yoy,
@@ -196,6 +262,37 @@ def build_macro_dashboard(provider: MacroDataProvider | None = None) -> MacroDas
             source=retail_sales.source,
         ),
     )
+    currencies_commodities = build_currency_commodity_metrics(optional_series, data_gaps)
+    if price_provider is not None:
+        existing_series_ids = {metric.series_id for metric in currencies_commodities}
+        for fred_id, symbol, label, inverse in (
+            ("DEXUSEU", "EURUSD=X", "Euro vs USD Proxy", False),
+            ("DEXJPUS", "JPY=X", "Japanese Yen vs USD Proxy", True),
+            ("DEXUSUK", "GBPUSD=X", "British Pound vs USD Proxy", False),
+            ("DEXSZUS", "CHF=X", "Swiss Franc vs USD Proxy", True),
+            ("DEXCHUS", "CNY=X", "Chinese Yuan vs USD Proxy", True),
+        ):
+            if fred_id not in existing_series_ids:
+                metric = build_price_change_metric(
+                    symbol=symbol,
+                    label=label,
+                    price_provider=price_provider,
+                    data_gaps=data_gaps,
+                    inverse=inverse,
+                    trend_fn=(lambda value: describe_currency_strength(value, threshold=2.0))
+                    if fred_id == "DEXCHUS"
+                    else describe_currency_strength,
+                )
+                if metric is not None:
+                    currencies_commodities = currencies_commodities + (metric,)
+        corn_futures = build_price_change_metric(
+            symbol="ZC=F",
+            label="Corn Futures Proxy",
+            price_provider=price_provider,
+            data_gaps=data_gaps,
+        )
+        if corn_futures is not None:
+            currencies_commodities = currencies_commodities + (corn_futures,)
     sources = tuple(
         sorted(
             {
@@ -206,16 +303,102 @@ def build_macro_dashboard(provider: MacroDataProvider | None = None) -> MacroDas
                 yield_curve.source,
                 industrial_production.source,
                 retail_sales.source,
+                *(series.source for series in optional_series.values()),
             }
         )
     )
+    all_metrics = inflation + labor_policy + growth_cycle + currencies_commodities
     return MacroDashboard(
-        as_of=max(metric.as_of for metric in inflation + labor_policy + growth_cycle),
+        as_of=max(metric.as_of for metric in all_metrics),
         regime=regime,
         inflation=inflation,
         labor_policy=labor_policy,
         growth_cycle=growth_cycle,
+        currencies_commodities=currencies_commodities,
         sources=sources,
+        data_gaps=tuple(data_gaps),
+    )
+
+
+def build_currency_commodity_metrics(
+    series_by_id: dict[str, FredSeries],
+    data_gaps: list[str],
+) -> tuple[MacroMetric, ...]:
+    metrics: list[MacroMetric] = []
+
+    def append_metric(
+        series_id: str,
+        value_fn: Callable[[FredSeries], float],
+        trend_fn: Callable[[float], str],
+    ) -> None:
+        series = series_by_id.get(series_id)
+        if series is None:
+            return
+        try:
+            value = value_fn(series)
+        except Exception as exc:
+            data_gaps.append(f"{series_id}: {exc}")
+            return
+        metrics.append(
+            MacroMetric(
+                label=DEFAULT_SERIES_NAMES[series_id],
+                series_id=series_id,
+                value=value,
+                unit="% 6M",
+                as_of=latest_observation(series).observed_at,
+                trend=trend_fn(value),
+                source=series.source,
+            )
+        )
+
+    append_metric("DTWEXBGS", lambda series: percent_change_since_months(series, 6), describe_broad_dollar)
+    append_metric("DEXUSEU", lambda series: percent_change_since_months(series, 6), describe_currency_strength)
+    append_metric("DEXJPUS", lambda series: inverse_percent_change_since_months(series, 6), describe_currency_strength)
+    append_metric("DEXUSUK", lambda series: percent_change_since_months(series, 6), describe_currency_strength)
+    append_metric("DEXSZUS", lambda series: inverse_percent_change_since_months(series, 6), describe_currency_strength)
+    append_metric(
+        "DEXCHUS",
+        lambda series: inverse_percent_change_since_months(series, 6),
+        lambda value: describe_currency_strength(value, threshold=2.0),
+    )
+    append_metric("PMAIZMTUSDM", lambda series: percent_change_since_months(series, 6), describe_commodity_pressure)
+    return tuple(metrics)
+
+
+def build_price_change_metric(
+    symbol: str,
+    label: str,
+    price_provider: PriceHistoryProvider,
+    data_gaps: list[str],
+    inverse: bool = False,
+    trend_fn: Callable[[float], str] | None = None,
+) -> MacroMetric | None:
+    normalized = symbol.upper()
+    try:
+        prices = tuple(sorted(price_provider.history(normalized, range_period="6mo", interval="1d"), key=lambda item: item.observed_at))
+        if len(prices) < 2:
+            raise MacroDataError(f"{normalized}: not enough price observations")
+        first = prices[0]
+        latest = prices[-1]
+        if first.close == 0:
+            raise MacroDataError(f"{normalized}: starting price is zero")
+        if inverse:
+            if latest.close == 0:
+                raise MacroDataError(f"{normalized}: latest price is zero")
+            value = ((1.0 / latest.close) - (1.0 / first.close)) / (1.0 / first.close) * 100.0
+        else:
+            value = (latest.close - first.close) / first.close * 100.0
+    except Exception as exc:
+        data_gaps.append(f"{normalized}: {exc}")
+        return None
+    return MacroMetric(
+        label=label,
+        series_id=normalized,
+        value=value,
+        unit="% 6M",
+        as_of=latest.observed_at,
+        trend=(trend_fn or describe_commodity_pressure)(value),
+        source=f"https://query1.finance.yahoo.com/v8/finance/chart/{normalized}?range=6mo&interval=1d",
     )
 
 
@@ -357,6 +540,9 @@ def format_macro_report(dashboard: MacroDashboard) -> str:
         "## Growth and Consumer Demand",
         format_metric_table(dashboard.growth_cycle),
         "",
+        "## Currencies and Commodities",
+        format_metric_table(dashboard.currencies_commodities),
+        "",
         "## What To Watch",
     ]
     lines.extend(f"- {item}" for item in dashboard.regime.watch_items)
@@ -364,14 +550,18 @@ def format_macro_report(dashboard: MacroDashboard) -> str:
     lines.extend(f"- {item}" for item in dashboard.regime.portfolio_implications)
     lines.extend(["", "## Sources"])
     lines.extend(f"- {source}" for source in dashboard.sources)
+    if dashboard.data_gaps:
+        lines.extend(["", "## Data Gaps"])
+        lines.extend(f"- {gap}" for gap in dashboard.data_gaps)
     return "\n".join(lines)
 
 
 def parse_fred_csv(text: str, series_id: str, source: str) -> FredSeries:
     normalized = series_id.strip().upper()
     reader = csv.DictReader(StringIO(text))
-    if reader.fieldnames is None or "observation_date" not in reader.fieldnames:
-        raise MacroDataError(f"{normalized}: FRED CSV is missing observation_date")
+    date_field = fred_date_field(reader.fieldnames)
+    if date_field is None:
+        raise MacroDataError(f"{normalized}: FRED CSV is missing date field")
     if normalized not in reader.fieldnames:
         raise MacroDataError(f"{normalized}: FRED CSV is missing value column")
 
@@ -380,7 +570,7 @@ def parse_fred_csv(text: str, series_id: str, source: str) -> FredSeries:
         value = parse_fred_value(row.get(normalized))
         if value is None:
             continue
-        observed_at = date.fromisoformat(str(row["observation_date"]))
+        observed_at = date.fromisoformat(str(row[date_field]))
         observations.append(MacroObservation(normalized, observed_at, value))
     if not observations:
         raise MacroDataError(f"{normalized}: FRED CSV has no numeric observations")
@@ -391,6 +581,84 @@ def parse_fred_csv(text: str, series_id: str, source: str) -> FredSeries:
         source=source,
         observations=tuple(observations),
     )
+
+
+def parse_fred_text_table(text: str, series_id: str, source: str) -> FredSeries:
+    normalized = series_id.strip().upper()
+    observations: list[MacroObservation] = []
+    for line in text.splitlines():
+        parsed = parse_fred_text_observation(line)
+        if parsed is None:
+            continue
+        observed_at, value = parsed
+        observations.append(MacroObservation(normalized, observed_at, value))
+    if not observations:
+        raise MacroDataError(f"{normalized}: FRED text endpoint has no numeric observations")
+    observations.sort(key=lambda item: item.observed_at)
+    return FredSeries(
+        series_id=normalized,
+        name=DEFAULT_SERIES_NAMES.get(normalized, normalized),
+        source=source,
+        observations=tuple(observations),
+    )
+
+
+def parse_fred_text_observation(line: str) -> tuple[date, float] | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if "|" in stripped:
+        parts = [part.strip() for part in stripped.split("|")]
+    else:
+        parts = stripped.split()
+    if len(parts) < 2:
+        return None
+    try:
+        observed_at = date.fromisoformat(parts[0])
+    except ValueError:
+        return None
+    value = parse_fred_value(parts[-1])
+    if value is None:
+        return None
+    return observed_at, value
+
+
+def parse_govspending_json(text: str, series_id: str, source: str) -> FredSeries:
+    normalized = series_id.strip().upper()
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise MacroDataError(f"{normalized}: fallback JSON is not an object")
+    observations_payload = payload.get("observations")
+    if not isinstance(observations_payload, list):
+        raise MacroDataError(f"{normalized}: fallback JSON is missing observations")
+
+    observations: list[MacroObservation] = []
+    for row in observations_payload:
+        if not isinstance(row, dict):
+            continue
+        value = parse_fred_value(str(row.get("value")) if row.get("value") is not None else None)
+        if value is None:
+            continue
+        observed_at = date.fromisoformat(str(row["date"]))
+        observations.append(MacroObservation(normalized, observed_at, value))
+    if not observations:
+        raise MacroDataError(f"{normalized}: fallback JSON has no numeric observations")
+    observations.sort(key=lambda item: item.observed_at)
+    return FredSeries(
+        series_id=normalized,
+        name=str(payload.get("title") or DEFAULT_SERIES_NAMES.get(normalized, normalized)),
+        source=source,
+        observations=tuple(observations),
+    )
+
+
+def fred_date_field(fieldnames: list[str] | None) -> str | None:
+    if fieldnames is None:
+        return None
+    for candidate in ("observation_date", "DATE", "date"):
+        if candidate in fieldnames:
+            return candidate
+    return None
 
 
 def parse_fred_value(value: str | None) -> float | None:
@@ -412,6 +680,18 @@ def percent_change_since_months(
     if prior.value == 0:
         raise MacroDataError(f"{series.series_id}: prior value is zero")
     return (latest.value - prior.value) / prior.value * 100.0
+
+
+def inverse_percent_change_since_months(
+    series: FredSeries,
+    months: int,
+    as_of: date | None = None,
+) -> float:
+    latest = latest_observation(series, as_of)
+    prior = observation_on_or_before(series, subtract_months(latest.observed_at, months))
+    if latest.value == 0 or prior.value == 0:
+        raise MacroDataError(f"{series.series_id}: exchange rate value is zero")
+    return ((1.0 / latest.value) - (1.0 / prior.value)) / (1.0 / prior.value) * 100.0
 
 
 def change_since_months(series: FredSeries, months: int, as_of: date | None = None) -> float:
@@ -491,6 +771,30 @@ def describe_growth(yoy: float) -> str:
     if yoy < 2:
         return "Soft positive growth"
     return "Expanding"
+
+
+def describe_broad_dollar(change: float) -> str:
+    if change >= 5.0:
+        return "Dollar strengthening; watch global liquidity and commodity pressure"
+    if change <= -5.0:
+        return "Dollar weakening; can ease global liquidity and support commodities"
+    return "No large 6-month dollar move"
+
+
+def describe_currency_strength(change: float, threshold: float = 3.0) -> str:
+    if change >= threshold:
+        return "Strengthening versus USD"
+    if change <= -threshold:
+        return "Weakening versus USD"
+    return "Range-bound versus USD"
+
+
+def describe_commodity_pressure(change: float) -> str:
+    if change >= 20.0:
+        return "Sharp food/input-cost pressure"
+    if change <= -20.0:
+        return "Sharp food/input-cost relief"
+    return "No large 6-month corn shock"
 
 
 def default_fetch_text(url: str) -> str:

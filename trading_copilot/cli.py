@@ -164,6 +164,29 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
         )
 
+    if args.command == "recommend-ml":
+        return emit(
+            workflows.ml_recommendation_report(
+                ticker=args.ticker,
+                target_price=args.target_price,
+                stop_price=args.stop_price,
+                horizon=args.horizon,
+                context=args.context,
+                include_sec_events=args.with_sec_events,
+                include_news=args.with_news,
+                include_signals=args.with_signals,
+                event_limit=args.event_limit,
+                news_limit=args.news_limit,
+                pattern_horizon=args.pattern_horizon,
+                min_pattern_samples=args.min_pattern_samples,
+                risk_budget_pct=args.risk_budget,
+                max_position_pct=args.max_position,
+                include_fundamentals=not args.skip_fundamentals,
+                include_patterns=not args.skip_patterns,
+            ),
+            args.output,
+        )
+
     if args.command == "screen":
         return emit(workflows.screen_prompt(args.criteria, args.direction), args.output)
 
@@ -442,6 +465,50 @@ def build_parser() -> argparse.ArgumentParser:
     recommend.add_argument("--event-limit", type=int, default=3)
     recommend.add_argument("--news-limit", type=int, default=3)
     recommend.add_argument("--output", type=Path)
+
+    recommend_ml = sub.add_parser(
+        "recommend-ml",
+        help="Generate a guarded ML+AI research recommendation from macro, patterns, fundamentals, signals, and risk.",
+    )
+    recommend_ml.add_argument("ticker")
+    recommend_ml.add_argument("--target-price", type=float)
+    recommend_ml.add_argument("--stop-price", type=float)
+    recommend_ml.add_argument("--horizon", default="3-6 months")
+    recommend_ml.add_argument("--context", default="")
+    recommend_ml.add_argument(
+        "--with-sec-events",
+        action="store_true",
+        help="Include recent SEC EDGAR filings as event and signal inputs.",
+    )
+    recommend_ml.add_argument(
+        "--with-news",
+        action="store_true",
+        help="Include recent RSS news headlines as event and signal inputs.",
+    )
+    recommend_ml.add_argument(
+        "--with-signals",
+        action="store_true",
+        help="Detect earnings-forecast leading signals from SEC filings and news.",
+    )
+    recommend_ml.add_argument("--event-limit", type=int, default=3)
+    recommend_ml.add_argument("--news-limit", type=int, default=3)
+    recommend_ml.add_argument("--pattern-horizon", type=int, default=63)
+    recommend_ml.add_argument("--min-pattern-samples", type=int, default=3)
+    recommend_ml.add_argument(
+        "--risk-budget",
+        type=float,
+        default=2.0,
+        help="Maximum portfolio loss budget in percent if the stop is hit. Default: 2.",
+    )
+    recommend_ml.add_argument(
+        "--max-position",
+        type=float,
+        default=12.0,
+        help="Maximum suggested position weight in percent. Default: 12.",
+    )
+    recommend_ml.add_argument("--skip-fundamentals", action="store_true")
+    recommend_ml.add_argument("--skip-patterns", action="store_true")
+    recommend_ml.add_argument("--output", type=Path)
 
     screen = sub.add_parser("screen", help="Generate an idea-screen prompt.")
     screen.add_argument("criteria")
