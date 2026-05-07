@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-copilot"
+version = "0.1.0"
+description = "Local trading research copilot that reuses anthropics/financial-services skills"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+trading-copilot = "trading_copilot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trading_copilot*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
