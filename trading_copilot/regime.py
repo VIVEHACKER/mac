@@ -52,6 +52,8 @@ class RegimeIndicators:
     spy_above_200d_ma: bool | None = None
     spy_vs_200d_ma_pct: float | None = None
     spy_12m_return: float | None = None
+    spy_5y_return: float | None = None
+    vix_12m_percentile: float | None = None
 
 
 @dataclass(frozen=True)
@@ -290,14 +292,32 @@ def classify_regime(indicators: RegimeIndicators) -> RegimeReading:
     # (SPY > 200d MA by 2%+) and no urgent regime is firing, prefer the
     # risk-on regimes; when in a clear downtrend (-2% below MA), prefer
     # risk-off. This nudges borderline classifications toward the trend.
-    # Anti-bubble guard: 12-month SPY return >= 30% means we're in a mature
-    # bull / late-cycle euphoria phase. The trend filter weakens here because
-    # historic precedent (1999, 2007 lite, 2021) shows trend bulls keep going
-    # only briefly before correction. Better to default to neutral classification.
-    bubble_zone = (
-        indicators.spy_12m_return is not None
-        and indicators.spy_12m_return >= 0.25
-    )
+    # Anti-bubble guard: late-bull / euphoric phase detection.
+    # Two paths trigger bubble_zone (trend filter then suppressed):
+    #   - 12m SPY return >= 25% (recent surge)
+    #   - 5y SPY return >= 80% (multi-year compounded gains, valuation stretched)
+    # The 5y guard catches the dotcom 1998-2000 pattern where 12m return alone
+    # is moderate but 5y is +200%+ (S&P 500 1995-2000 doubled twice).
+    bubble_zone = False
+    bubble_reason: str | None = None
+    if indicators.spy_12m_return is not None and indicators.spy_12m_return >= 0.25:
+        bubble_zone = True
+        bubble_reason = f"SPY 12m {indicators.spy_12m_return * 100:+.1f}% (recent surge)"
+    elif indicators.spy_5y_return is not None and indicators.spy_5y_return >= 0.80:
+        bubble_zone = True
+        bubble_reason = f"SPY 5y {indicators.spy_5y_return * 100:+.1f}% (valuation stretched)"
+    # Extreme VIX compression alongside elevated 5y return = euphoria
+    if (
+        indicators.vix_12m_percentile is not None
+        and indicators.vix_12m_percentile <= 0.10
+        and indicators.spy_5y_return is not None
+        and indicators.spy_5y_return >= 0.50
+    ):
+        bubble_zone = True
+        bubble_reason = (
+            f"VIX in {indicators.vix_12m_percentile * 100:.0f}th percentile + "
+            f"SPY 5y {indicators.spy_5y_return * 100:+.1f}% (volatility compression)"
+        )
     trend_bull = (
         indicators.spy_above_200d_ma is True
         and indicators.spy_vs_200d_ma_pct is not None

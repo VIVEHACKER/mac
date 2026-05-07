@@ -131,6 +131,12 @@ def run_backtest(
     pending_count = 0
     URGENT_REGIMES = {"panic", "recovery"}
 
+    # Portfolio drawdown stop-loss: track equity curve. When cumulative
+    # portfolio drawdown breaches -8%, force the next month into panic
+    # template (cash-heavy). Releases when drawdown recovers above -3%.
+    equity_curve: list[float] = [1.0]
+    stop_loss_active = False
+
     while cursor <= last_cursor:
         indicators = _gather_indicators_at(cursor, macro_series, history_cache)
         reading = classify_regime(indicators)
@@ -157,21 +163,34 @@ def run_backtest(
                 committed_regime = prev_regime
 
         prev_regime = committed_regime
-        base_template = TEMPLATES.get(committed_regime, TEMPLATES["transition"])
 
-        # Confidence-weighted blending: when reading.confidence < 0.7 and there is
-        # a secondary regime, blend the two templates so a borderline read does
-        # not bet 100% on a coin-flip.
-        if (
-            committed_regime == reading.primary
-            and reading.confidence < 0.7
-            and reading.secondary
-            and reading.secondary[0] in TEMPLATES
-        ):
-            secondary_template = TEMPLATES[reading.secondary[0]]
-            base_template = blend_templates(
-                base_template, secondary_template, reading.confidence
-            )
+        # Drawdown stop-loss override: if cumulative portfolio drawdown is
+        # below -8%, force panic template until recovery above -3%.
+        peak_equity = max(equity_curve)
+        current_dd = (equity_curve[-1] - peak_equity) / peak_equity if peak_equity > 0 else 0.0
+        if not stop_loss_active and current_dd <= -0.08:
+            stop_loss_active = True
+        elif stop_loss_active and current_dd > -0.03:
+            stop_loss_active = False
+
+        if stop_loss_active:
+            base_template = TEMPLATES["panic"]
+        else:
+            base_template = TEMPLATES.get(committed_regime, TEMPLATES["transition"])
+
+            # Confidence-weighted blending: when reading.confidence < 0.7 and
+            # there is a secondary regime, blend the two templates so a borderline
+            # read does not bet 100% on a coin-flip.
+            if (
+                committed_regime == reading.primary
+                and reading.confidence < 0.7
+                and reading.secondary
+                and reading.secondary[0] in TEMPLATES
+            ):
+                secondary_template = TEMPLATES[reading.secondary[0]]
+                base_template = blend_templates(
+                    base_template, secondary_template, reading.confidence
+                )
         template = apply_vix_overlay(base_template, indicators.vix)
         # Override the regime label in reading for accurate reporting downstream
         if committed_regime != reading.primary:
@@ -204,6 +223,7 @@ def run_backtest(
                     coverage_pct=coverage,
                 )
             )
+            equity_curve.append(equity_curve[-1] * (1.0 + portfolio_return))
 
         cursor = _add_months(cursor, 1)
 
@@ -393,6 +413,20 @@ def _gather_indicators_at(
         if ref > 0:
             spy_12m_return = (last - ref) / ref
 
+    spy_5y_return: float | None = None
+    if len(spy_full) >= 252 * 5:
+        last = spy_full[-1].close
+        ref = spy_full[-252 * 5].close
+        if ref > 0:
+            spy_5y_return = (last - ref) / ref
+
+    vix_12m_percentile: float | None = None
+    vix_12m_window = vix_full[-252:] if vix_full else []
+    if len(vix_12m_window) >= 60 and vix is not None:
+        sorted_vix = sorted(p.close for p in vix_12m_window)
+        rank = sum(1 for c in sorted_vix if c <= vix)
+        vix_12m_percentile = rank / len(sorted_vix)
+
     # Forward-signal indicators
     copper_gold_ratio: float | None = None
     copper_gold_60d_avg: float | None = None
@@ -453,6 +487,8 @@ def _gather_indicators_at(
         spy_above_200d_ma=spy_above_200d_ma,
         spy_vs_200d_ma_pct=spy_vs_200d_ma_pct,
         spy_12m_return=spy_12m_return,
+        spy_5y_return=spy_5y_return,
+        vix_12m_percentile=vix_12m_percentile,
     )
 
 
