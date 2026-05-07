@@ -12,6 +12,7 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 **미시경제 데이터**: SEC EDGAR + DART OpenAPI + FMP + yfinance (펀더멘털/공시/인사이더)
 **거시경제 데이터**: FRED + ALFRED vintage + 한국은행 ECOS (regime/yield curve/CPI)
 **Sentiment & Flow**: KRX 투자자별 매매 + CFTC COT + GDELT + Reddit
+**파생·마이크로구조**: Crypto funding/OI/L-S (CCXT) + CBOE VIX·SKEW·Put-Call + Deribit
 **파이프라인**: Backtest → Paper → Live (동일 코드)
 
 ## 첫 액션 순서
@@ -29,6 +30,7 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 4. **Stage 1.5** — 펀더멘털/공시 수집 + point-in-time 카탈로그
 5. **Stage 1.6** — FRED + ECOS 거시 데이터 + vintage(ALFRED) + regime classifier
 6. **Stage 1.7** — KRX flows + CFTC COT + GDELT + Reddit (sentiment & flow)
+7. **Stage 1.8** — Crypto funding/OI + CBOE VIX/SKEW/Put-Call + Deribit (파생/마이크로구조)
 
 ## 문서 우선순위
 
@@ -40,7 +42,8 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 5. `docs/MICROECONOMIC_DATA.md` — 펀더멘털/공시/인사이더/대안 데이터 + point-in-time
 6. `docs/MACROECONOMIC_DATA.md` — FRED/ECOS 거시 + vintage + regime 4사분면
 7. `docs/SENTIMENT_FLOW.md` — KRX 투자자별 매매 + CFTC COT + GDELT + Reddit
-8. `docs/ROADMAP.md` — 8단계 로드맵 + 검증 기준 (Stage 1.5, 1.6, 1.7 포함)
+8. `docs/DERIVATIVES_DATA.md` — Crypto perp 마이크로구조 + 옵션 sentiment + IV
+9. `docs/ROADMAP.md` — 8단계 로드맵 + 검증 기준 (Stage 1.5~1.8 포함)
 
 ## 작업 규칙 (이전 세션에서 합의)
 

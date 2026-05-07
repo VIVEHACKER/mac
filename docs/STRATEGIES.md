@@ -104,6 +104,22 @@
 | **Event Detection** | 기업 mention 급증 → 이벤트 탐지 | `signals/gdelt_events.py` | GDELT |
 | **WSB Squeeze Pre-emption** | Reddit mention surge → 초기 진입 | `signals/wsb_squeeze.py` | Reddit PRAW |
 
+## 파생·마이크로구조 기반 추가 전략
+
+옵션·perp 마이크로구조 데이터로 가능한 전략 (자세히는 `DERIVATIVES_DATA.md`):
+
+| 전략 | 메커니즘 | 모듈 | 데이터 |
+|------|---------|------|--------|
+| **Funding Arbitrage** | Crypto perp 펀딩 받으며 spot 매수 (델타 헤지) | `strategies/funding_arb.py` | CCXT funding |
+| **Funding Extreme** | 펀딩 양수 극단 → 롱 청산 위험 매도 | `signals/funding_extreme.py` | CCXT funding |
+| **OI Squeeze** | OI 급증 + 가격 횡보 → 변동성 확장 임박 | `signals/oi_squeeze.py` | CCXT OI |
+| **L/S Mean Reversion** | 거래소 long/short 극단 → 역방향 | `signals/ls_ratio.py` | Binance/Bybit |
+| **VIX Term Reversal** | VIX/VIX3M < 0.85 백워데이션 → 단기 반등 | `signals/vix_term.py` | CBOE |
+| **Put/Call Contrarian** | Put/Call > 1.2 극단 비관 → 매수 | `signals/put_call_extreme.py` | CBOE |
+| **IV Crush** | 어닝 임박 IV 급등 → 발표 후 매도 | `strategies/iv_crush.py` | yfinance options |
+| **Tail Risk Monitor** | CBOE SKEW > 140 → 헤지 비중 ↑ | `risk/tail_risk.py` | CBOE |
+| **BTC Vol Mean Reversion** | DVOL 극단 → 평균회귀 | `signals/btc_vol.py` | Deribit |
+
 ## 패턴 정리
 
 | 전략 | 시간단위 | 우위의 원천 |

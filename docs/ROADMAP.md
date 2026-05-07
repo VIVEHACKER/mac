@@ -102,6 +102,39 @@
 
 ---
 
+## Stage 1.8 — 파생/마이크로구조 데이터
+
+**목표**: Crypto perp 마이크로구조(funding/OI/L-S) + 옵션 sentiment(VIX/SKEW/Put-Call/Deribit) 수집.
+
+**작업**:
+- [ ] `data/ingest/crypto_microstructure.py` — CCXT
+  - Binance/Bybit perp funding rate (8시간 정산)
+  - Open Interest (1시간 빈도)
+  - Long/Short ratio (계정 비율)
+  - 주요 페어: BTC/ETH/SOL + 상위 10개
+- [ ] `data/ingest/cboe_options.py` — CBOE CSV 다운로드
+  - VIX, VIX9D, VIX3M, VIX6M
+  - SKEW Index
+  - Put/Call ratio (CPCE equity, CPCI index)
+- [ ] `data/ingest/deribit_options.py` — Deribit 무료 API
+  - BTC/ETH 옵션 IV smile + term structure
+  - DVOL Index
+- [ ] `data/ingest/option_chain.py` — 종목별 (대형주 한정)
+  - yfinance Ticker.option_chain (S&P500 상위 50개)
+  - pykrx KOSPI200 옵션 (선택)
+- [ ] DuckDB: `crypto_funding`, `crypto_oi`, `crypto_long_short`, `crypto_liquidations`, `option_sentiment`, `option_chain`
+
+**검증 기준**:
+- [ ] Binance BTC/ETH perp funding 1년치 + 시간별 OI 1년치 수집
+- [ ] CBOE VIX/SKEW/Put-Call 10년치 수집
+- [ ] VIX term structure 정상 시 contango (VIX < VIX3M), 위기 시 백워데이션 검증 (2020-03 코로나)
+- [ ] Funding rate 양수 극단(>0.05%) 후 24시간 BTC 수익률 음의 평균 검증
+- [ ] yfinance 옵션 체인 IV가 BSM 재계산값과 ±5% 이내 (sanity check)
+
+**왜 이 시점**: Stage 1.7 직후 마지막 데이터 인프라. Stage 2에서 funding arb 즉시 백테스트 가능, Stage 4 리스크 모니터에 VIX/SKEW 활용.
+
+---
+
 ## Stage 2 — AQR 팩터 백테스트 (Value + Momentum + Quality)
 
 **목표**: 학술적으로 검증된 3-팩터 전략을 3시장에서 백테스트, Sharpe ≥ 1.0.
@@ -230,8 +263,9 @@
 | 1.5 (미시경제 데이터) | 1주 | 3주 |
 | 1.6 (거시경제 데이터 + regime) | 1주 | 3주 |
 | 1.7 (sentiment & flow) | 1주 | 3주 |
+| 1.8 (파생/마이크로구조) | 0.5주 | 2주 |
 | 2 (AQR + PEAD 백테스트) | 2주 | 6주 |
 | 3 (페이퍼) | 1주 | 3주 |
 | 4 (Pod + 시그널 + regime + flow) | 4주 | 12주 |
 | 5 (라이브, 관찰 중심) | 4주 | 12주 |
-| **합계** | **15주** | **45주 (~11개월)** |
+| **합계** | **15.5주** | **47주 (~11개월)** |

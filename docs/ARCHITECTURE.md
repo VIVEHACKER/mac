@@ -68,7 +68,11 @@ trader/
 │   │   ├── krx_flows.py     # KRX 투자자별 매매 (외인/기관/연기금/개인)
 │   │   ├── cot_cftc.py      # CFTC COT 주간 선물 포지션
 │   │   ├── gdelt_news.py    # GDELT 글로벌 뉴스 톤 + 기업 mention
-│   │   └── reddit_mentions.py # Reddit WSB/stocks 종목 mention
+│   │   ├── reddit_mentions.py # Reddit WSB/stocks 종목 mention
+│   │   ├── crypto_microstructure.py # CCXT funding rate + OI + L/S ratio
+│   │   ├── cboe_options.py  # CBOE VIX, VIX9D/3M/6M, SKEW, Put/Call CSV
+│   │   ├── deribit_options.py # Deribit BTC/ETH 옵션 + DVOL
+│   │   └── option_chain.py  # Yahoo (US) + KRX (KR) 종목별 옵션 체인
 │   ├── store/               # Parquet (시계열) + DuckDB (메타)
 │   │   ├── eod/             # 일봉
 │   │   ├── intraday/        # 분봉 (크립토 위주)
@@ -77,6 +81,7 @@ trader/
 │   │   ├── events/          # 어닝/가이던스/Form 4
 │   │   ├── macro/           # 매크로 시계열 + regime
 │   │   ├── sentiment/       # KRX flows + COT + GDELT + Reddit
+│   │   ├── derivatives/     # Crypto funding/OI/L-S, 옵션 sentiment, 옵션 체인
 │   │   └── catalog.duckdb
 │   └── catalog.py           # 통합 카탈로그 — `as_of=` 강제로 look-ahead 방지
 ├── strategies/
@@ -90,6 +95,8 @@ trader/
 │   ├── momentum_xs.py       # 횡단면 모멘텀
 │   ├── pead.py              # 어닝 서프라이즈 드리프트
 │   ├── revisions.py         # Earnings revision 모멘텀
+│   ├── funding_arb.py       # Crypto perp 펀딩-스팟 차익 (펀딩 받으며 spot 매수)
+│   ├── iv_crush.py          # 어닝 임박 IV 급등 → 발표 후 매도
 │   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 + 매크로 결합
 ├── signals/                 # 미시·거시·sentiment 기반 알파/시그널
 │   ├── activist_13f.py      # 13F 신규/증가 — Pershing/Tiger 미러
@@ -105,7 +112,14 @@ trader/
 │   ├── cot_extreme.py       # Non-Commercial 95th → mean reversion
 │   ├── gdelt_tone.py        # GDELT 매크로/기업 톤 모멘텀
 │   ├── gdelt_events.py      # GDELT mention 급증 이벤트 detection
-│   └── wsb_squeeze.py       # Reddit WSB mention surge → squeeze 사전 포착
+│   ├── wsb_squeeze.py       # Reddit WSB mention surge → squeeze 사전 포착
+│   ├── funding_extreme.py   # Crypto perp 펀딩 극단 → 청산 위험
+│   ├── oi_squeeze.py        # OI 급증 + 가격 횡보 → 변동성 확장
+│   ├── ls_ratio.py          # 거래소 long/short 극단 → mean reversion
+│   ├── vix_term.py          # VIX/VIX3M 백워데이션 → 단기 반등
+│   ├── vix_peak.py          # VIX 정점 후 하락 → 위험자산 진입
+│   ├── put_call_extreme.py  # Put/Call > 1.2 극단 비관 → contrarian
+│   └── btc_vol.py           # Deribit DVOL 극단 → BTC 변동성 평균회귀
 ├── engine/
 │   ├── backtest.py          # Nautilus 백테스트 러너
 │   ├── paper.py             # Alpaca paper / Binance testnet
@@ -119,7 +133,8 @@ trader/
 │   ├── slippage.py          # 슬리피지 모델
 │   ├── short_interest.py    # 공매도 잔고 급증 모니터
 │   ├── option_skew.py       # 옵션 IV skew 하방 신호
-│   └── fx_exposure.py       # DXY/원달러 환율 노출 (한국 수출주)
+│   ├── fx_exposure.py       # DXY/원달러 환율 노출 (한국 수출주)
+│   └── tail_risk.py         # CBOE SKEW > 140 꼬리위험 모니터
 ├── dashboard/
 │   └── app.py               # Streamlit 단일 진입점
 ├── infra/
