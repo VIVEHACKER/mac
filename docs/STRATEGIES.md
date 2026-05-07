@@ -90,6 +90,20 @@
 | **Risk Appetite** | Term + Credit spread 위험선호 단계 | `signals/risk_appetite.py` | FRED 스프레드 |
 | **FX Exposure** | DXY/원달러 → 한국 수출주 헤지 | `risk/fx_exposure.py` | FRED DXY + ECOS 환율 |
 
+## Sentiment & Flow 기반 추가 전략
+
+자금 흐름과 감정 데이터로 가능한 전략 (자세히는 `SENTIMENT_FLOW.md`):
+
+| 전략 | 메커니즘 | 모듈 | 데이터 |
+|------|---------|------|--------|
+| **Foreign Flow Momentum** | 한국 외국인 5일 누적 순매수 → 종목 매수 | `signals/foreign_flow.py` | KRX 매매동향 |
+| **Retail Contrarian (KR)** | 개인 매수 + 외국인 매도 → 매도 신호 | `signals/retail_contrarian.py` | KRX 매매동향 |
+| **COT Commercial Front-running** | 실수요자 극단 포지션 → 선물 가격 선행 | `signals/cot_commercial.py` | CFTC COT |
+| **COT Mean Reversion** | Non-Commercial 95th percentile → 역방향 | `signals/cot_extreme.py` | CFTC COT |
+| **GDELT Macro Tone** | 글로벌 뉴스 톤 모멘텀 → 위험자산 비중 | `signals/gdelt_tone.py` | GDELT |
+| **Event Detection** | 기업 mention 급증 → 이벤트 탐지 | `signals/gdelt_events.py` | GDELT |
+| **WSB Squeeze Pre-emption** | Reddit mention surge → 초기 진입 | `signals/wsb_squeeze.py` | Reddit PRAW |
+
 ## 패턴 정리
 
 | 전략 | 시간단위 | 우위의 원천 |

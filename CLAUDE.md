@@ -11,6 +11,7 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 **시장 데이터**: Alpaca + pykrx + CCXT (모두 무료)
 **미시경제 데이터**: SEC EDGAR + DART OpenAPI + FMP + yfinance (펀더멘털/공시/인사이더)
 **거시경제 데이터**: FRED + ALFRED vintage + 한국은행 ECOS (regime/yield curve/CPI)
+**Sentiment & Flow**: KRX 투자자별 매매 + CFTC COT + GDELT + Reddit
 **파이프라인**: Backtest → Paper → Live (동일 코드)
 
 ## 첫 액션 순서
@@ -22,10 +23,12 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
    - FMP API key (https://site.financialmodelingprep.com 무료 250req/day)
    - FRED API key (https://fred.stlouisfed.org 즉시) — 거시 미국
    - ECOS API key (https://ecos.bok.or.kr/api/ 즉시) — 거시 한국
-   - SEC EDGAR는 키 불필요 (User-Agent만)
+   - Reddit OAuth (https://www.reddit.com/prefs/apps → script 타입) — sentiment
+   - SEC EDGAR / GDELT / CFTC COT는 키 불필요
 3. **Stage 1 시작** — `data/ingest/alpaca_us.py` 부터 TDD로
 4. **Stage 1.5** — 펀더멘털/공시 수집 + point-in-time 카탈로그
 5. **Stage 1.6** — FRED + ECOS 거시 데이터 + vintage(ALFRED) + regime classifier
+6. **Stage 1.7** — KRX flows + CFTC COT + GDELT + Reddit (sentiment & flow)
 
 ## 문서 우선순위
 
@@ -36,7 +39,8 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 4. `docs/DATA_SOURCES.md` — 시장 데이터 소스 한계와 우회법
 5. `docs/MICROECONOMIC_DATA.md` — 펀더멘털/공시/인사이더/대안 데이터 + point-in-time
 6. `docs/MACROECONOMIC_DATA.md` — FRED/ECOS 거시 + vintage + regime 4사분면
-7. `docs/ROADMAP.md` — 7단계 로드맵 + 검증 기준 (Stage 1.5, 1.6 포함)
+7. `docs/SENTIMENT_FLOW.md` — KRX 투자자별 매매 + CFTC COT + GDELT + Reddit
+8. `docs/ROADMAP.md` — 8단계 로드맵 + 검증 기준 (Stage 1.5, 1.6, 1.7 포함)
 
 ## 작업 규칙 (이전 세션에서 합의)
 

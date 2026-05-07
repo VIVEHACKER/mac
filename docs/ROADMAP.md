@@ -71,6 +71,37 @@
 
 ---
 
+## Stage 1.7 — Sentiment & Flow 데이터
+
+**목표**: 자금 흐름(KRX 기관매매, CFTC COT) + 감정(GDELT, Reddit) 데이터 수집·인덱싱.
+
+**작업**:
+- [ ] `data/ingest/krx_flows.py` — pykrx 투자자별 매매 (시장 + 종목 단위, 5년치)
+  - 외국인 / 기관 / 연기금 / 개인 / 금융투자 / 일반법인 분리
+- [ ] `data/ingest/cot_cftc.py` — CFTC COT 주간 보고 (legacy + disaggregated)
+  - 주요 계약: S&P 500, Nasdaq, Gold, Crude Oil, KRW, 10Y Note, DXY
+- [ ] `data/ingest/gdelt_news.py` — GDELT 톤 + 기업 mention
+  - BigQuery 무료 티어 또는 CSV 직접 다운로드
+  - 주요 테마: ECON_INFLATION, ECON_BANKRUPTCY, FED_RATE, CRISIS
+- [ ] `data/ingest/reddit_mentions.py` — Reddit PRAW
+  - 서브레딧: wallstreetbets, stocks, investing, cryptocurrency
+  - 종목 ticker 추출 + bullish/bearish 키워드 매칭 + bot 필터
+- [ ] DuckDB 테이블: `krx_flows`, `cot_positions`, `gdelt_tone`, `gdelt_mentions`, `reddit_mentions`
+- [ ] `data/catalog.py`에 sentiment/flow 조회 API 추가
+- [ ] `tests/test_data/test_flow_pit.py` — KRX 발표 시각, COT 금요일 release_ts 회귀 테스트
+
+**검증 기준**:
+- [ ] KRX KOSPI200 + KOSDAQ150 5년치 투자자별 매매 수집
+- [ ] COT 주요 계약 7개 5년치 (Disaggregated 우선)
+- [ ] GDELT 미국/한국 톤 + S&P500 + KOSPI200 종목 mention 1년치
+- [ ] Reddit WSB/stocks 30일치 종목 mention (백필)
+- [ ] PIT 회귀 테스트 통과 — KRX 18시 이전 사용 시 fail
+- [ ] Bot 필터: Reddit 스팸 점수 > 0.7 계정 자동 제외
+
+**왜 이 시점**: 미시·매크로 데이터로 알파 백테스트(Stage 2-3)는 가능하지만, sentiment/flow는 Stage 4 Pod 멀티전략에서 강력한 보완 알파. Stage 4 들어가기 전에 인프라 완성.
+
+---
+
 ## Stage 2 — AQR 팩터 백테스트 (Value + Momentum + Quality)
 
 **목표**: 학술적으로 검증된 3-팩터 전략을 3시장에서 백테스트, Sharpe ≥ 1.0.
@@ -131,6 +162,10 @@
 - [ ] `signals/revisions.py` — FMP 컨센서스 변경 모멘텀
 - [ ] `signals/recession.py` — Yield curve inversion 모니터 (Stage 1.6 매크로 활용)
 - [ ] `signals/risk_appetite.py` — Term + Credit spread → 위험선호 단계
+- [ ] `signals/foreign_flow.py` — KRX 외국인 N일 누적 모멘텀 (한국 종목 알파)
+- [ ] `signals/cot_commercial.py` — Commercial 극단 포지션 → 가격 선행
+- [ ] `signals/gdelt_tone.py` — 매크로 sentiment 모멘텀 + 이벤트
+- [ ] `signals/wsb_squeeze.py` — Reddit mention surge → 사전 포착
 - [ ] `strategies/regime_switch.py` — 매크로 4사분면 기반 자산배분 전환
 - [ ] `strategies/macro_momentum.py` — Yield curve + real rate 모멘텀
 - [ ] `risk/short_interest.py` — 공매도 잔고 급증 모니터 (KRX + FINRA)
@@ -147,6 +182,9 @@
 - [ ] regime classifier가 2020-03 (코로나) 시점에 "성장↓ 인플레↓" 사분면으로 분류
 - [ ] regime-aware risk parity가 정적 risk parity 대비 MaxDD ≥ 20% 개선
 - [ ] 시장간 상관계수가 낮음 검증 (미국/한국/크립토 < 0.5)
+- [ ] 한국 외국인 5일 누적 순매수 시그널 백테스트 시 Sharpe ≥ 0.5
+- [ ] COT Commercial 극단 포지션 후 60일 평균회귀 동작 (Gold/Oil 선물)
+- [ ] WSB mention z-score ≥ 3 종목 30일 보유 알파 ≥ 5% (단, drawdown 큼 — 소액만)
 
 ---
 
@@ -191,8 +229,9 @@
 | 1 (가격 데이터) | 1주 | 3주 |
 | 1.5 (미시경제 데이터) | 1주 | 3주 |
 | 1.6 (거시경제 데이터 + regime) | 1주 | 3주 |
+| 1.7 (sentiment & flow) | 1주 | 3주 |
 | 2 (AQR + PEAD 백테스트) | 2주 | 6주 |
 | 3 (페이퍼) | 1주 | 3주 |
-| 4 (Pod + 시그널 + regime-aware) | 4주 | 12주 |
+| 4 (Pod + 시그널 + regime + flow) | 4주 | 12주 |
 | 5 (라이브, 관찰 중심) | 4주 | 12주 |
-| **합계** | **14주** | **42주 (~10개월)** |
+| **합계** | **15주** | **45주 (~11개월)** |

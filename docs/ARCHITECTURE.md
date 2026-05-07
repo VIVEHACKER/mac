@@ -64,7 +64,11 @@ trader/
 │   │   ├── onchain_eth.py   # Etherscan (크립토 온체인)
 │   │   ├── fred_macro.py    # FRED + ALFRED vintage (미국 매크로)
 │   │   ├── ecos_kr.py       # 한국은행 ECOS REST (한국 매크로)
-│   │   └── macro_calendar.py # 발표 캘린더 + surprise 계산
+│   │   ├── macro_calendar.py # 발표 캘린더 + surprise 계산
+│   │   ├── krx_flows.py     # KRX 투자자별 매매 (외인/기관/연기금/개인)
+│   │   ├── cot_cftc.py      # CFTC COT 주간 선물 포지션
+│   │   ├── gdelt_news.py    # GDELT 글로벌 뉴스 톤 + 기업 mention
+│   │   └── reddit_mentions.py # Reddit WSB/stocks 종목 mention
 │   ├── store/               # Parquet (시계열) + DuckDB (메타)
 │   │   ├── eod/             # 일봉
 │   │   ├── intraday/        # 분봉 (크립토 위주)
@@ -72,6 +76,7 @@ trader/
 │   │   ├── filings/         # 공시 raw 텍스트
 │   │   ├── events/          # 어닝/가이던스/Form 4
 │   │   ├── macro/           # 매크로 시계열 + regime
+│   │   ├── sentiment/       # KRX flows + COT + GDELT + Reddit
 │   │   └── catalog.duckdb
 │   └── catalog.py           # 통합 카탈로그 — `as_of=` 강제로 look-ahead 방지
 ├── strategies/
@@ -86,13 +91,21 @@ trader/
 │   ├── pead.py              # 어닝 서프라이즈 드리프트
 │   ├── revisions.py         # Earnings revision 모멘텀
 │   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 + 매크로 결합
-├── signals/                 # 미시·거시 데이터 기반 알파/시그널
+├── signals/                 # 미시·거시·sentiment 기반 알파/시그널
 │   ├── activist_13f.py      # 13F 신규/증가 — Pershing/Tiger 미러
 │   ├── insider.py           # Form 4 + DART 임원보고 — 클러스터 매수
 │   ├── revisions.py         # 애널리스트 컨센서스 상향
 │   ├── trends_nowcast.py    # Google Trends → 매출 선행 예측
 │   ├── recession.py         # Yield curve inversion 침체 선행 신호
-│   └── risk_appetite.py     # Term spread + Credit spread → 위험선호 단계
+│   ├── risk_appetite.py     # Term spread + Credit spread → 위험선호 단계
+│   ├── foreign_flow.py      # KRX 외국인 순매수 누적 모멘텀 (한국 강력)
+│   ├── institution_flow.py  # KRX 기관 순매수 모멘텀
+│   ├── retail_contrarian.py # KRX 개인 매수 + 외국인 매도 → 역지표
+│   ├── cot_commercial.py    # CFTC Commercial 극단 → 가격 압력 선행
+│   ├── cot_extreme.py       # Non-Commercial 95th → mean reversion
+│   ├── gdelt_tone.py        # GDELT 매크로/기업 톤 모멘텀
+│   ├── gdelt_events.py      # GDELT mention 급증 이벤트 detection
+│   └── wsb_squeeze.py       # Reddit WSB mention surge → squeeze 사전 포착
 ├── engine/
 │   ├── backtest.py          # Nautilus 백테스트 러너
 │   ├── paper.py             # Alpaca paper / Binance testnet

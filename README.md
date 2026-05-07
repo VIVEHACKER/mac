@@ -10,6 +10,7 @@
 - **Markets**: 미국 주식/ETF (Alpaca) + 한국 주식 (pykrx) + 크립토 (CCXT)
 - **펀더멘털·공시**: SEC EDGAR (미국) + DART OpenAPI (한국) + FMP (어닝)
 - **거시경제**: FRED + ALFRED vintage (미국) + 한국은행 ECOS API (한국)
+- **자금 흐름·감정**: KRX 투자자별 매매 + CFTC COT + GDELT 뉴스 + Reddit
 - **Pipeline**: Backtest → Paper → Live (동일 코드, broker만 교체)
 
 ## 문서 맵
@@ -21,7 +22,8 @@
 | [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) | 시장 데이터 소스 (Alpaca/pykrx/CCXT) 한계와 우회법 |
 | [docs/MICROECONOMIC_DATA.md](docs/MICROECONOMIC_DATA.md) | 미시경제 데이터 (펀더멘털/공시/인사이더/대안) |
 | [docs/MACROECONOMIC_DATA.md](docs/MACROECONOMIC_DATA.md) | 거시경제 데이터 (FRED/ECOS, regime, vintage PIT) |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | 6단계 구현 로드맵 + 검증 기준 |
+| [docs/SENTIMENT_FLOW.md](docs/SENTIMENT_FLOW.md) | 자금 흐름 + 감정 (KRX 기관매매 / CFTC COT / GDELT / Reddit) |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 7단계 구현 로드맵 + 검증 기준 |
 | [setup/install.sh](setup/install.sh) | Mac 초기 셋업 자동화 |
 | [CLAUDE.md](CLAUDE.md) | 다음 Claude Code 세션이 즉시 컨텍스트를 잡기 위한 핸드오프 |
 

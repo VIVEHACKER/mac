@@ -44,6 +44,12 @@ uv add \
   fredapi \
   pytrends
 
+echo "==> 4-3. Sentiment & Flow 데이터 패키지 (KRX 흐름/COT/GDELT/Reddit)"
+uv add \
+  cot-reports \
+  praw \
+  gdeltdoc
+
 echo "==> 5. PyTorch (M4 MPS 활성화)"
 uv add torch torchvision
 
@@ -66,7 +72,7 @@ mkdir -p \
   data/ingest \
   data/store/eod data/store/intraday \
   data/store/fundamentals data/store/filings data/store/events \
-  data/store/macro \
+  data/store/macro data/store/sentiment \
   strategies signals engine pod risk dashboard \
   infra tests/test_strategies tests/test_data tests/test_engine
 
