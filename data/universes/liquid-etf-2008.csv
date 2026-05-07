@@ -1,0 +1,10 @@
+universe,symbol,market,start_date,end_date,source,confidence
+LIQUID_ETF_2008,SPY,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,QQQ,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,IWM,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,EFA,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,EEM,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,TLT,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,GLD,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,DBC,us,2008-01-01,,manual:listed-before-window,high
+LIQUID_ETF_2008,VNQ,us,2008-01-01,,manual:listed-before-window,high

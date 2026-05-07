@@ -27,9 +27,13 @@ venv/
 dist/
 build/
 
+# External skill/source checkout used by trading-copilot
+financial-services/
+
 # uv
 .python-version
-uv.lock  # 선택: 락파일 공유하려면 제거
+# 선택: 락파일 공유하려면 이 ignore를 제거
+uv.lock
 
 # IDE
 .vscode/
@@ -40,8 +44,10 @@ uv.lock  # 선택: 락파일 공유하려면 제거
 # Logs
 logs/
 *.log
+.harness/
 
 # 백테스트 결과
 results/
 backtests/
 reports/
+out/

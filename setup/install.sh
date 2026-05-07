@@ -17,7 +17,7 @@ echo "==> 3. Python 환경 (uv 사용 — pip보다 10~100배 빠름)"
 if [ ! -f pyproject.toml ]; then
   uv init --python 3.12
 fi
-uv venv
+uv venv --python 3.12
 
 echo "==> 4. 핵심 패키지 (모두 arm64 네이티브 wheel 확인됨)"
 uv add \
