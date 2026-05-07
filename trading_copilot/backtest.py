@@ -413,6 +413,20 @@ def _gather_indicators_at(
         if ref > 0:
             spy_12m_return = (last - ref) / ref
 
+    spy_6m_return: float | None = None
+    if len(spy_full) >= 126:
+        last = spy_full[-1].close
+        ref = spy_full[-126].close
+        if ref > 0:
+            spy_6m_return = (last - ref) / ref
+
+    spy_3m_return: float | None = None
+    if len(spy_full) >= 63:
+        last = spy_full[-1].close
+        ref = spy_full[-63].close
+        if ref > 0:
+            spy_3m_return = (last - ref) / ref
+
     spy_5y_return: float | None = None
     if len(spy_full) >= 252 * 5:
         last = spy_full[-1].close
@@ -489,6 +503,8 @@ def _gather_indicators_at(
         spy_12m_return=spy_12m_return,
         spy_5y_return=spy_5y_return,
         vix_12m_percentile=vix_12m_percentile,
+        spy_6m_return=spy_6m_return,
+        spy_3m_return=spy_3m_return,
     )
 
 
