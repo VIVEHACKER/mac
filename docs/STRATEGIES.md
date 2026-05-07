@@ -58,11 +58,24 @@
 | 펀드 모델 | 구현 모듈 | 난이도 | M4에서 현실성 |
 |-----------|-----------|--------|---------------|
 | Renaissance (Stat-Arb) | `strategies/statarb_pairs.py` | 고 | 중 — 마이크로초 불가, 분 단위 stat-arb는 가능 (크립토만) |
-| AQR (팩터) | `strategies/factor_aqr.py` | **저** | 상 — **가장 먼저 구현 권장** |
+| AQR (팩터) | `strategies/factor_aqr.py` (Value+Mom+**Quality**) | **저** | 상 — **가장 먼저 구현 권장**. Quality는 SEC EDGAR/DART 펀더멘털 필요 |
 | Bridgewater (Risk Parity) | `strategies/risk_parity.py` | 저 | 상 — 자산배분 로직만 있으면 즉시 |
 | Citadel (Pod) | `pod/allocator.py` + `pod/monitor.py` | 중 | 상 — 여러 전략을 묶을 때 자연스럽게 |
-| Pershing Square (액티비스트) | `signals/activist_13f.py` | — | 자동매매 X. **13F 추적기로 시그널만** |
+| Pershing Square (액티비스트) | `signals/activist_13f.py` + `signals/insider.py` | 중 | 시그널 가능 — SEC Form 4 + 13F + DART 임원보고 |
 | Jane Street (마켓메이킹) | `strategies/mm_crypto.py` | 고 | **크립토 한정** — Binance 스프레드 봇 |
+
+## 미시경제 데이터 기반 추가 전략
+
+펀더멘털·공시·인사이더 데이터로 가능한 알파 전략 (자세히는 `MICROECONOMIC_DATA.md`):
+
+| 전략 | 메커니즘 | 모듈 | 데이터 |
+|------|---------|------|--------|
+| **PEAD** | 어닝 서프라이즈 후 60일 드리프트 | `strategies/pead.py` | FMP earnings + EDGAR/DART |
+| **Earnings Revision** | 애널리스트 컨센서스 상향 종목 매수 | `strategies/revisions.py` | FMP / yfinance |
+| **Insider Buying** | 내부자 클러스터 매수 (CEO/CFO 동시) | `signals/insider.py` | SEC Form 4 + DART |
+| **13F Mirror** | Tiger/Pershing 등 신규 진입 종목 추종 | `signals/activist_13f.py` | SEC EDGAR 13F |
+| **Short Squeeze 회피** | 공매도 잔고 급증 종목 숏 회피 | `risk/short_interest.py` | KRX + FINRA |
+| **Trends Nowcasting** | 검색량으로 소비재 매출 선행 예측 | `signals/trends_nowcast.py` | Google Trends |
 
 ## 패턴 정리
 

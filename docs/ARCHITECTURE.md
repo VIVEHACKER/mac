@@ -53,24 +53,37 @@ trader/
 ├── .gitignore
 ├── CLAUDE.md                # 다음 세션 컨텍스트
 ├── data/
-│   ├── ingest/              # 시장별 수집기
-│   │   ├── alpaca_us.py
-│   │   ├── pykrx_kr.py
-│   │   └── ccxt_crypto.py
+│   ├── ingest/              # 시장 + 미시경제 수집기
+│   │   ├── alpaca_us.py     # 미국 주식 가격
+│   │   ├── pykrx_kr.py      # 한국 주식 가격 + 시총/PER/PBR
+│   │   ├── ccxt_crypto.py   # 크립토 가격
+│   │   ├── edgar_us.py      # SEC EDGAR (10-K/Q, 8-K, Form 4, 13F)
+│   │   ├── dart_kr.py       # DART OpenAPI (한국 공시 + 임원보고)
+│   │   ├── fmp_earnings.py  # FMP 어닝/가이던스/컨센서스
+│   │   ├── trends_alt.py    # Google Trends (대안 데이터)
+│   │   └── onchain_eth.py   # Etherscan (크립토 온체인)
 │   ├── store/               # Parquet (시계열) + DuckDB (메타)
 │   │   ├── eod/             # 일봉
 │   │   ├── intraday/        # 분봉 (크립토 위주)
+│   │   ├── fundamentals/    # 분기 재무제표 (point-in-time)
+│   │   ├── filings/         # 공시 raw 텍스트
+│   │   ├── events/          # 어닝/가이던스/Form 4
 │   │   └── catalog.duckdb
-│   └── catalog.py           # 통합 데이터 카탈로그 (시장 일관 인터페이스)
+│   └── catalog.py           # 통합 카탈로그 — `as_of=` 강제로 look-ahead 방지
 ├── strategies/
 │   ├── _base.py             # Strategy 추상 클래스
-│   ├── factor_aqr.py        # 가치/모멘텀/퀄리티 (Stage 2 시작점)
+│   ├── factor_aqr.py        # Value + Momentum + Quality (펀더멘털 활용)
 │   ├── statarb_pairs.py     # 통계적 차익거래 (크립토부터)
 │   ├── risk_parity.py       # Bridgewater식 자산배분
 │   ├── momentum_xs.py       # 횡단면 모멘텀
-│   └── ml_xgboost.py        # XGBoost 시그널 (MPS)
-├── signals/
-│   └── activist_13f.py      # SEC 13F 파일링 추적 (Pershing/Elliott 모방)
+│   ├── pead.py              # 어닝 서프라이즈 드리프트
+│   ├── revisions.py         # Earnings revision 모멘텀
+│   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 결합
+├── signals/                 # 미시경제 데이터 기반 알파/시그널
+│   ├── activist_13f.py      # 13F 신규/증가 — Pershing/Tiger 미러
+│   ├── insider.py           # Form 4 + DART 임원보고 — 클러스터 매수
+│   ├── revisions.py         # 애널리스트 컨센서스 상향
+│   └── trends_nowcast.py    # Google Trends → 매출 선행 예측
 ├── engine/
 │   ├── backtest.py          # Nautilus 백테스트 러너
 │   ├── paper.py             # Alpaca paper / Binance testnet
@@ -81,7 +94,9 @@ trader/
 ├── risk/
 │   ├── kill_switch.py       # 일일 DD > X% 자동 정지
 │   ├── exposure.py          # 시장/섹터/팩터 노출 모니터
-│   └── slippage.py          # 슬리피지 모델
+│   ├── slippage.py          # 슬리피지 모델
+│   ├── short_interest.py    # 공매도 잔고 급증 모니터
+│   └── option_skew.py       # 옵션 IV skew 하방 신호
 ├── dashboard/
 │   └── app.py               # Streamlit 단일 진입점
 ├── infra/
@@ -119,6 +134,7 @@ trader/
 
 1. **단일 Strategy 인터페이스** — 백테스트/페이퍼/라이브 코드 동일
 2. **데이터 카탈로그 중앙집중** — 시장별 데이터 형태 차이를 catalog.py가 흡수
-3. **Pod 모듈 분리** — 전략은 알파 생성만, 자본배분/리스크는 pod/risk가 담당
-4. **Kill switch 기본 활성** — 라이브에선 일일 DD/포지션 한도 강제
-5. **테스트 우선** — strategies/는 모두 fixture 기반 테스트 (TDD)
+3. **Point-in-time 보장** — 펀더멘털·공시는 발표일(asof) 이후만 사용. look-ahead bias 차단
+4. **Pod 모듈 분리** — 전략은 알파 생성만, 자본배분/리스크는 pod/risk가 담당
+5. **Kill switch 기본 활성** — 라이브에선 일일 DD/포지션 한도 강제
+6. **테스트 우선** — strategies/는 모두 fixture 기반 테스트 (TDD)

@@ -22,26 +22,53 @@
 
 ---
 
-## Stage 2 — AQR 팩터 백테스트
+## Stage 1.5 — 미시경제 데이터 인프라
 
-**목표**: 학술적으로 검증된 팩터 전략 1개를 3시장에서 백테스트, Sharpe ≥ 1.0.
+**목표**: 펀더멘털 + 공시 + 인사이더 데이터를 point-in-time 보장으로 수집·저장.
+
+**작업**:
+- [ ] `data/ingest/edgar_us.py` — SEC EDGAR 10-K/Q 파서 (재무제표 추출)
+- [ ] `data/ingest/dart_kr.py` — DART OpenAPI (사업보고서 + 임원·주요주주 보고)
+- [ ] `data/ingest/fmp_earnings.py` — FMP 어닝 캘린더 + 컨센서스 + 가이던스
+- [ ] `data/ingest/edgar_us.py`에 Form 4 (인사이더) + 13F 추가
+- [ ] DuckDB 테이블: `fundamentals_q`, `earnings`, `insider_trades`, `holdings_13f`
+- [ ] `data/catalog.py`에 `as_of=` 파라미터 강제 (point-in-time)
+- [ ] `tests/test_data/test_pit.py` — look-ahead 회귀 테스트
+
+**검증 기준**:
+- [ ] S&P500 + KOSPI200 분기 펀더멘털 10년치 수집
+- [ ] `get_fundamentals(symbol, as_of=date)` 가 발표일 이후 데이터만 반환 (회귀 테스트 통과)
+- [ ] FMP 무료 한도(250 req/day) 내에서 일일 갱신 자동화
+- [ ] DART API 호출 ↔ pykrx 펀더멘털 교차 검증 ±5% 이내
+
+**왜 Stage 2 전에**: AQR Quality 팩터는 ROE/FCF가 필요. 펀더멘털 없이는 모멘텀+가치만 가능.
+
+---
+
+## Stage 2 — AQR 팩터 백테스트 (Value + Momentum + Quality)
+
+**목표**: 학술적으로 검증된 3-팩터 전략을 3시장에서 백테스트, Sharpe ≥ 1.0.
 
 **작업**:
 - [ ] `strategies/_base.py` — Strategy 추상 클래스 (Nautilus 호환)
-- [ ] `strategies/factor_aqr.py` — Value/Momentum/Quality 팩터 결합
-  - Value: Earnings Yield (1/PER) — 미국/한국
+- [ ] `strategies/factor_aqr.py` — Value/Momentum/Quality 결합
+  - Value: Earnings Yield (1/PER), Book/Price — 미국/한국
   - Momentum: 12-1 month return — 3시장 모두
-  - Quality: ROE — 미국/한국
+  - Quality: ROE, FCF/EV, Asset Turnover — Stage 1.5 펀더멘털 활용
+- [ ] `strategies/pead.py` — 어닝 서프라이즈 드리프트
+  - 발표 후 +2 ~ +60일 보유, surprise top decile 매수
 - [ ] `engine/backtest.py` — Nautilus 백테스트 러너 + 리포트
 - [ ] 리포트: Sharpe, Sortino, MaxDD, Calmar, Information Ratio, Turnover
 
 **검증 기준**:
-- [ ] 미국 시장 12-1 모멘텀 Sharpe 0.6~1.0 (학술 결과 일치)
-- [ ] 한국 시장 동일 전략 Sharpe ±0.3 이내
-- [ ] 크립토 모멘텀 Sharpe ≥ 1.0 (변동성 프리미엄)
-- [ ] 백테스트 1년치 < 5초 (Nautilus Rust 엔진 효과 확인)
+- [ ] 미국 12-1 모멘텀 Sharpe 0.6~1.0 (학술 결과 일치)
+- [ ] 미국 AQR 3팩터 Sharpe > 단일 팩터 평균 (분산 효과)
+- [ ] PEAD 미국 Sharpe ≥ 0.7 (Bernard-Thomas 1989 재현)
+- [ ] 한국 동일 전략 Sharpe ±0.3 이내
+- [ ] 크립토 모멘텀 Sharpe ≥ 1.0
+- [ ] 백테스트 1년치 < 5초
 
-**Why 이 전략 먼저**: 데이터 한계 무관(일봉만), 학술적 재현성 풍부, 결과가 명확히 검증 가능.
+**Why 이 전략 먼저**: 학술적 재현성 풍부, 점진적 확장 (모멘텀만 → +가치 → +퀄리티 → +PEAD).
 
 ---
 
@@ -63,23 +90,29 @@
 
 ---
 
-## Stage 4 — Pod 멀티전략 + 크립토 추가
+## Stage 4 — Pod 멀티전략 + 액티비스트/인사이더 시그널 추가
 
-**목표**: Citadel Pod 모델로 3+ 전략 동시 운용, 전체 Sharpe > 개별 평균.
+**목표**: Citadel Pod 모델로 5+ 전략 동시 운용, 미시경제 시그널 통합.
 
 **작업**:
 - [ ] 추가 전략:
   - `strategies/risk_parity.py` (Bridgewater식 자산배분)
   - `strategies/statarb_pairs.py` (BTC/ETH 페어 — 크립토만)
-- [ ] `pod/allocator.py` — Vol-target 리스크 예산 (각 전략 동일 vol 기여)
-- [ ] `pod/monitor.py` — 전략별 Sharpe/DD 실시간 추적, 손실 시 자본 회수
-- [ ] CCXT Binance 페이퍼 또는 testnet 연동
-- [ ] 대시보드 v2 — 전략별 기여도 분해
+- [ ] `signals/activist_13f.py` — SEC EDGAR 13F 분기별 파싱
+  - Pershing/Tiger/Elliott 신규 진입 종목 추적
+- [ ] `signals/insider.py` — Form 4 + DART 임원보고
+  - CEO/CFO 클러스터 매수 알림 (3명 이상 동시 매수)
+- [ ] `signals/revisions.py` — FMP 컨센서스 변경 모멘텀
+- [ ] `risk/short_interest.py` — 공매도 잔고 급증 모니터 (KRX + FINRA)
+- [ ] `pod/allocator.py` — Vol-target 리스크 예산
+- [ ] `pod/monitor.py` — 전략별 Sharpe/DD 실시간 추적
+- [ ] 대시보드 v2 — 전략별 기여도 + 시그널 알림
 
 **검증 기준**:
-- [ ] 3+ 전략 동시 운용 1주일 무사고
+- [ ] 5+ 전략 동시 운용 1주일 무사고
 - [ ] 통합 포트폴리오 Sharpe > 개별 평균 × 1.1 (분산 효과 입증)
-- [ ] 한 전략이 큰 DD 시 자본 자동 회수 동작 확인
+- [ ] 13F 미러링: 분기별 신규 진입 종목 6개월 보유 시 시장 대비 알파 ≥ 2%/년
+- [ ] 인사이더 클러스터 매수 후 90일 시장 대비 알파 ≥ 5%
 - [ ] 시장간 상관계수가 낮음 검증 (미국/한국/크립토 < 0.5)
 
 ---
@@ -122,9 +155,10 @@
 
 | Stage | 풀타임 | 주말 작업 |
 |-------|--------|-----------|
-| 1 | 1주 | 3주 |
-| 2 | 2주 | 6주 |
-| 3 | 1주 | 3주 |
-| 4 | 3주 | 9주 |
-| 5 | 4주 (관찰 중심) | 12주 |
-| **합계** | **11주** | **33주 (~8개월)** |
+| 1 (가격 데이터) | 1주 | 3주 |
+| 1.5 (미시경제 데이터) | 1주 | 3주 |
+| 2 (AQR + PEAD 백테스트) | 2주 | 6주 |
+| 3 (페이퍼) | 1주 | 3주 |
+| 4 (Pod + 시그널) | 3주 | 9주 |
+| 5 (라이브, 관찰 중심) | 4주 | 12주 |
+| **합계** | **12주** | **36주 (~9개월)** |

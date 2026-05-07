@@ -1,4 +1,6 @@
-# 데이터 소스 — 한계와 우회
+# 시장 데이터 소스 — 한계와 우회
+
+> 펀더멘털·공시·인사이더 등 **미시경제 데이터**는 [`MICROECONOMIC_DATA.md`](MICROECONOMIC_DATA.md) 참조.
 
 ## 결정: Alpaca + pykrx + CCXT (모두 무료)
 

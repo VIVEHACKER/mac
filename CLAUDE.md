@@ -8,14 +8,21 @@
 M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 
 **스택**: Nautilus Trader + Polars + DuckDB + Streamlit + PyTorch(MPS)
-**데이터**: Alpaca + pykrx + CCXT (모두 무료)
+**시장 데이터**: Alpaca + pykrx + CCXT (모두 무료)
+**미시경제 데이터**: SEC EDGAR + DART OpenAPI + FMP + yfinance (펀더멘털/공시/인사이더)
 **파이프라인**: Backtest → Paper → Live (동일 코드)
 
 ## 첫 액션 순서
 
 1. `bash setup/install.sh` 실행
-2. `.env`에 Alpaca paper + Binance testnet 키 입력
+2. `.env`에 키 입력:
+   - Alpaca paper, Binance testnet (시장 데이터)
+   - DART API key (https://opendart.fss.or.kr 즉시 발급)
+   - FMP API key (https://site.financialmodelingprep.com 무료 250req/day)
+   - FRED API key (선택, 거시 데이터)
+   - SEC EDGAR는 키 불필요 (User-Agent만)
 3. **Stage 1 시작** — `data/ingest/alpaca_us.py` 부터 TDD로
+4. **Stage 1.5** — 펀더멘털/공시 수집 + point-in-time 카탈로그
 
 ## 문서 우선순위
 
@@ -23,8 +30,9 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 1. `README.md` — 전체 개요
 2. `docs/STRATEGIES.md` — 어떤 펀드의 어떤 전략을 구현할지
 3. `docs/ARCHITECTURE.md` — 시스템 구조 + 디렉토리 트리
-4. `docs/DATA_SOURCES.md` — 데이터 소스의 한계와 우회법
-5. `docs/ROADMAP.md` — 5단계 로드맵 + 검증 기준
+4. `docs/DATA_SOURCES.md` — 시장 데이터 소스 한계와 우회법
+5. `docs/MICROECONOMIC_DATA.md` — 펀더멘털/공시/인사이더/대안 데이터 + point-in-time
+6. `docs/ROADMAP.md` — 6단계 로드맵 + 검증 기준 (Stage 1.5 포함)
 
 ## 작업 규칙 (이전 세션에서 합의)
 
@@ -33,6 +41,8 @@ M4 Pro에서 실행 가능한 통합 트레이딩 시스템으로 구현.
 - **단일 Strategy 인터페이스** — backtest/paper/live 코드 동일하게 유지
 - **kill_switch 항상 켬** — 라이브 전환 시 일일 DD/포지션 한도 강제
 - **시작은 일봉 전략** — IEX 데이터 한계와 무관하게 동작하는 영역부터
+- **Point-in-time 강제** — 펀더멘털/공시는 발표일(asof) 이후만 사용. catalog.py가 `as_of=` 파라미터 강제
+- **데이터 소스 교차검증** — yfinance ↔ SEC EDGAR ±5% 이상 차이 시 EDGAR 신뢰
 
 ## 가장 먼저 구현할 전략
 

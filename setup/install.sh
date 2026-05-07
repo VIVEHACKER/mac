@@ -34,6 +34,16 @@ uv add \
   pyarrow \
   python-dotenv
 
+echo "==> 4-2. 미시경제 데이터 패키지 (펀더멘털/공시/인사이더)"
+uv add \
+  yfinance \
+  sec-edgar-downloader \
+  edgar \
+  OpenDartReader \
+  fmpsdk \
+  fredapi \
+  pytrends
+
 echo "==> 5. PyTorch (M4 MPS 활성화)"
 uv add torch torchvision
 
@@ -53,7 +63,9 @@ print(f'MPS available: {torch.backends.mps.is_available()}')
 
 echo "==> 8. 디렉토리 구조 생성"
 mkdir -p \
-  data/ingest data/store/eod data/store/intraday \
+  data/ingest \
+  data/store/eod data/store/intraday \
+  data/store/fundamentals data/store/filings data/store/events \
   strategies signals engine pod risk dashboard \
   infra tests/test_strategies tests/test_data tests/test_engine
 
