@@ -7,6 +7,7 @@ import sys
 from .skill_registry import SkillRegistry
 from .storage import TradingStore
 from .workflows import TradingWorkflows
+from .pattern_mining import ASSET_SETS, expand_asset_set
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,11 +97,15 @@ def main(argv: list[str] | None = None) -> int:
         start = _date.fromisoformat(args.start)
         end = _date.fromisoformat(args.end)
         report = workflows.backtest_regime_report(
-            start, end, holding_days=args.holding_days
+            start, end,
+            holding_days=args.holding_days,
+            long_history=args.long_history,
         )
         if args.csv_output:
             csv_text = workflows.backtest_regime_csv(
-                start, end, holding_days=args.holding_days
+                start, end,
+                holding_days=args.holding_days,
+                long_history=args.long_history,
             )
             args.csv_output.parent.mkdir(parents=True, exist_ok=True)
             args.csv_output.write_text(csv_text, encoding="utf-8")
@@ -123,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         return emit(report, args.output)
 
     if args.command == "patterns":
-        assets = parse_csv_strings(args.assets)
+        assets = parse_csv_strings(args.assets) if args.assets else expand_asset_set(args.asset_set)
         horizons = parse_csv_ints(args.horizons)
         report = workflows.patterns_report(
             assets=assets,
@@ -360,6 +365,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--holding-days", type=int, default=21,
         help="Forward holding window in trading days. Default 21 (~1 month).",
     )
+    backtest.add_argument(
+        "--long-history",
+        action="store_true",
+        help="Use Yahoo period1/period2 endpoint to fetch daily bars from any historical "
+             "date. Required for backtests beyond ~5 years (e.g. 2008 crisis, 2020 COVID).",
+    )
     backtest.add_argument("--csv-output", type=Path)
     backtest.add_argument("--output", type=Path)
 
@@ -384,9 +395,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mine historical macro/market condition patterns with win rates and confidence bounds.",
     )
     patterns.add_argument(
+        "--asset-set",
+        default="core",
+        choices=sorted(ASSET_SETS),
+        help="Preset asset universe. Use --assets to override. Default: core.",
+    )
+    patterns.add_argument(
         "--assets",
-        default="SPY,QQQ,IWM,TLT,GLD",
-        help="Comma-separated assets to test. Default: SPY,QQQ,IWM,TLT,GLD.",
+        default="",
+        help="Comma-separated assets to test. Overrides --asset-set when provided.",
     )
     patterns.add_argument(
         "--horizons",

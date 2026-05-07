@@ -4,11 +4,14 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Iterable
 
+from datetime import timedelta as _timedelta
+
 from .industry_rotation import (
     PriceHistoryProvider,
     PricePoint,
     YahooHistoryProvider,
 )
+from .long_history import YahooDailyHistoryProvider
 from .macro import (
     FredCsvProvider,
     MacroDataError,
@@ -76,8 +79,17 @@ def run_backtest(
     history_provider: PriceHistoryProvider | None = None,
     macro_provider: MacroDataProvider | None = None,
     holding_days: int = DEFAULT_HOLDING_DAYS,
+    long_history: bool = False,
 ) -> BacktestResult:
-    history = history_provider or YahooHistoryProvider()
+    if history_provider is None:
+        if long_history:
+            fetch_start = date(start.year - 1, start.month, 1)
+            fetch_end = end + _timedelta(days=int(holding_days * 1.6) + 30)
+            history = YahooDailyHistoryProvider(fetch_start, fetch_end)
+        else:
+            history = YahooHistoryProvider()
+    else:
+        history = history_provider
     macro = macro_provider or FredCsvProvider()
 
     history_cache: dict[str, tuple[PricePoint, ...]] = {}

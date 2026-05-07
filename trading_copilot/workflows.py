@@ -124,13 +124,15 @@ class TradingWorkflows:
         end: date,
         *,
         holding_days: int = DEFAULT_HOLDING_DAYS,
+        long_history: bool = False,
     ) -> str:
         result = run_backtest(
             start=start,
             end=end,
-            history_provider=self.industry_history,
+            history_provider=None if long_history else self.industry_history,
             macro_provider=self.macro,
             holding_days=holding_days,
+            long_history=long_history,
         )
         return format_backtest_report(result)
 
@@ -140,13 +142,15 @@ class TradingWorkflows:
         end: date,
         *,
         holding_days: int = DEFAULT_HOLDING_DAYS,
+        long_history: bool = False,
     ) -> str:
         result = run_backtest(
             start=start,
             end=end,
-            history_provider=self.industry_history,
+            history_provider=None if long_history else self.industry_history,
             macro_provider=self.macro,
             holding_days=holding_days,
+            long_history=long_history,
         )
         return backtest_to_csv(result)
 
