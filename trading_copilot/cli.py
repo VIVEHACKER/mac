@@ -73,6 +73,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "macro":
         return emit(workflows.macro_report(), args.output)
 
+    if args.command == "industries":
+        report = workflows.industry_leadership_report(
+            current_limit=args.current_limit,
+            next_limit=args.next_limit,
+        )
+        if args.csv_output:
+            csv_text = workflows.industry_leadership_csv()
+            args.csv_output.parent.mkdir(parents=True, exist_ok=True)
+            args.csv_output.write_text(csv_text, encoding="utf-8")
+            print(f"Wrote {args.csv_output}")
+        return emit(report, args.output)
+
     if args.command == "recommend":
         return emit(
             workflows.recommendation_report(
@@ -145,6 +157,23 @@ def main(argv: list[str] | None = None) -> int:
                 horizon=args.horizon,
                 risk_budget=args.risk_budget,
                 user_context=args.context,
+            ),
+            args.output,
+        )
+
+    if args.command == "playbook":
+        return emit(
+            workflows.playbook_report(
+                ticker=args.ticker,
+                aum=args.aum,
+                target_vol=args.target_vol,
+                kelly_multiplier=args.kelly_multiplier,
+                max_position_pct=args.max_position,
+                max_risk_pct_of_aum=args.max_risk,
+                win_probability=args.win_probability,
+                upside_pct=args.upside,
+                downside_pct=args.downside,
+                sector_industry_hint=args.industry,
             ),
             args.output,
         )
@@ -232,6 +261,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate a FRED-based macro cycle dashboard.",
     )
     macro.add_argument("--output", type=Path)
+
+    industries = sub.add_parser(
+        "industries",
+        help="Rank current and next industry leadership using ETF proxy rotation.",
+    )
+    industries.add_argument("--current-limit", type=int, default=10)
+    industries.add_argument("--next-limit", type=int, default=10)
+    industries.add_argument("--csv-output", type=Path)
+    industries.add_argument("--output", type=Path)
 
     recommend = sub.add_parser(
         "recommend",
@@ -322,6 +360,49 @@ def build_parser() -> argparse.ArgumentParser:
     pretrade.add_argument("--risk-budget", default="Undefined")
     pretrade.add_argument("--context", default="")
     pretrade.add_argument("--output", type=Path)
+
+    playbook = sub.add_parser(
+        "playbook",
+        help="Single-ticker buy playbook combining macro, sector rotation, technicals, and Kelly sizing.",
+    )
+    playbook.add_argument("ticker")
+    playbook.add_argument(
+        "--aum", type=float,
+        help="Total AUM for position sizing. Omit to skip the sizing block."
+    )
+    playbook.add_argument(
+        "--target-vol", type=float, default=0.35,
+        help="Target portfolio annualized volatility (e.g. 0.35 = 35%%). Default 0.35.",
+    )
+    playbook.add_argument(
+        "--kelly-multiplier", type=float, default=0.5,
+        help="Fraction of full Kelly to apply (0.5 = half Kelly, safer). Default 0.5.",
+    )
+    playbook.add_argument(
+        "--max-position", type=float, default=0.25,
+        help="Hard cap on single-name weight (e.g. 0.25 = 25%%). Default 0.25.",
+    )
+    playbook.add_argument(
+        "--max-risk", type=float, default=0.02,
+        help="Hard cap on portfolio loss if stopped out (e.g. 0.02 = 2%%). Default 0.02.",
+    )
+    playbook.add_argument(
+        "--win-probability", type=float, default=0.55,
+        help="Subjective probability of thesis winning. Default 0.55.",
+    )
+    playbook.add_argument(
+        "--upside", type=float, default=0.5,
+        help="Expected upside if thesis works (fraction, e.g. 0.5 = +50%%). Default 0.5.",
+    )
+    playbook.add_argument(
+        "--downside", type=float, default=0.2,
+        help="Stop-loss fraction (e.g. 0.2 = -20%%). Default 0.2.",
+    )
+    playbook.add_argument(
+        "--industry",
+        help="Industry/sector hint (ETF symbol or name). If omitted, the strongest current sector is used.",
+    )
+    playbook.add_argument("--output", type=Path)
 
     return parser
 

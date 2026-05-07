@@ -9,6 +9,13 @@ from .events import (
     format_events_report,
     format_news_report,
 )
+from .industry_rotation import (
+    PriceHistoryProvider,
+    YahooHistoryProvider,
+    analyze_industries,
+    format_industry_report,
+    industry_scores_to_csv,
+)
 from .market_data import (
     MarketDataProvider,
     YahooChartProvider,
@@ -21,6 +28,7 @@ from .macro import (
     build_macro_dashboard,
     format_macro_report,
 )
+from .playbook import PlaybookBuilder, format_playbook_report
 from .portfolio import (
     DEFAULT_SINGLE_STOCK_POOL,
     build_aggressive_portfolio,
@@ -45,6 +53,7 @@ class TradingWorkflows:
         news: EventProvider | None = None,
         universe: UniverseProvider | None = None,
         macro: MacroDataProvider | None = None,
+        industry_history: PriceHistoryProvider | None = None,
     ):
         self.skills = skills
         self.store = store
@@ -53,6 +62,40 @@ class TradingWorkflows:
         self.news = news or NewsRssProvider()
         self.universe = universe or NasdaqTraderUniverseProvider()
         self.macro = macro or FredCsvProvider()
+        self.industry_history = industry_history or YahooHistoryProvider()
+
+    def playbook_report(
+        self,
+        ticker: str,
+        *,
+        aum: float | None = None,
+        target_vol: float = 0.35,
+        kelly_multiplier: float = 0.5,
+        max_position_pct: float = 0.25,
+        max_risk_pct_of_aum: float = 0.02,
+        win_probability: float = 0.55,
+        upside_pct: float = 0.5,
+        downside_pct: float = 0.2,
+        sector_industry_hint: str | None = None,
+    ) -> str:
+        builder = PlaybookBuilder(
+            market_data=self.market_data,
+            history_provider=self.industry_history,
+            macro_provider=self.macro,
+        )
+        playbook = builder.build(
+            ticker,
+            aum=aum,
+            target_vol=target_vol,
+            kelly_multiplier=kelly_multiplier,
+            max_position_pct=max_position_pct,
+            max_risk_pct_of_aum=max_risk_pct_of_aum,
+            win_probability=win_probability,
+            upside_pct=upside_pct,
+            downside_pct=downside_pct,
+            sector_industry_hint=sector_industry_hint,
+        )
+        return format_playbook_report(playbook)
 
     def morning_brief(self, tickers: list[str], include_market_data: bool = False) -> str:
         bundle = self.skills.bundle_for("morning")
@@ -146,6 +189,22 @@ class TradingWorkflows:
 
     def macro_report(self) -> str:
         return format_macro_report(build_macro_dashboard(self.macro))
+
+    def industry_leadership_report(
+        self,
+        current_limit: int = 10,
+        next_limit: int = 10,
+    ) -> str:
+        result = analyze_industries(
+            history_provider=self.industry_history,
+            current_limit=current_limit,
+            next_limit=next_limit,
+        )
+        return format_industry_report(result)
+
+    def industry_leadership_csv(self) -> str:
+        result = analyze_industries(history_provider=self.industry_history)
+        return industry_scores_to_csv(result.scores)
 
     def screen_prompt(self, criteria: str, direction: str = "both") -> str:
         bundle = self.skills.bundle_for("screen")
