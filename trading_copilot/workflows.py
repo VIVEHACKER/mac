@@ -30,6 +30,7 @@ from .industry_rotation import (
     analyze_industries,
     format_industry_report,
     industry_scores_to_csv,
+    return_profile,
 )
 from .market_data import (
     MarketDataProvider,
@@ -74,6 +75,13 @@ from .portfolio import (
 )
 from .recommendations import build_recommendation_report, score_recommendation
 from .screening import candidates_to_csv, format_screen_report, screen_members
+from .sector_rankings import (
+    CompanyMetrics,
+    KoreanTickersProvider,
+    format_sector_ranking_report,
+    rank_sector_companies,
+    sector_rankings_to_csv,
+)
 from .signals import detect_forecast_signals, format_signals_report
 from .skill_registry import SkillRegistry
 from .storage import TradingStore, normalize_ticker, tickers_from_items
@@ -96,6 +104,7 @@ class TradingWorkflows:
         fundamentals: FundamentalsProvider | None = None,
         economic_calendar_providers: tuple[EconomicCalendarProvider, ...] | None = None,
         quote_summary: QuoteSummaryProvider | None = None,
+        korean_tickers: KoreanTickersProvider | None = None,
     ):
         self.skills = skills
         self.store = store
@@ -110,6 +119,7 @@ class TradingWorkflows:
         self.fundamentals = fundamentals or HybridFundamentalsProvider()
         self.economic_calendar_providers = economic_calendar_providers
         self.quote_summary = quote_summary or YahooQuoteSummaryProvider()
+        self.korean_tickers = korean_tickers or KoreanTickersProvider()
 
     def regime_report(self) -> str:
         report = build_regime_report(
@@ -333,6 +343,179 @@ class TradingWorkflows:
     def industry_leadership_csv(self) -> str:
         result = analyze_industries(history_provider=self.industry_history)
         return industry_scores_to_csv(result.scores)
+
+    def sector_ranking_report(
+        self,
+        market: str,
+        max_tickers: int,
+        per_sector_limit: int,
+        sector: str,
+        tickers: tuple[str, ...],
+        use_korean_tickers: bool = True,
+    ) -> str:
+        return format_sector_ranking_report(
+            self._sector_ranking_result(
+                market=market,
+                max_tickers=max_tickers,
+                per_sector_limit=per_sector_limit,
+                sector=sector,
+                tickers=tickers,
+                use_korean_tickers=use_korean_tickers,
+            )
+        )
+
+    def sector_ranking_csv(
+        self,
+        market: str,
+        max_tickers: int,
+        per_sector_limit: int,
+        sector: str,
+        tickers: tuple[str, ...],
+        use_korean_tickers: bool = True,
+    ) -> str:
+        return sector_rankings_to_csv(
+            self._sector_ranking_result(
+                market=market,
+                max_tickers=max_tickers,
+                per_sector_limit=per_sector_limit,
+                sector=sector,
+                tickers=tickers,
+                use_korean_tickers=use_korean_tickers,
+            )
+        )
+
+    def _sector_ranking_result(
+        self,
+        market: str,
+        max_tickers: int,
+        per_sector_limit: int,
+        sector: str,
+        tickers: tuple[str, ...],
+        use_korean_tickers: bool,
+    ):
+        metrics: list[CompanyMetrics] = []
+        data_gaps: list[str] = []
+        market_key = market.lower().strip()
+        sector_filter = sector.strip().lower()
+        ticker_filter = {ticker_key(ticker) for ticker in tickers}
+
+        if use_korean_tickers and market_key in {"kr", "korea", "kospi", "kosdaq"}:
+            try:
+                metrics.extend(self.korean_tickers.metrics(market_key))
+            except Exception as exc:
+                data_gaps.append(f"KoreanTickers stocks: {exc}")
+
+        if metrics:
+            if ticker_filter:
+                metrics = [metric for metric in metrics if ticker_key(metric.symbol) in ticker_filter]
+            if sector_filter:
+                metrics = [metric for metric in metrics if metric.sector.lower() == sector_filter]
+            if max_tickers > 0:
+                metrics = metrics[:max_tickers]
+        else:
+            metrics.extend(
+                self._provider_sector_metrics(
+                    market=market,
+                    max_tickers=max_tickers,
+                    sector=sector,
+                    tickers=tickers,
+                    data_gaps=data_gaps,
+                )
+            )
+
+        return rank_sector_companies(
+            market=market,
+            metrics=tuple(metrics),
+            per_sector_limit=per_sector_limit,
+            data_gaps=tuple(data_gaps),
+        )
+
+    def _provider_sector_metrics(
+        self,
+        market: str,
+        max_tickers: int,
+        sector: str,
+        tickers: tuple[str, ...],
+        data_gaps: list[str],
+    ) -> tuple[CompanyMetrics, ...]:
+        if tickers:
+            members = tuple(
+                UniverseMemberForRanking(normalize_ticker(ticker), normalize_ticker(ticker), market.upper())
+                for ticker in tickers
+            )
+        else:
+            members = self._universe_members(market, include_etfs=False, include_spacs=False)
+            if max_tickers > 0:
+                members = members[:max_tickers]
+
+        metrics: list[CompanyMetrics] = []
+        for member in members:
+            try:
+                metrics.append(self._company_metrics_from_providers(member, sector))
+            except Exception as exc:
+                data_gaps.append(f"{member.symbol}: {exc}")
+        return tuple(metrics)
+
+    def _company_metrics_from_providers(self, member, sector_override: str) -> CompanyMetrics:
+        normalized = normalize_ticker(member.symbol)
+        sources: list[str] = []
+        sector = sector_override.strip()
+        industry = ""
+        market_cap = None
+        pe = None
+        try:
+            summary = self.quote_summary.summary(normalized)
+            sector = sector or summary.sector or ""
+            industry = summary.industry or ""
+            market_cap = summary.market_cap
+            pe = summary.trailing_pe or summary.forward_pe
+            sources.append(summary.source)
+        except Exception:
+            pass
+
+        revenue_growth = None
+        net_margin = None
+        free_cash_flow = None
+        liabilities_to_equity = None
+        try:
+            analysis = self.fundamentals.analysis(normalized)
+            revenue_growth = analysis.revenue_growth
+            net_margin = analysis.net_margin
+            free_cash_flow = analysis.free_cash_flow
+            liabilities_to_equity = analysis.liabilities_to_equity
+            sources.append(analysis.source)
+        except Exception:
+            pass
+
+        one_month = None
+        three_month = None
+        six_month = None
+        try:
+            profile = return_profile(self.industry_history.history(normalized))
+            one_month = profile.one_month
+            three_month = profile.three_month
+            six_month = profile.six_month
+            sources.append(f"{self.industry_history.__class__.__name__}: {normalized} price history")
+        except Exception:
+            pass
+
+        return CompanyMetrics(
+            symbol=normalized,
+            name=getattr(member, "name", normalized),
+            market=getattr(member, "market", market_label_from_symbol(normalized)),
+            sector=sector or "Unclassified",
+            industry=industry,
+            revenue_growth=revenue_growth,
+            net_margin=net_margin,
+            free_cash_flow=free_cash_flow,
+            liabilities_to_equity=liabilities_to_equity,
+            market_cap=market_cap,
+            pe=pe,
+            one_month_return=one_month,
+            three_month_return=three_month,
+            six_month_return=six_month,
+            sources=tuple(dict.fromkeys(sources)),
+        )
 
     def patterns_report(
         self,
@@ -606,3 +789,23 @@ def safe_recent_events(provider: EventProvider, ticker: str, limit: int) -> tupl
         return provider.recent_events(ticker, limit=limit)
     except Exception:
         return ()
+
+
+class UniverseMemberForRanking:
+    def __init__(self, symbol: str, name: str, market: str):
+        self.symbol = symbol
+        self.name = name
+        self.market = market
+
+
+def ticker_key(ticker: str) -> str:
+    return normalize_ticker(ticker).split(".", 1)[0]
+
+
+def market_label_from_symbol(symbol: str) -> str:
+    normalized = normalize_ticker(symbol)
+    if normalized.endswith(".KS"):
+        return "KOSPI"
+    if normalized.endswith(".KQ"):
+        return "KOSDAQ"
+    return "US"

@@ -6,6 +6,7 @@ import unittest
 from trading_copilot.market_data import MarketSnapshot
 from trading_copilot.events import EventItem
 from trading_copilot.macro import FredSeries, MacroObservation
+from trading_copilot.sector_rankings import CompanyMetrics
 from trading_copilot.universe import UniverseMember
 from trading_copilot.skill_registry import SkillRegistry
 from trading_copilot.storage import TradingStore
@@ -292,6 +293,40 @@ class TradingWorkflowTests(unittest.TestCase):
             self.assertIn("Consumer Price Index", report)
             self.assertIn("Not investment advice", report)
 
+    def test_sector_ranking_report_uses_korean_tickers_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TradingStore(Path(tmp) / "copilot.db")
+            store.initialize()
+            workflows = TradingWorkflows(
+                SkillRegistry(FINANCIAL_SERVICES),
+                store,
+                korean_tickers=StaticKoreanTickers(),
+            )
+
+            report = workflows.sector_ranking_report(
+                market="kr",
+                max_tickers=10,
+                per_sector_limit=2,
+                sector="",
+                tickers=(),
+                use_korean_tickers=True,
+            )
+            csv_text = workflows.sector_ranking_csv(
+                market="kr",
+                max_tickers=10,
+                per_sector_limit=2,
+                sector="",
+                tickers=(),
+                use_korean_tickers=True,
+            )
+
+            self.assertIn("# Sector Company Rankings - KR", report)
+            self.assertIn("Technology Capability", report)
+            self.assertIn("Semiconductors", report)
+            self.assertLess(report.index("000660.KS"), report.index("005380.KS"))
+            self.assertIn("https://www.koreantickers.com/reports?q=000660", report)
+            self.assertIn("sector_rank,company_rank,sector", csv_text)
+
     def test_events_report_formats_recent_sec_filings(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TradingStore(Path(tmp) / "copilot.db")
@@ -395,6 +430,50 @@ class StaticUniverse:
         return (
             UniverseMember("GOOD", "Good Co", "NASDAQ", "test"),
             UniverseMember("BAD", "Bad Co", "NYSE", "test"),
+        )
+
+
+class StaticKoreanTickers:
+    def metrics(self, market: str = "kr") -> tuple[CompanyMetrics, ...]:
+        return (
+            CompanyMetrics(
+                symbol="005930.KS",
+                name="Samsung Electronics",
+                market="KOSPI",
+                sector="Semiconductors",
+                revenue_growth=10.88,
+                net_margin=18.0,
+                three_month_return=67.56,
+                report_count=66,
+                pe=41.36,
+                peg=1.32,
+                sources=("https://www.koreantickers.com/reports?q=005930",),
+            ),
+            CompanyMetrics(
+                symbol="000660.KS",
+                name="SK hynix",
+                market="KOSPI",
+                sector="Semiconductors",
+                revenue_growth=46.76,
+                net_margin=28.0,
+                three_month_return=92.73,
+                report_count=31,
+                pe=28.02,
+                peg=0.24,
+                sources=("https://www.koreantickers.com/reports?q=000660",),
+            ),
+            CompanyMetrics(
+                symbol="005380.KS",
+                name="Hyundai Motor",
+                market="KOSPI",
+                sector="Automobiles",
+                revenue_growth=6.29,
+                net_margin=8.0,
+                three_month_return=21.71,
+                report_count=17,
+                pe=16.10,
+                sources=("https://www.koreantickers.com/reports?q=005380",),
+            ),
         )
 
 

@@ -22,6 +22,7 @@ python -m trading_copilot fundamentals MSFT --output out\fundamentals-MSFT.md
 python -m trading_copilot signals MSFT --event-limit 3 --news-limit 5 --output out\signals-MSFT.md
 python -m trading_copilot macro --output out\macro-cycle.md
 python -m trading_copilot industries --current-limit 10 --next-limit 10 --output out\industry-leadership.md --csv-output out\industry-leadership.csv
+python -m trading_copilot sector-rank --market kr --max-tickers 100 --per-sector-limit 5 --output out\sector-rank-kr.md --csv-output out\sector-rank-kr.csv
 python -m trading_copilot screen-all --market us --max-tickers 50 --limit 25 --with-news --output out\screen-us.md --csv-output out\screen-us.csv
 python -m trading_copilot portfolio-100 --single-stock-pool NVDA,AVGO,AMD,MSFT,META,AMZN,TSLA,PLTR,CRWD,ARM --output out\portfolio-100.md --csv-output out\portfolio-100.csv
 python -m trading_copilot morning MSFT --with-market-data --output out\morning-with-market.md
@@ -41,6 +42,7 @@ python -m trading_copilot pretrade MSFT --side buy --risk-budget "1% portfolio r
 - `signals`: earnings-forecast leading signals from contracts, guidance, demand, margin, regulatory, and filing events
 - `macro`: FRED-based macro cycle dashboard covering CPI, core CPI, unemployment, Fed funds, the 10Y-2Y yield curve, industrial production, and retail sales
 - `industries`: ETF-proxy rotation radar that separates current leading industries from next-leader candidates using 1M/3M/6M relative strength and acceleration
+- `sector-rank`: ranks companies inside each sector by technology capability and business viability, then ranks sectors by the leading companies' composite scores. For Korean markets it uses KoreanTickers `/stocks` sector, valuation, growth, momentum, and `/reports` coverage metadata as research inputs; report count is treated as coverage breadth, not proof of quality
 - `screen-all`: ranked market-universe screen with quote data and optional news/SEC signal checks
 - `portfolio-100`: aggressive target-100%-annual-return portfolio draft with leverage, commodities, bonds, and exactly 3 single stocks
 - `recommend`: research-only investment view using quote data, stored thesis, target price, stop price, optional SEC/news events, and optional forecast signals
@@ -94,6 +96,10 @@ $env:ALPHAVANTAGE_API_KEY="your-key"
 Without `MARKETAUX_API_KEY`, `news-fast` still uses RSS and SEC events but reports
 the missing wire/news API as a data gap. Without `ALPHAVANTAGE_API_KEY`,
 `calendar` emits a data-gap section instead of failing the run.
+
+Korean sector-company rankings use public KoreanTickers pages:
+`https://www.koreantickers.com/stocks` for KRX sector/factor metadata and
+`https://www.koreantickers.com/reports` for publisher-linked research coverage.
 
 `macro` tries the FRED CSV endpoint first. If the local network times out or
 blocks FRED, it falls back to GovSpending JSON exports that mirror FRED series

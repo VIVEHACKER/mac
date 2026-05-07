@@ -47,6 +47,50 @@ class NasdaqTraderUniverseProvider:
         return tuple(dedupe_members(members))
 
 
+class KoreanTickersUniverseProvider:
+    def members(
+        self,
+        market: str,
+        include_etfs: bool = False,
+        include_spacs: bool = False,
+    ) -> tuple[UniverseMember, ...]:
+        from .sector_rankings import KoreanTickersProvider
+
+        rows = KoreanTickersProvider().metrics(market)
+        return tuple(
+            UniverseMember(
+                symbol=row.symbol,
+                name=row.name,
+                market=row.market,
+                source="koreantickers.com/stocks",
+            )
+            for row in rows
+        )
+
+
+class CompositeUniverseProvider:
+    def __init__(
+        self,
+        us_provider: UniverseProvider | None = None,
+        korea_provider: UniverseProvider | None = None,
+    ):
+        self.us_provider = us_provider or NasdaqTraderUniverseProvider()
+        self.korea_provider = korea_provider or KoreanTickersUniverseProvider()
+
+    def members(
+        self,
+        market: str,
+        include_etfs: bool = False,
+        include_spacs: bool = False,
+    ) -> tuple[UniverseMember, ...]:
+        key = market.lower().strip()
+        if key == "us":
+            return self.us_provider.members(key, include_etfs=include_etfs, include_spacs=include_spacs)
+        if key in {"kospi", "kosdaq", "kr", "korea"}:
+            return self.korea_provider.members(key, include_etfs=include_etfs, include_spacs=include_spacs)
+        raise ValueError("Supported markets: us, kospi, kosdaq, kr")
+
+
 def parse_nasdaq_listed(text: str, include_etfs: bool, include_spacs: bool) -> list[UniverseMember]:
     members: list[UniverseMember] = []
     for row in pipe_rows(text):

@@ -127,6 +127,30 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Wrote {args.csv_output}")
         return emit(report, args.output)
 
+    if args.command == "sector-rank":
+        tickers = parse_csv_strings(args.tickers)
+        report = workflows.sector_ranking_report(
+            market=args.market,
+            max_tickers=args.max_tickers,
+            per_sector_limit=args.per_sector_limit,
+            sector=args.sector,
+            tickers=tickers,
+            use_korean_tickers=not args.no_korean_tickers,
+        )
+        if args.csv_output:
+            csv_text = workflows.sector_ranking_csv(
+                market=args.market,
+                max_tickers=args.max_tickers,
+                per_sector_limit=args.per_sector_limit,
+                sector=args.sector,
+                tickers=tickers,
+                use_korean_tickers=not args.no_korean_tickers,
+            )
+            args.csv_output.parent.mkdir(parents=True, exist_ok=True)
+            args.csv_output.write_text(csv_text, encoding="utf-8")
+            print(f"Wrote {args.csv_output}")
+        return emit(report, args.output)
+
     if args.command == "patterns":
         assets = parse_csv_strings(args.assets) if args.assets else expand_asset_set(args.asset_set)
         horizons = parse_csv_ints(args.horizons)
@@ -389,6 +413,36 @@ def build_parser() -> argparse.ArgumentParser:
     industries.add_argument("--next-limit", type=int, default=10)
     industries.add_argument("--csv-output", type=Path)
     industries.add_argument("--output", type=Path)
+
+    sector_rank = sub.add_parser(
+        "sector-rank",
+        help="Rank companies within each sector by technology capability and business viability.",
+    )
+    sector_rank.add_argument("--market", default="kr", choices=["us", "kospi", "kosdaq", "kr"])
+    sector_rank.add_argument(
+        "--tickers",
+        default="",
+        help="Comma-separated ticker subset. Korean six-digit tickers match .KS/.KQ symbols.",
+    )
+    sector_rank.add_argument(
+        "--sector",
+        default="",
+        help="Optional sector filter. Also labels manually supplied tickers when provider data lacks a sector.",
+    )
+    sector_rank.add_argument(
+        "--max-tickers",
+        type=int,
+        default=50,
+        help="Maximum companies to score; use 0 for all loaded companies.",
+    )
+    sector_rank.add_argument("--per-sector-limit", type=int, default=5)
+    sector_rank.add_argument(
+        "--no-korean-tickers",
+        action="store_true",
+        help="Do not use KoreanTickers /stocks and /reports metadata for Korean markets.",
+    )
+    sector_rank.add_argument("--csv-output", type=Path)
+    sector_rank.add_argument("--output", type=Path)
 
     patterns = sub.add_parser(
         "patterns",
