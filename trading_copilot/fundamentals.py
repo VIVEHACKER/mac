@@ -648,30 +648,36 @@ def quality_score(analysis: FundamentalsAnalysis) -> tuple[float, tuple[str, ...
 def value_score(
     analysis: FundamentalsAnalysis,
     price: float,
+    override_pe: float | None = None,
 ) -> tuple[float, tuple[str, ...]]:
     notes: list[str] = []
-    pe = trailing_pe(analysis, price)
+    if override_pe is not None and override_pe > 0:
+        pe = override_pe
+        pe_source = "Yahoo quoteSummary"
+    else:
+        pe = trailing_pe(analysis, price)
+        pe_source = "SEC EPS"
     if pe is None:
         notes.append("Trailing P/E unavailable (negative earnings or missing share data) (0/50)")
         pe_pts = 0.0
     elif pe <= 10:
-        pe_pts, note_pe = 50.0, f"Trailing P/E {pe:.1f} (cheap) -> 50/50"
-        notes.append(note_pe)
+        pe_pts = 50.0
+        notes.append(f"Trailing P/E {pe:.1f} ({pe_source}, cheap) -> 50/50")
     elif pe <= 15:
-        pe_pts, note_pe = 40.0, f"Trailing P/E {pe:.1f} -> 40/50"
-        notes.append(note_pe)
+        pe_pts = 40.0
+        notes.append(f"Trailing P/E {pe:.1f} ({pe_source}) -> 40/50")
     elif pe <= 25:
-        pe_pts, note_pe = 30.0, f"Trailing P/E {pe:.1f} -> 30/50"
-        notes.append(note_pe)
+        pe_pts = 30.0
+        notes.append(f"Trailing P/E {pe:.1f} ({pe_source}) -> 30/50")
     elif pe <= 40:
-        pe_pts, note_pe = 18.0, f"Trailing P/E {pe:.1f} -> 18/50"
-        notes.append(note_pe)
+        pe_pts = 18.0
+        notes.append(f"Trailing P/E {pe:.1f} ({pe_source}) -> 18/50")
     elif pe <= 80:
-        pe_pts, note_pe = 8.0, f"Trailing P/E {pe:.1f} (expensive) -> 8/50"
-        notes.append(note_pe)
+        pe_pts = 8.0
+        notes.append(f"Trailing P/E {pe:.1f} ({pe_source}, expensive) -> 8/50")
     else:
-        pe_pts, note_pe = 0.0, f"Trailing P/E {pe:.1f} (very expensive) -> 0/50"
-        notes.append(note_pe)
+        pe_pts = 0.0
+        notes.append(f"Trailing P/E {pe:.1f} ({pe_source}, very expensive) -> 0/50")
 
     growth = analysis.revenue_growth
     if pe is None or growth is None or growth <= 0:

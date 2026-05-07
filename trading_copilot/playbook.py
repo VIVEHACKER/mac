@@ -27,6 +27,12 @@ from .macro import (
 )
 from .market_data import MarketDataProvider, MarketSnapshot, YahooChartProvider
 from .metrics import TechnicalProfile, build_technical_profile
+from .quote_summary import (
+    QuoteSummaryProvider,
+    TickerSummary,
+    YahooQuoteSummaryProvider,
+    map_to_sector_etf,
+)
 from .sizing import SizingPlan, plan_position
 from .storage import normalize_ticker
 
@@ -108,6 +114,7 @@ class TickerPlaybook:
     fundamentals: FundamentalsAnalysis | None = None
     fundamentals_score: FundamentalsScore | None = None
     fundamentals_error: str | None = None
+    ticker_summary: TickerSummary | None = None
 
 
 class PlaybookBuilder:
@@ -117,11 +124,13 @@ class PlaybookBuilder:
         history_provider: PriceHistoryProvider | None = None,
         macro_provider: MacroDataProvider | None = None,
         fundamentals_provider: FundamentalsProvider | None = None,
+        quote_summary_provider: QuoteSummaryProvider | None = None,
     ):
         self.market_data = market_data or YahooChartProvider()
         self.history_provider = history_provider or YahooHistoryProvider()
         self.macro_provider = macro_provider
         self.fundamentals_provider = fundamentals_provider
+        self.quote_summary_provider = quote_summary_provider
 
     def build(
         self,
@@ -148,6 +157,18 @@ class PlaybookBuilder:
         rotation = analyze_industries(history_provider=self.history_provider)
         macro_dashboard = build_macro_dashboard(self.macro_provider)
 
+        ticker_summary: TickerSummary | None = None
+        if self.quote_summary_provider is not None:
+            try:
+                ticker_summary = self.quote_summary_provider.summary(normalized)
+            except Exception:
+                ticker_summary = None
+
+        if sector_industry_hint is None:
+            auto_hint = map_to_sector_etf(ticker_summary, normalized)
+            if auto_hint is not None:
+                sector_industry_hint = auto_hint
+
         fundamentals: FundamentalsAnalysis | None = None
         fundamentals_score: FundamentalsScore | None = None
         fundamentals_error: str | None = None
@@ -155,7 +176,10 @@ class PlaybookBuilder:
             try:
                 fundamentals = self.fundamentals_provider.analysis(normalized)
                 quality, q_notes = compute_quality_score(fundamentals)
-                value, v_notes = compute_value_score(fundamentals, snapshot.price)
+                override_pe = ticker_summary.trailing_pe if ticker_summary else None
+                value, v_notes = compute_value_score(
+                    fundamentals, snapshot.price, override_pe=override_pe
+                )
                 fundamentals_score = FundamentalsScore(
                     quality=quality,
                     value=value,
@@ -210,6 +234,7 @@ class PlaybookBuilder:
             fundamentals=fundamentals,
             fundamentals_score=fundamentals_score,
             fundamentals_error=fundamentals_error,
+            ticker_summary=ticker_summary,
         )
 
 
@@ -463,7 +488,8 @@ def format_playbook_report(playbook: TickerPlaybook) -> str:
         "## Score Breakdown",
         f"- Macro Cycle: {playbook.composite.cycle:.1f} ({playbook.cycle.label})",
         f"- Sector: {playbook.composite.sector:.1f} "
-        f"({playbook.sector.matched_industry or 'no sector matched'})",
+        f"({playbook.sector.matched_industry or 'no sector matched'}"
+        f"{_format_classification_suffix(playbook.ticker_summary)})",
         f"- Technical: {playbook.composite.technical:.1f}",
         *_format_fundamentals_score_lines(playbook.composite),
         "",
@@ -601,6 +627,17 @@ def _format_fundamentals_score_lines(composite: CompositeScore) -> list[str]:
         f"- Quality (fundamentals): {composite.quality:.1f}",
         f"- Value (P/E and PEG): {composite.value:.1f}",
     ]
+
+
+def _format_classification_suffix(summary: TickerSummary | None) -> str:
+    if summary is None or (summary.sector is None and summary.industry is None):
+        return ""
+    parts = []
+    if summary.sector:
+        parts.append(summary.sector)
+    if summary.industry and summary.industry != summary.sector:
+        parts.append(summary.industry)
+    return f" — Yahoo: {' / '.join(parts)}"
 
 
 def _fmt_money(value: float | None) -> str:

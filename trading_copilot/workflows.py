@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from datetime import date
 
+from .economic_calendar import (
+    EconomicCalendarProvider,
+    collect_economic_events,
+    format_economic_calendar_report,
+)
 from .earnings_calendar import (
-    AlphaVantageEarningsCalendarProvider,
     EarningsCalendarProvider,
+    HybridEarningsCalendarProvider,
     format_earnings_calendar_report,
 )
 from .events import (
@@ -46,6 +51,7 @@ from .news_monitor import (
     collect_fast_news,
 )
 from .playbook import PlaybookBuilder, format_playbook_report
+from .quote_summary import QuoteSummaryProvider, YahooQuoteSummaryProvider
 from .portfolio import (
     DEFAULT_SINGLE_STOCK_POOL,
     build_aggressive_portfolio,
@@ -57,7 +63,7 @@ from .screening import candidates_to_csv, format_screen_report, screen_members
 from .signals import detect_forecast_signals, format_signals_report
 from .skill_registry import SkillRegistry
 from .storage import TradingStore, normalize_ticker, tickers_from_items
-from .universe import NasdaqTraderUniverseProvider, UniverseProvider
+from .universe import CompositeUniverseProvider, UniverseProvider
 
 
 class TradingWorkflows:
@@ -74,18 +80,22 @@ class TradingWorkflows:
         fast_news_providers: tuple[FastNewsProvider, ...] | None = None,
         earnings_calendar: EarningsCalendarProvider | None = None,
         fundamentals: FundamentalsProvider | None = None,
+        economic_calendar_providers: tuple[EconomicCalendarProvider, ...] | None = None,
+        quote_summary: QuoteSummaryProvider | None = None,
     ):
         self.skills = skills
         self.store = store
         self.market_data = market_data or YahooChartProvider()
         self.events = events or SecEdgarProvider()
         self.news = news or NewsRssProvider()
-        self.universe = universe or NasdaqTraderUniverseProvider()
+        self.universe = universe or CompositeUniverseProvider()
         self.macro = macro or FredCsvProvider()
         self.industry_history = industry_history or YahooHistoryProvider()
         self.fast_news_providers = fast_news_providers
-        self.earnings_calendar = earnings_calendar or AlphaVantageEarningsCalendarProvider()
+        self.earnings_calendar = earnings_calendar or HybridEarningsCalendarProvider()
         self.fundamentals = fundamentals or HybridFundamentalsProvider()
+        self.economic_calendar_providers = economic_calendar_providers
+        self.quote_summary = quote_summary or YahooQuoteSummaryProvider()
 
     def playbook_report(
         self,
@@ -107,6 +117,7 @@ class TradingWorkflows:
             history_provider=self.industry_history,
             macro_provider=self.macro,
             fundamentals_provider=self.fundamentals if include_fundamentals else None,
+            quote_summary_provider=self.quote_summary,
         )
         playbook = builder.build(
             ticker,
@@ -237,6 +248,18 @@ class TradingWorkflows:
 
     def macro_report(self) -> str:
         return format_macro_report(build_macro_dashboard(self.macro))
+
+    def economic_calendar_report(
+        self,
+        days: int = 60,
+        start: date | None = None,
+    ) -> str:
+        result = collect_economic_events(
+            providers=self.economic_calendar_providers,
+            start=start,
+            days=days,
+        )
+        return format_economic_calendar_report(result)
 
     def industry_leadership_report(
         self,
