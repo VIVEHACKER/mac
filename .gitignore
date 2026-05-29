@@ -46,6 +46,9 @@ logs/
 *.log
 .harness/
 
+# Local tool artifacts
+.omx/
+
 # 백테스트 결과
 results/
 backtests/

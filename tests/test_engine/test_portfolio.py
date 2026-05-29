@@ -232,6 +232,216 @@ def test_factor_rotation_can_exclude_defensive_asset_from_ranking() -> None:
     assert "Defensive Asset Ranking | excluded" in format_factor_portfolio_report(result)
 
 
+def test_factor_rotation_averages_momentum_ensemble_weights() -> None:
+    bars = {
+        "AAA": _bars("AAA", [10, 10, 10, 12, 12, 12]),
+        "BBB": _bars("BBB", [10, 30, 30, 31, 31, 31]),
+    }
+
+    result = run_factor_rotation_backtest(
+        bars,
+        momentum_lookback=1,
+        ensemble_momentum_lookbacks=(1, 3),
+        reversal_lookback=1,
+        volatility_lookback=1,
+        risk_filter_lookback=0,
+        top_n=1,
+        rebalance_days=1,
+        weighting="equal",
+        defensive_symbol=None,
+        factor_weights=FactorWeights(momentum=1, reversal=0, low_volatility=0, value=0, quality=0),
+    )
+
+    first_invested = next(point for point in result.equity_curve if point.weights)
+    assert dict(first_invested.weights) == {"AAA": pytest.approx(0.5), "BBB": pytest.approx(0.5)}
+    assert "Momentum Ensemble | 1 bars, 3 bars" in format_factor_portfolio_report(result)
+
+
+def test_factor_rotation_selects_best_defensive_basket_asset() -> None:
+    bars = {
+        "AAA": _bars("AAA", [10, 11, 12, 13, 14, 15, 16, 17]),
+        "TLT": _bars("TLT", [10, 10, 11, 12, 13, 14, 15, 16]),
+        "SHY": _bars("SHY", [10, 10, 10, 10, 10, 10, 10, 10]),
+    }
+    benchmark = _bars("SPY", [10, 9, 8, 7, 7, 7, 7, 7])
+
+    result = run_factor_rotation_backtest(
+        bars,
+        benchmark_bars=benchmark,
+        momentum_lookback=1,
+        reversal_lookback=1,
+        volatility_lookback=1,
+        risk_filter_lookback=2,
+        top_n=1,
+        rebalance_days=1,
+        weighting="equal",
+        defensive_symbols=("TLT", "SHY", None),
+        defensive_selection_lookback=2,
+    )
+
+    first_risk_off = next(point for point in result.equity_curve if not point.risk_on and point.weights)
+    assert dict(first_risk_off.weights) == {"TLT": 1.0}
+    report = format_factor_portfolio_report(result)
+    assert "Defensive Basket | TLT, SHY, CASH" in report
+    assert "Defensive Selection Lookback | 2 bars" in report
+
+
+def test_factor_rotation_volatility_target_reduces_gross_weight() -> None:
+    bars = {
+        "AAA": _bars("AAA", [10, 20, 10, 20, 10, 20, 10, 20]),
+    }
+
+    result = run_factor_rotation_backtest(
+        bars,
+        momentum_lookback=1,
+        reversal_lookback=1,
+        volatility_lookback=2,
+        risk_filter_lookback=0,
+        top_n=1,
+        rebalance_days=1,
+        weighting="equal",
+        defensive_symbol=None,
+        volatility_target=0.05,
+        factor_weights=FactorWeights(momentum=1, reversal=0, low_volatility=0, value=0, quality=0),
+    )
+
+    assert 0 < result.average_gross_weight < 1
+    assert "Volatility Target | 5.0% annualized, max 1.00x gross" in format_factor_portfolio_report(result)
+
+
+def test_factor_rotation_adds_crash_hedge_when_benchmark_draws_down() -> None:
+    bars = {
+        "AAA": _bars("AAA", [10, 11, 12, 13, 14, 15, 16, 17]),
+        "TLT": _bars("TLT", [10, 10, 10.5, 11, 11.5, 12, 12.5, 13]),
+    }
+    benchmark = _bars("SPY", [10, 10, 10, 8, 8, 8, 8, 8])
+
+    result = run_factor_rotation_backtest(
+        bars,
+        benchmark_bars=benchmark,
+        momentum_lookback=1,
+        reversal_lookback=1,
+        volatility_lookback=1,
+        risk_filter_lookback=0,
+        top_n=1,
+        rebalance_days=10,
+        weighting="equal",
+        defensive_symbol=None,
+        crash_hedge_symbols=("tlt",),
+        crash_hedge_weight=0.25,
+        crash_hedge_trigger_lookback=3,
+        crash_hedge_trigger_drawdown=0.10,
+        crash_hedge_selection_lookback=1,
+        factor_weights=FactorWeights(momentum=1, reversal=0, low_volatility=0, value=0, quality=0),
+    )
+
+    hedged = next(point for point in result.equity_curve if "TLT" in dict(point.weights))
+    assert dict(hedged.weights) == {"AAA": pytest.approx(0.75), "TLT": pytest.approx(0.25)}
+    assert result.crash_hedge_active_ratio > 0
+    assert "Crash Hedge | TLT at 25.0%" in format_factor_portfolio_report(result)
+
+
+def test_factor_rotation_keeps_crash_hedges_out_of_normal_ranking() -> None:
+    bars = {
+        "AAA": _bars("AAA", [10, 11, 12, 13, 14, 15, 16, 17]),
+        "QID": _bars("QID", [10, 20, 40, 80, 160, 320, 640, 1280]),
+    }
+    benchmark = _bars("SPY", [10, 10, 10, 10, 10, 10, 10, 10])
+
+    result = run_factor_rotation_backtest(
+        bars,
+        benchmark_bars=benchmark,
+        momentum_lookback=1,
+        reversal_lookback=1,
+        volatility_lookback=1,
+        risk_filter_lookback=0,
+        top_n=1,
+        rebalance_days=1,
+        weighting="equal",
+        defensive_symbol=None,
+        crash_hedge_symbols=("QID",),
+        crash_hedge_weight=0.0,
+        crash_hedge_trigger_lookback=1,
+        crash_hedge_selection_lookback=1,
+        factor_weights=FactorWeights(momentum=1, reversal=0, low_volatility=0, value=0, quality=0),
+    )
+
+    first_invested = next(point for point in result.equity_curve if point.weights)
+    assert dict(first_invested.weights) == {"AAA": 1.0}
+
+
+def test_factor_rotation_skips_crash_hedge_when_hedge_momentum_is_negative() -> None:
+    bars = {
+        "AAA": _bars("AAA", [10, 11, 12, 13, 14, 15, 16, 17]),
+        "QID": _bars("QID", [10, 9, 8, 7, 6, 5, 4, 3]),
+    }
+    benchmark = _bars("SPY", [10, 10, 10, 8, 8, 8, 8, 8])
+
+    result = run_factor_rotation_backtest(
+        bars,
+        benchmark_bars=benchmark,
+        momentum_lookback=1,
+        reversal_lookback=1,
+        volatility_lookback=1,
+        risk_filter_lookback=0,
+        top_n=1,
+        rebalance_days=10,
+        weighting="equal",
+        defensive_symbol=None,
+        crash_hedge_symbols=("QID",),
+        crash_hedge_weight=0.25,
+        crash_hedge_trigger_lookback=3,
+        crash_hedge_trigger_drawdown=0.10,
+        crash_hedge_selection_lookback=1,
+        factor_weights=FactorWeights(momentum=1, reversal=0, low_volatility=0, value=0, quality=0),
+    )
+
+    de_risked = next(
+        weights
+        for weights in (dict(point.weights) for point in result.equity_curve)
+        if "QID" not in weights and 0 < weights.get("AAA", 0.0) < 1
+    )
+    assert de_risked == {"AAA": pytest.approx(0.75)}
+
+
+def test_factor_rotation_crash_hedge_holds_then_restores_base_weights() -> None:
+    bars = {
+        "AAA": _bars("AAA", [10, 11, 12, 13, 14, 15, 16, 17]),
+        "SDS": _bars("SDS", [10, 10, 10, 12, 13, 14, 14, 14]),
+    }
+    benchmark = _bars("SPY", [10, 10, 10, 8, 10, 10, 10, 10])
+
+    result = run_factor_rotation_backtest(
+        bars,
+        benchmark_bars=benchmark,
+        momentum_lookback=1,
+        reversal_lookback=1,
+        volatility_lookback=1,
+        risk_filter_lookback=0,
+        top_n=1,
+        rebalance_days=10,
+        weighting="equal",
+        defensive_symbol=None,
+        crash_hedge_symbols=("SDS",),
+        crash_hedge_weight=1.0,
+        crash_hedge_trigger_lookback=2,
+        crash_hedge_trigger_drawdown=0.10,
+        crash_hedge_selection_lookback=1,
+        crash_hedge_hold_days=2,
+        factor_weights=FactorWeights(momentum=1, reversal=0, low_volatility=0, value=0, quality=0),
+    )
+
+    weights_by_point = [dict(point.weights) for point in result.equity_curve]
+    first_hedged_index = next(
+        index for index, weights in enumerate(weights_by_point) if weights == {"SDS": 1.0}
+    )
+
+    assert weights_by_point[first_hedged_index + 1] == {"SDS": 1.0}
+    assert {"AAA": 1.0} in weights_by_point[first_hedged_index + 2 :]
+    assert result.crash_hedge_active_ratio > 0
+    assert "hold 2 days" in format_factor_portfolio_report(result)
+
+
 def test_factor_rotation_uses_fundamentals_point_in_time() -> None:
     bars = {
         "AAA": _bars("AAA", [10, 10.1, 10.2, 10.3, 10.4, 10.5]),
@@ -361,14 +571,54 @@ def test_factor_walk_forward_selects_train_params_and_tests_them() -> None:
         risk_filter_lookback=20,
         risk_filter_lookbacks=(0, 20),
         weighting_modes=("inverse-vol", "equal"),
-        selection_metric="return-drawdown",
+        selection_metric="annualized-return",
     )
 
     text = format_walk_forward_report(report)
     assert report.rows
     assert report.positive_test_rate >= 0
     assert "Factor Walk-Forward Report" in text
-    assert "Selection Metric | return-drawdown" in text
+    assert "Selection Metric | annualized-return" in text
+
+
+def test_factor_walk_forward_searches_crash_hedge_parameters() -> None:
+    bars = {
+        "AAA": _long_bars("AAA", 10.0, 0.0008),
+        "QID": _long_bars("QID", 10.0, 0.0001),
+    }
+    benchmark = _long_bars("SPY", 10.0, 0.0002)
+
+    report = run_factor_walk_forward(
+        bars,
+        benchmark_bars=benchmark,
+        start=date(2020, 1, 1),
+        end=date(2023, 12, 31),
+        train_years=1,
+        test_years=1,
+        step_years=1,
+        momentum_lookbacks=(21,),
+        reversal_lookbacks=(5,),
+        volatility_lookbacks=(10,),
+        top_ns=(1,),
+        risk_filter_lookback=0,
+        risk_filter_lookbacks=(0,),
+        weighting_modes=("equal",),
+        selection_metric="annualized-return",
+        crash_hedge_symbols=("QID",),
+        crash_hedge_weights=(0.0, 0.5),
+        crash_hedge_trigger_lookbacks=(5, 10),
+        crash_hedge_trigger_drawdowns=(0.05, 0.10),
+        crash_hedge_selection_lookbacks=(3,),
+        crash_hedge_hold_days_values=(0, 3),
+    )
+
+    assert report.rows
+    for row in report.rows:
+        assert row.selected.crash_hedge_weight in {0.0, 0.5}
+        assert row.selected.crash_hedge_trigger_lookback in {5, 10}
+        assert row.selected.crash_hedge_trigger_drawdown in {0.05, 0.10}
+        assert row.selected.crash_hedge_selection_lookback == 3
+        assert row.selected.crash_hedge_hold_days in {0, 3}
 
 
 def _bars(

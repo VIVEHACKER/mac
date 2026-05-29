@@ -1,0 +1,24 @@
+{
+  "name": "fundamentals-2026-05-29",
+  "sha256": "e366e6ccb18402e9ac2e37f2f8797c622fda828f41b4ed1e1f89e6e0c6497754",
+  "record_count": 7291,
+  "symbol_count": 112,
+  "period_start": "2006-09-24",
+  "period_end": "2026-05-03",
+  "columns": [
+    "symbol",
+    "market",
+    "period_end",
+    "asof_ts",
+    "revenue",
+    "operating_income",
+    "net_income",
+    "free_cash_flow",
+    "total_assets",
+    "total_equity",
+    "total_debt",
+    "shares_out",
+    "eps",
+    "source"
+  ]
+}

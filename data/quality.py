@@ -22,11 +22,23 @@ def evaluate_catalog_quality(
     as_of: date,
     required_macro: tuple[str, ...] = ("DGS10", "VIXCLS"),
     required_flows: tuple[tuple[str, str], ...] = (),
+    required_prices: tuple[tuple[str, str], ...] = (),
     max_macro_age_days: int = 14,
     max_flow_age_days: int = 7,
+    max_price_age_days: int = 5,
+    live_mode: bool = False,
 ) -> list[DataQualityIssue]:
     catalog.initialize()
     issues: list[DataQualityIssue] = []
+    issues.extend(
+        _price_issues(
+            catalog,
+            as_of=as_of,
+            required_prices=required_prices,
+            max_age_days=max_price_age_days,
+            live_mode=live_mode,
+        )
+    )
     issues.extend(
         _macro_issues(
             catalog,
@@ -47,6 +59,57 @@ def evaluate_catalog_quality(
         issues,
         key=lambda item: (SEVERITY_ORDER.get(item.severity, 99), item.area, item.item),
     )
+
+
+def _price_issues(
+    catalog: MarketDataCatalog,
+    *,
+    as_of: date,
+    required_prices: tuple[tuple[str, str], ...],
+    max_age_days: int,
+    live_mode: bool,
+) -> list[DataQualityIssue]:
+    issues: list[DataQualityIssue] = []
+    for symbol, market in required_prices:
+        rows = catalog.get_bars(symbol, market=market)
+        item = f"{market.lower()}:{symbol.upper()}"
+        if not rows:
+            issues.append(DataQualityIssue("error", "price", item, "required price series missing"))
+            continue
+        latest = rows[-1]
+        age_days = (as_of - latest.ts).days
+        if age_days > max_age_days:
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "price",
+                    item,
+                    f"latest bar is stale: {latest.ts} ({age_days} days old)",
+                )
+            )
+        if live_mode:
+            if not latest.source:
+                issues.append(
+                    DataQualityIssue("warn", "price", item, "live policy price source is missing")
+                )
+            elif _research_price_source(latest.source):
+                issues.append(
+                    DataQualityIssue(
+                        "warn",
+                        "price",
+                        item,
+                        f"live policy is using research-grade price source: {latest.source}",
+                    )
+                )
+    return issues
+
+
+def _research_price_source(source: str) -> bool:
+    lowered = source.lower()
+    if any(marker in lowered for marker in ("yahoo", "manual", "fixture")):
+        return True
+    tokens = {token for token in lowered.replace("-", ":").replace("_", ":").split(":") if token}
+    return "test" in tokens
 
 
 def _macro_issues(

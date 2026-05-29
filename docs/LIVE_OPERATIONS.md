@@ -1,0 +1,418 @@
+# Live Operations Runbook
+
+This system must fail closed. Live trading is not enabled by having a strategy
+that backtests well; it is enabled only after model promotion, data-quality
+checks, pre-trade risk checks, broker reconciliation, and operator runbooks pass.
+
+## Live Gates
+
+The live environment is incomplete unless all of these are set:
+
+```bash
+LIVE_TRADING_ENABLED=true
+LIVE_TRADING_ACK_RISK=true
+LIVE_ORDER_SUBMISSION_ENABLED=true
+LIVE_STRATEGY_ID=<approved strategy id>
+LIVE_BROKER=<fake|alpaca-paper|alpaca-live>
+LIVE_MAX_CAPITAL=<maximum capital this system may use>
+LIVE_POLICY_VERSION=<risk policy version>
+LIVE_MIN_PAPER_DAYS=30
+LIVE_MIN_SHADOW_DAYS=10
+LIVE_MAX_LIMIT_DEVIATION=0.03
+LIVE_MAX_MARK_DEVIATION=0.02
+LIVE_CATALOG_DB=data/store/live-prices.duckdb
+```
+
+Check the effective gate:
+
+```bash
+uv run trader live-policy
+```
+
+`LIVE_MAX_CAPITAL` is converted into a conservative default risk policy. Current
+defaults cap one order at 25% of approved capital and daily new notional at 100%
+of approved capital.
+
+`LIVE_ORDER_SUBMISSION_ENABLED` is a separate final switch. Keep it unset during
+research, backtesting, paper, and shadow drills.
+
+For `alpaca-live`, the default drill requirement is 30 paper days and 10 shadow
+days if `LIVE_MIN_PAPER_DAYS` / `LIVE_MIN_SHADOW_DAYS` are unset. Market orders
+are disabled by default in the live risk policy; set `LIVE_ALLOW_MARKET_ORDERS=true`
+only for a documented exception.
+
+`live-readiness`, `live-submit`, and `live-price-ingest` default to
+`LIVE_CATALOG_DB` instead of the research/backtest catalog. Keep live prices in
+`data/store/live-prices.duckdb` so long-running research jobs cannot lock the
+live gate.
+
+## Model Promotion
+
+Run the promotion-grade validation suite before any strategy can be treated as a
+live candidate:
+
+```bash
+uv run trader validate-model QQQ,TLT,QID,SDS \
+  --start 2008-01-01 \
+  --end 2020-12-31 \
+  --benchmark SPY \
+  --benchmark-market us \
+  --universe-csv data/universes/multi-asset-etf-2008.csv \
+  --no-fetch \
+  --momentum-lookback 63 \
+  --ensemble-momentum-lookbacks 63,126 \
+  --reversal-lookback 5 \
+  --volatility-lookback 21 \
+  --risk-filter-lookback 100 \
+  --ensemble-risk-filter-lookbacks 100,200 \
+  --risk-filter-vote-threshold 0.5 \
+  --top-n 1 \
+  --rebalance-days 21 \
+  --weighting equal \
+  --defensive-only \
+  --defensive-basket TLT,CASH \
+  --defensive-selection-lookback 63 \
+  --max-leverage 1.0 \
+  --crash-hedge-symbols QID,SDS \
+  --crash-hedge-weight 1.0 \
+  --crash-hedge-trigger-lookback 5 \
+  --crash-hedge-trigger-drawdown 0.05 \
+  --crash-hedge-hold-days 5 \
+  --crash-hedge-selection-lookback 42 \
+  --train-years 5 \
+  --test-years 3 \
+  --step-years 1 \
+  --momentum-lookbacks 63 \
+  --reversal-lookbacks 5 \
+  --volatility-lookbacks 21 \
+  --top-ns 1 \
+  --risk-filter-lookbacks 100 \
+  --weighting-modes equal \
+  --rebalance-days-values 21 \
+  --selection-metric annualized-return \
+  --fee-stress-bps 2,5,10 \
+  --stress-windows gfc-crash:2008-09-01:2009-03-09,covid-crash:2020-02-15:2020-03-23 \
+  --min-positive-test-rate 0.60 \
+  --min-parameter-positive-rate 0.60 \
+  --min-stress-windows 2 \
+  --min-stress-return 0.30 \
+  --max-stress-drawdown 0.35 \
+  --record-gate \
+  --strategy-id qqq-tlt-qid-sds-crash
+```
+
+`validate-model` runs:
+
+- walk-forward parameter selection and out-of-sample test windows
+- fee stress, such as 2/5/10 bps turnover cost
+- local parameter perturbation around the base momentum and risk-filter lookbacks
+- named stress windows, such as GFC, COVID crash, and 2022 rates
+- live controls: momentum ensemble, risk-filter vote, defensive basket ranking,
+  and volatility-targeted exposure capping
+- crash-alpha requirement: every tested stress window must clear
+  `--min-stress-return`, for example +30% total return
+- crash hedge sleeve: `--crash-hedge-symbols` are excluded from normal factor
+  ranking and are only used when both benchmark drawdown and trailing return
+  breach the trigger threshold
+
+Current 2008-2020 crash-sleeve evidence:
+
+- Full sample: +306.18% total, +11.39% annualized, 36.63% max drawdown
+- GFC crash window 2008-09-01 to 2009-03-09: +64.47%
+- COVID crash window 2020-02-15 to 2020-03-23: +32.51%
+- `validate-model --min-stress-return 0.30`: stress windows PASS, full
+  promotion BLOCK because walk-forward positive test rate, fee stress, and
+  parameter perturbation are still below live-promotion thresholds
+
+The legacy manual gate remains available when evidence was produced elsewhere:
+
+```bash
+uv run trader model-gate \
+  --strategy-id qqq-tlt-defensive \
+  --params M63/R5/V21/RF100/Top1/equal \
+  --windows 8 \
+  --positive-test-rate 0.625 \
+  --avg-test-excess 0.0208 \
+  --worst-test-mdd 0.23 \
+  --fee-stress-passed \
+  --pit-audit-passed \
+  --full-sample-annualized-return 0.18 \
+  --full-sample-mdd 0.25 \
+  --stress-windows-tested 2 \
+  --worst-stress-return 0.35 \
+  --stress-passed \
+  --registry data/store/research-registry.jsonl
+```
+
+The gate blocks weak evidence by default:
+
+- fewer than 8 walk-forward test windows
+- positive test rate below 60%
+- average test annualized excess not above 0
+- worst test drawdown above 30%
+- missing fee stress pass
+- missing PIT audit pass
+
+For live promotion, prefer `validate-model --record-gate` over manual
+`model-gate` because it records fee stress and stress-window context in one run.
+The live readiness gate applies an additional stricter evidence check: the latest
+approved registry record must include at least two passing stress windows and a
+worst stress return of at least +30%.
+
+## Readiness Gate
+
+Before any live submit path can be used, run:
+
+```bash
+uv run trader live-readiness \
+  --require-order-submission \
+  --require-price QQQ:us,TLT:us,QID:us,SDS:us \
+  --max-price-age-days 2 \
+  --registry data/store/research-registry.jsonl \
+  --halt-state data/store/live-halt.json \
+  --catalog-db data/store/live-prices.duckdb
+```
+
+This fails closed unless all of these are true:
+
+- live environment variables are complete
+- `LIVE_ORDER_SUBMISSION_ENABLED=true` when real submission is required
+- the latest registry decision for `LIVE_STRATEGY_ID` is approved
+- live-grade strategy evidence includes passing stress windows and +30% worst
+  stress-window return
+- required paper/shadow drill streaks are complete
+- persistent halt latch is clear
+- required prices exist, are fresh, have a source, and are not research-grade
+  sources in live mode
+
+The current crash-sleeve candidate intentionally fails full promotion. Do not set
+`LIVE_STRATEGY_ID` to that candidate for real-money submission until
+`validate-model` records an approved latest decision.
+
+## Halt Latch
+
+The halt latch is persistent and survives process restart.
+
+```bash
+uv run trader live-halt status
+uv run trader live-halt activate --reason "broker position mismatch"
+uv run trader live-halt clear --reason "mismatch reconciled"
+```
+
+Clearing a halt is an operator action and should be recorded in the daily report.
+
+## Broker-Grade Price Ingest
+
+Use Alpaca latest bars to replace Yahoo/manual research prices before readiness:
+
+```bash
+export ALPACA_API_KEY=...
+export ALPACA_SECRET_KEY=...
+
+uv run trader live-price-ingest QQQ,TLT,QID,SDS \
+  --feed iex \
+  --catalog-db data/store/live-prices.duckdb
+```
+
+Stored bars use a source such as `alpaca:iex:latest_bar`, which the live quality
+gate treats as broker-grade. Yahoo, manual, fixture, test, and missing sources
+remain blockers.
+
+## Order Gate Dry Run
+
+Use `live-dry-run` to exercise idempotency, halt, and pre-trade checks without
+touching a real broker:
+
+```bash
+uv run trader live-dry-run QQQ \
+  --side buy \
+  --qty 2 \
+  --price 100 \
+  --max-order-notional 1000 \
+  --order-log data/store/live-orders.jsonl \
+  --halt-state data/store/live-halt.json
+```
+
+Use the fake broker path to test downstream order behavior:
+
+```bash
+uv run trader live-dry-run QQQ --side buy --qty 2 --price 100 --submit-fake
+uv run trader live-dry-run QQQ --side buy --qty 2 --price 100 --submit-fake --fake-mode partial
+uv run trader live-dry-run QQQ --side buy --qty 2 --price 100 --submit-fake --fake-mode reject
+uv run trader live-dry-run QQQ --side buy --qty 2 --price 100 --submit-fake --fake-mode timeout
+```
+
+`--fake-mode timeout` latches halt because order state is uncertain.
+
+## Live Submit Path
+
+`live-submit` is the only CLI path intended to place a real order. It defaults to
+shadow mode; `--submit` is required for broker submission, and `--ack-live-order`
+is required with `--submit`.
+
+Shadow the live path without broker submission:
+
+```bash
+uv run trader live-submit QQQ \
+  --side buy \
+  --qty 2 \
+  --price 100 \
+  --as-of 2026-05-25 \
+  --order-log data/store/live-orders.jsonl \
+  --halt-state data/store/live-halt.json
+```
+
+Submit to Alpaca only after `live-readiness` passes and the strategy is approved:
+
+```bash
+uv run trader live-submit QQQ \
+  --side buy \
+  --qty 2 \
+  --price 100 \
+  --order-type limit \
+  --limit-price 99.50 \
+  --submit \
+  --ack-live-order \
+  --broker alpaca-live \
+  --order-log data/store/live-orders.jsonl \
+  --halt-state data/store/live-halt.json
+```
+
+The submit path rechecks model approval, halt state, data freshness, idempotency,
+pre-trade notional limits, daily order count, daily new notional, symbol weight,
+gross exposure, cash fraction, broker account blocks, and uncertain submit state.
+It also blocks when the submitted `--price` deviates from the latest live catalog
+close by more than `LIVE_MAX_MARK_DEVIATION` or `--max-mark-deviation`. Any
+uncertain broker submit activates the persistent halt latch.
+
+## Reconciliation
+
+After paper/live submission, compare target positions with broker positions:
+
+```bash
+uv run trader live-reconcile \
+  --broker alpaca-paper \
+  --expected QQQ:us:2,TLT:us:0 \
+  --halt-state data/store/live-halt.json
+```
+
+Any mismatch activates the persistent halt latch unless `--no-halt-on-mismatch`
+is explicitly used for a drill.
+
+## Data Quality
+
+Live candidates must run with required price checks:
+
+```bash
+uv run trader quality \
+  --require-price QQQ:us,TLT:us,SPY:us \
+  --max-price-age-days 5 \
+  --live-policy \
+  --strict
+```
+
+`--live-policy` warns when a required live price comes from a research-grade
+source such as Yahoo, manual, fixture, or test data. Treat that as a blocker for
+real money until a broker-grade or licensed live source is wired.
+
+## Paper and Shadow Drill
+
+Before any real order:
+
+1. Run 30 trading days in paper mode.
+2. Run 10 trading days in shadow mode: create order intents and risk verdicts,
+   but do not submit to a real broker.
+3. Confirm daily reports exist for every run.
+4. Confirm duplicate order count is zero.
+5. Confirm broker/internal position mismatch count is zero.
+6. Confirm halt drills block new orders.
+
+Record drill completion in the local log:
+
+```bash
+uv run trader live-drill record --mode paper --day 2026-05-25
+uv run trader live-drill record --mode shadow --day 2026-05-25
+uv run trader live-drill status --day 2026-05-25
+```
+
+## Incident Response
+
+Immediately activate halt on:
+
+- unknown broker position
+- duplicate order
+- uncertain submit state
+- stale required data
+- policy breach
+- missing heartbeat
+- API key exposure
+
+Then:
+
+1. Stop the scheduler.
+2. Pull broker orders and positions from the broker UI/API.
+3. Compare against `data/store/live-orders.jsonl`.
+4. Cancel open orders if they are not intentional.
+5. Restore the internal ledger only after broker state is known.
+6. Clear halt with a reason only after the root cause is documented.
+
+---
+
+## IDEAL line monthly operating procedure (aqr_top7_cap20_trail10)
+
+Approved strategy: `aqr_top7_cap20_trail10_pit110`. Universe: 106 PIT names
+(`scripts/aqr_ideal_walkforward.py:MEGACAPS`). Rebalance cadence: 21 trading days.
+
+**Reproducibility is mandatory.** A background re-ingest of `fundamentals_q`
+(3,383 → 7,291 records) silently broke the Variant N backtest (CAGR 19.91% →
+14.04%). Always pin fundamentals to a content-hashed snapshot before generating
+orders, so the picks are auditable and replayable.
+
+### Each rebalance
+
+```bash
+# 1. (Once per data refresh) Pin the current fundamentals. Records the sha256.
+.venv/bin/python scripts/snapshot_fundamentals.py fundamentals-$(date +%F)
+
+# 2. Generate the rebalance against the PINNED snapshot (reproducible).
+#    Defaults to data/snapshots/fundamentals-2026-05-29.csv; pass --snapshot to pin another.
+.venv/bin/python scripts/paper_drill.py --snapshot data/snapshots/fundamentals-$(date +%F).csv
+
+#    Output: out/paper-drill-orders.md  (header records the snapshot name + hash provenance)
+```
+
+The orders file header shows `Fundamentals: snapshot:<name>` — confirm it is a
+snapshot, NOT `LIVE-CATALOG (NOT reproducible)`. If it shows the live fallback,
+the snapshot path was wrong; do not trade those orders.
+
+### Mechanical verification (no broker)
+
+Run the `live-dry-run` block printed in `out/paper-drill-orders.md`. These go
+through the full pre-trade risk path (`risk/pretrade.py`) without broker calls.
+
+### Paper, then live (operator decision — fail closed)
+
+Live is gated by the env vars in "Live Gates" above plus `live-readiness`. The
+recommended path before any live capital:
+
+1. Alpaca **paper** keys in `.env`; run the `live-submit` block monthly for
+   `LIVE_MIN_PAPER_DAYS` (default 30) — really 3-6 months for this strategy.
+2. Validate fills reconcile (`trader live-reconcile`).
+3. Only then consider `alpaca-live` with ≤5% of capital and Kelly ≤ 0.25.
+
+### Pre-deployment reproducibility re-validation
+
+Before promoting, confirm the backtest still matches on the pinned snapshot:
+
+```bash
+# Re-run the walk-forward / model-gate against the snapshot, not the live DB.
+.venv/bin/python scripts/aqr_ideal_walkforward.py        # full WF (yfinance prices + catalog funds)
+.venv/bin/python scripts/significance_test.py            # PSR/DSR/bootstrap battery
+.venv/bin/python scripts/ideal_fundamental_sensitivity.py # coverage-robustness (ROBUST as of 2026-05-29)
+```
+
+Statistical evidence as of 2026-05-29 (see `out/significance-report.md`,
+`out/ideal-fundamental-sensitivity.md`): monthly Sharpe 1.40, bootstrap 95% CI
+[0.92, 1.92], PSR 100%; Sharpe holds ~1.4 with no directional decay even at 25%
+fundamental coverage. Variant N (trader-CLI line) is NOT deployable — it is both
+non-reproducible and concentration-fragile.

@@ -62,6 +62,13 @@ def test_parse_defensive_symbols_accepts_cash_aliases() -> None:
     assert cli._parse_defensive_symbols("TLT, cash,none") == ["TLT", None, None]
 
 
+def test_parse_symbol_market_pairs_accepts_default_and_explicit_markets() -> None:
+    assert cli._parse_symbol_market_pairs("qqq,005930:kospi", default_market="us") == (
+        ("QQQ", "us"),
+        ("005930", "kospi"),
+    )
+
+
 def test_pit_member_filter_follows_requested_symbols() -> None:
     members = [
         UniverseMember("TEST", "AAA", "us", date(2025, 1, 1)),
@@ -86,7 +93,9 @@ def test_catalog_symbol_normalizes_market_specific_symbols() -> None:
 
 def test_us_yahoo_bars_without_adjusted_marker_need_refresh() -> None:
     legacy = _bar("MSFT", source="https://query1.finance.yahoo.com/v8/finance/chart/MSFT")
-    adjusted = _bar("MSFT", source="https://query1.finance.yahoo.com/v8/finance/chart/MSFT?adjusted=true")
+    adjusted = _bar(
+        "MSFT", source="https://query1.finance.yahoo.com/v8/finance/chart/MSFT?adjusted=true"
+    )
 
     assert cli._bars_need_refresh([legacy], market="us", provider="auto")
     assert not cli._bars_need_refresh([adjusted], market="us", provider="auto")
@@ -127,6 +136,60 @@ def test_pair_command_runs_against_catalog_bars(tmp_path, capsys) -> None:
     assert "Cost-adjusted Rolling Validation" in captured.out
 
 
+def test_factor_portfolio_returns_output_writes_daily_series(tmp_path) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    catalog = MarketDataCatalog(catalog_db)
+    catalog.put_bars(_long_bars("AAA", 10.0, 0.0012))
+    catalog.put_bars(_long_bars("BBB", 10.0, 0.0003))
+    catalog.put_bars(_long_bars("TLT", 10.0, 0.0001))
+    catalog.put_bars(_long_bars("SPY", 10.0, 0.0005))
+    returns_csv = tmp_path / "returns.csv"
+
+    result = cli.main(
+        [
+            "factor-portfolio",
+            "AAA,BBB,TLT",
+            "--start",
+            "2021-01-01",
+            "--end",
+            "2023-12-31",
+            "--momentum-lookback",
+            "60",
+            "--reversal-lookback",
+            "10",
+            "--volatility-lookback",
+            "20",
+            "--risk-filter-lookback",
+            "0",
+            "--top-n",
+            "1",
+            "--rebalance-days",
+            "21",
+            "--benchmark",
+            "SPY",
+            "--benchmark-market",
+            "us",
+            "--no-fetch",
+            "--skip-universe-audit",
+            "--returns-output",
+            str(returns_csv),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    assert result == 0
+    assert returns_csv.exists()
+    lines = returns_csv.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0] == "date,portfolio_return,benchmark_return"
+    assert len(lines) > 1
+    fields = lines[1].split(",")
+    assert len(fields) == 3
+    date.fromisoformat(fields[0])
+    float(fields[1])
+    float(fields[2])
+
+
 def test_vix_calc_command_runs_from_option_csv(tmp_path, capsys) -> None:
     chain = tmp_path / "chain.csv"
     chain.write_text(
@@ -152,7 +215,17 @@ def test_vix_calc_command_runs_from_option_csv(tmp_path, capsys) -> None:
         encoding="utf-8",
     )
 
-    result = cli.main(["vix-calc", "--file", str(chain), "--as-of", "2026-05-08"])
+    result = cli.main(
+        [
+            "vix-calc",
+            "--file",
+            str(chain),
+            "--as-of",
+            "2026-05-08",
+            "--catalog-db",
+            str(tmp_path / "catalog.duckdb"),
+        ]
+    )
 
     captured = capsys.readouterr()
     assert result == 0
@@ -205,8 +278,7 @@ def test_pair_command_can_block_unshortable_signal(tmp_path, capsys) -> None:
     catalog.put_bars(second)
     shortability = tmp_path / "shortability.csv"
     shortability.write_text(
-        "symbol,market,asof_date,shortable,borrow_fee_bps\n"
-        "AAA,us,2026-04-30,false,100\n",
+        "symbol,market,asof_date,shortable,borrow_fee_bps\nAAA,us,2026-04-30,false,100\n",
         encoding="utf-8",
     )
 
@@ -417,6 +489,579 @@ def test_portfolio_preflight_blocks_missing_delisting_return(tmp_path, capsys) -
     assert "delisting" in captured.out
 
 
+def test_live_halt_latch_persists(tmp_path, capsys) -> None:
+    halt_state = tmp_path / "halt.json"
+
+    activated = cli.main(
+        ["live-halt", "activate", "--reason", "drill", "--halt-state", str(halt_state)]
+    )
+    activated_output = capsys.readouterr()
+    status = cli.main(["live-halt", "status", "--halt-state", str(halt_state)])
+    status_output = capsys.readouterr()
+    cleared = cli.main(["live-halt", "clear", "--reason", "done", "--halt-state", str(halt_state)])
+    cleared_output = capsys.readouterr()
+
+    assert activated == 2
+    assert "Halt: yes" in activated_output.out
+    assert status == 2
+    assert "Reason: drill" in status_output.out
+    assert cleared == 0
+    assert "Halt: no" in cleared_output.out
+
+
+def test_live_dry_run_records_order_gate(tmp_path, capsys) -> None:
+    result = cli.main(
+        [
+            "live-dry-run",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Live Order Gate" in captured.out
+    assert "accepted" in captured.out
+
+
+def test_live_dry_run_blocks_halted_system(tmp_path, capsys) -> None:
+    halt_state = tmp_path / "halt.json"
+    cli.main(["live-halt", "activate", "--reason", "risk drill", "--halt-state", str(halt_state)])
+    capsys.readouterr()
+
+    result = cli.main(
+        [
+            "live-dry-run",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(halt_state),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "risk_block" in captured.out
+    assert "halted: risk drill" in captured.out
+
+
+def test_live_readiness_blocks_unapproved_strategy(tmp_path, monkeypatch, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _set_live_env(monkeypatch, strategy_id="unapproved")
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "latest registry decision is not approved" in captured.out
+
+
+def test_live_submit_requires_ack_for_submit(tmp_path, monkeypatch, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(monkeypatch, strategy_id="approved-live")
+
+    result = cli.main(
+        [
+            "live-submit",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--submit",
+            "--as-of",
+            "2026-05-25",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--registry",
+            str(registry),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "--ack-live-order is required" in captured.out
+
+
+def test_live_submit_can_submit_to_fake_after_all_gates_pass(tmp_path, monkeypatch, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    order_log = tmp_path / "orders.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(monkeypatch, strategy_id="approved-live")
+
+    result = cli.main(
+        [
+            "live-submit",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--submit",
+            "--ack-live-order",
+            "--as-of",
+            "2026-05-25",
+            "--order-log",
+            str(order_log),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--registry",
+            str(registry),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Live Submit Gate" in captured.out
+    assert "filled" in captured.out
+    assert "broker_submit" in order_log.read_text(encoding="utf-8")
+
+
+def test_live_submit_blocks_price_far_from_live_catalog_mark(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(monkeypatch, strategy_id="approved-live")
+
+    result = cli.main(
+        [
+            "live-submit",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "120",
+            "--submit",
+            "--ack-live-order",
+            "--as-of",
+            "2026-05-25",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--registry",
+            str(registry),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "deviates" in captured.out
+    assert "latest catalog close" in captured.out
+
+
+def test_live_readiness_requires_paper_and_shadow_drills_for_live_broker(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="1",
+        min_shadow_days="1",
+    )
+
+    blocked = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert blocked == 2
+    assert "paper drill days 0 < 1" in captured.out
+    assert "shadow drill days 0 < 1" in captured.out
+
+
+def test_live_readiness_reports_catalog_failure_without_traceback(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    registry = tmp_path / "registry.jsonl"
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(monkeypatch, strategy_id="approved-live")
+
+    def fail_quality(*args, **kwargs):
+        raise RuntimeError("catalog locked")
+
+    monkeypatch.setattr(cli, "evaluate_catalog_quality", fail_quality)
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--catalog-db",
+            str(tmp_path / "catalog.duckdb"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "catalog quality check failed: catalog locked" in captured.out
+
+
+def test_live_readiness_uses_live_catalog_env_by_default(tmp_path, monkeypatch, capsys) -> None:
+    catalog_db = tmp_path / "live-prices.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(monkeypatch, strategy_id="approved-live")
+    monkeypatch.setenv("LIVE_CATALOG_DB", str(catalog_db))
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Ready | yes" in captured.out
+
+
+def test_live_drill_records_status(tmp_path, monkeypatch, capsys) -> None:
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="1",
+        min_shadow_days="1",
+    )
+    drill_log = tmp_path / "drills.jsonl"
+
+    paper = cli.main(
+        [
+            "live-drill",
+            "record",
+            "--mode",
+            "paper",
+            "--day",
+            "2026-05-25",
+            "--drill-log",
+            str(drill_log),
+        ]
+    )
+    capsys.readouterr()
+    shadow = cli.main(
+        [
+            "live-drill",
+            "record",
+            "--mode",
+            "shadow",
+            "--day",
+            "2026-05-25",
+            "--drill-log",
+            str(drill_log),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert paper == 2
+    assert shadow == 0
+    assert "Ready | yes" in captured.out
+
+
+def test_live_reconcile_latches_halt_on_position_mismatch(tmp_path, capsys) -> None:
+    halt_state = tmp_path / "halt.json"
+
+    result = cli.main(
+        [
+            "live-reconcile",
+            "--broker",
+            "fake",
+            "--expected",
+            "QQQ:us:2",
+            "--fake-position",
+            "QQQ:us:1:100",
+            "--halt-state",
+            str(halt_state),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "Mismatches | 1" in captured.out
+    assert "Halt Latched | yes" in captured.out
+    assert "broker position reconciliation mismatch" in halt_state.read_text(encoding="utf-8")
+
+
+def test_model_gate_records_approval(tmp_path, capsys) -> None:
+    registry = tmp_path / "registry.jsonl"
+
+    result = cli.main(
+        [
+            "model-gate",
+            "--strategy-id",
+            "qqq-tlt-defensive",
+            "--params",
+            "M63/R5/V21",
+            "--windows",
+            "8",
+            "--positive-test-rate",
+            "0.625",
+            "--avg-test-excess",
+            "0.0208",
+            "--worst-test-mdd",
+            "0.23",
+            "--fee-stress-passed",
+            "--pit-audit-passed",
+            "--registry",
+            str(registry),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "APPROVED" in captured.out
+    assert "qqq-tlt-defensive" in registry.read_text(encoding="utf-8")
+
+
+def test_validate_model_command_runs_validation_suite(tmp_path, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    catalog = MarketDataCatalog(catalog_db)
+    for symbol, daily_return in {
+        "AAA": 0.0010,
+        "BBB": 0.0002,
+        "TLT": 0.0001,
+        "SPY": 0.0003,
+    }.items():
+        catalog.put_bars(_long_bars(symbol, 10.0, daily_return))
+
+    result = cli.main(
+        [
+            "validate-model",
+            "AAA,BBB,TLT",
+            "--start",
+            "2020-01-01",
+            "--end",
+            "2023-12-31",
+            "--benchmark",
+            "SPY",
+            "--no-fetch",
+            "--momentum-lookback",
+            "21",
+            "--reversal-lookback",
+            "5",
+            "--volatility-lookback",
+            "10",
+            "--risk-filter-lookback",
+            "20",
+            "--ensemble-momentum-lookbacks",
+            "21,42",
+            "--ensemble-risk-filter-lookbacks",
+            "0,20",
+            "--defensive-basket",
+            "TLT,CASH",
+            "--defensive-selection-lookback",
+            "10",
+            "--volatility-target",
+            "0.08",
+            "--max-leverage",
+            "1.0",
+            "--crash-hedge-symbols",
+            "TLT",
+            "--crash-hedge-weight",
+            "0.2",
+            "--crash-hedge-trigger-lookback",
+            "10",
+            "--crash-hedge-trigger-drawdown",
+            "0.05",
+            "--crash-hedge-selection-lookback",
+            "5",
+            "--crash-hedge-hold-days",
+            "3",
+            "--crash-hedge-weights",
+            "0.2",
+            "--crash-hedge-trigger-lookbacks",
+            "5,10",
+            "--crash-hedge-trigger-drawdowns",
+            "0.05",
+            "--crash-hedge-selection-lookbacks",
+            "5",
+            "--crash-hedge-hold-days-values",
+            "0,3",
+            "--top-n",
+            "1",
+            "--rebalance-days",
+            "21",
+            "--weighting",
+            "equal",
+            "--defensive-only",
+            "--train-years",
+            "1",
+            "--test-years",
+            "1",
+            "--step-years",
+            "1",
+            "--momentum-lookbacks",
+            "21",
+            "--top-ns",
+            "1",
+            "--risk-filter-lookbacks",
+            "0,20",
+            "--weighting-modes",
+            "equal",
+            "--rebalance-days-values",
+            "21",
+            "--fee-stress-bps",
+            "2,5",
+            "--stress-windows",
+            "stress:2022-01-01:2022-06-30",
+            "--min-walk-forward-windows",
+            "1",
+            "--min-positive-test-rate",
+            "0.5",
+            "--min-parameter-positive-rate",
+            "0.5",
+            "--min-stress-windows",
+            "1",
+            "--min-stress-return",
+            "-1",
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result in {0, 2}
+    assert "Factor Validation Suite" in captured.out
+    assert "Fee Stress" in captured.out
+    assert "Parameter Perturbation" in captured.out
+
+
+def _set_live_env(
+    monkeypatch,
+    *,
+    strategy_id: str,
+    broker: str = "fake",
+    min_paper_days: str | None = None,
+    min_shadow_days: str | None = None,
+) -> None:
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("LIVE_TRADING_ACK_RISK", "true")
+    monkeypatch.setenv("LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("LIVE_STRATEGY_ID", strategy_id)
+    monkeypatch.setenv("LIVE_BROKER", broker)
+    monkeypatch.setenv("LIVE_MAX_CAPITAL", "10000")
+    monkeypatch.setenv("LIVE_POLICY_VERSION", "test-policy-v1")
+    if min_paper_days is not None:
+        monkeypatch.setenv("LIVE_MIN_PAPER_DAYS", min_paper_days)
+    if min_shadow_days is not None:
+        monkeypatch.setenv("LIVE_MIN_SHADOW_DAYS", min_shadow_days)
+
+
+def _approve_strategy(registry: Path, strategy_id: str) -> None:
+    evidence = cli.make_evidence(
+        strategy_id=strategy_id,
+        parameter_label="approved-test",
+        windows=8,
+        positive_test_rate=0.75,
+        average_test_annualized_excess=0.02,
+        worst_test_drawdown=0.20,
+        fee_stress_passed=True,
+        pit_audit_passed=True,
+        full_sample_annualized_return=0.18,
+        full_sample_max_drawdown=0.25,
+        stress_windows_tested=2,
+        worst_stress_return=0.35,
+        stress_passed=True,
+    )
+    cli.ResearchRegistry(registry).append(evidence, cli.evaluate_promotion(evidence))
+
+
 def _bar(symbol: str, source: str) -> PriceBar:
     return PriceBar(
         symbol=symbol,
@@ -460,6 +1105,31 @@ def _price_bar(symbol: str, ts: date, close: float) -> PriceBar:
         close=close,
         volume=100,
     )
+
+
+def _live_price_bar(symbol: str, ts: date, close: float) -> PriceBar:
+    return PriceBar(
+        symbol=symbol,
+        market="us",
+        source_symbol=symbol,
+        ts=ts,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=100,
+        source="alpaca:paper:latest_bar",
+    )
+
+
+def _long_bars(symbol: str, start_close: float, daily_return: float) -> list[PriceBar]:
+    close = start_close
+    bars: list[PriceBar] = []
+    for index in range(1_500):
+        close *= 1 + daily_return
+        ts = date(2020, 1, 1) + timedelta(days=index)
+        bars.append(_price_bar(symbol, ts, close))
+    return bars
 
 
 def _option_chain_csv(tmp_path: Path) -> Path:

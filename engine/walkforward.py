@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from itertools import product
+from typing import cast
 
 from data.models import DelistingReturn, PriceBar, UniverseMember
 from engine.factor_portfolio import (
@@ -10,7 +12,13 @@ from engine.factor_portfolio import (
     run_factor_rotation_backtest,
 )
 
-SELECTION_METRICS = {"annualized-excess", "excess-sharpe", "return-drawdown", "risk-first"}
+SELECTION_METRICS = {
+    "annualized-excess",
+    "annualized-return",
+    "excess-sharpe",
+    "return-drawdown",
+    "risk-first",
+}
 
 
 @dataclass(frozen=True)
@@ -26,16 +34,30 @@ class FactorParams:
     max_risk_weight: float
     drawdown_guard: float
     defensive_only: bool
+    crash_hedge_weight: float
+    crash_hedge_trigger_lookback: int
+    crash_hedge_trigger_drawdown: float
+    crash_hedge_selection_lookback: int
+    crash_hedge_hold_days: int
 
     @property
     def label(self) -> str:
         defensive = self.defensive_symbol or "cash"
-        return (
+        base = (
             f"M{self.momentum_lookback}/R{self.reversal_lookback}/"
             f"V{self.volatility_lookback}/RF{self.risk_filter_lookback}/"
             f"Top{self.top_n}/{self.weighting}/Reb{self.rebalance_days}/Def{defensive}/"
             f"MaxRisk{self.max_risk_weight:.2f}/DD{self.drawdown_guard:.2f}/"
             f"DefOnly{int(self.defensive_only)}"
+        )
+        if self.crash_hedge_weight <= 0:
+            return base
+        return (
+            f"{base}/Crash{self.crash_hedge_weight:.2f}/"
+            f"CT{self.crash_hedge_trigger_lookback}/"
+            f"CDD{self.crash_hedge_trigger_drawdown:.2f}/"
+            f"CS{self.crash_hedge_selection_lookback}/"
+            f"CH{self.crash_hedge_hold_days}"
         )
 
 
@@ -101,6 +123,29 @@ def run_factor_walk_forward(
     drawdown_guard: float = 0.0,
     drawdown_guards: tuple[float, ...] | None = None,
     defensive_only: bool = False,
+    ensemble_momentum_lookbacks: tuple[int, ...] | None = None,
+    ensemble_risk_filter_lookbacks: tuple[int, ...] | None = None,
+    risk_filter_vote_threshold: float = 0.5,
+    defensive_basket: tuple[str | None, ...] | None = None,
+    defensive_selection_lookback: int = 63,
+    volatility_target: float = 0.0,
+    max_leverage: float = 1.0,
+    crash_hedge_symbols: tuple[str, ...] | None = None,
+    crash_hedge_weight: float = 0.0,
+    crash_hedge_trigger_lookback: int = 21,
+    crash_hedge_trigger_drawdown: float = 0.10,
+    crash_hedge_selection_lookback: int = 5,
+    crash_hedge_hold_days: int = 0,
+    crash_hedge_weights: tuple[float, ...] | None = None,
+    crash_hedge_trigger_lookbacks: tuple[int, ...] | None = None,
+    crash_hedge_trigger_drawdowns: tuple[float, ...] | None = None,
+    crash_hedge_selection_lookbacks: tuple[int, ...] | None = None,
+    crash_hedge_hold_days_values: tuple[int, ...] | None = None,
+    regime_cash_enable: bool = False,
+    regime_cash_corr_symbol: str = "TLT",
+    regime_cash_corr_window: int = 60,
+    regime_cash_corr_threshold: float = 0.2,
+    regime_cash_override_symbol: str | None = "SHY",
 ) -> WalkForwardReport:
     if min(train_years, test_years, step_years) < 1:
         raise ValueError("train_years, test_years and step_years must be >= 1")
@@ -121,10 +166,53 @@ def run_factor_walk_forward(
     drawdown_guard_choices = drawdown_guards or (drawdown_guard,)
     if any(not 0 <= item < 1 for item in drawdown_guard_choices):
         raise ValueError("drawdown guards must be >= 0 and < 1")
+    if ensemble_momentum_lookbacks and any(item < 1 for item in ensemble_momentum_lookbacks):
+        raise ValueError("ensemble momentum lookbacks must be >= 1")
+    if ensemble_risk_filter_lookbacks and any(item < 0 for item in ensemble_risk_filter_lookbacks):
+        raise ValueError("ensemble risk filter lookbacks must be >= 0")
+    if not 0 < risk_filter_vote_threshold <= 1:
+        raise ValueError("risk_filter_vote_threshold must be > 0 and <= 1")
+    if defensive_selection_lookback < 1:
+        raise ValueError("defensive_selection_lookback must be >= 1")
+    if volatility_target < 0:
+        raise ValueError("volatility_target must be >= 0")
+    if max_leverage <= 0:
+        raise ValueError("max_leverage must be > 0")
+    crash_weight_choices = crash_hedge_weights or (crash_hedge_weight,)
+    if any(not 0 <= item <= 1 for item in crash_weight_choices):
+        raise ValueError("crash hedge weights must be >= 0 and <= 1")
+    crash_trigger_lookback_choices = crash_hedge_trigger_lookbacks or (
+        crash_hedge_trigger_lookback,
+    )
+    if any(item < 1 for item in crash_trigger_lookback_choices):
+        raise ValueError("crash hedge trigger lookbacks must be >= 1")
+    crash_trigger_drawdown_choices = crash_hedge_trigger_drawdowns or (
+        crash_hedge_trigger_drawdown,
+    )
+    if any(not 0 < item < 1 for item in crash_trigger_drawdown_choices):
+        raise ValueError("crash hedge trigger drawdowns must be > 0 and < 1")
+    crash_selection_lookback_choices = crash_hedge_selection_lookbacks or (
+        crash_hedge_selection_lookback,
+    )
+    if any(item < 1 for item in crash_selection_lookback_choices):
+        raise ValueError("crash hedge selection lookbacks must be >= 1")
+    crash_hold_day_choices = crash_hedge_hold_days_values or (crash_hedge_hold_days,)
+    if any(item < 0 for item in crash_hold_day_choices):
+        raise ValueError("crash hedge hold days must be >= 0")
     if selection_metric not in SELECTION_METRICS:
         raise ValueError(f"selection_metric must be one of {sorted(SELECTION_METRICS)}")
     max_lookback = max(
-        (*momentum_lookbacks, *reversal_lookbacks, *volatility_lookbacks, *risk_filters)
+        (
+            *momentum_lookbacks,
+            *(ensemble_momentum_lookbacks or ()),
+            *reversal_lookbacks,
+            *volatility_lookbacks,
+            *risk_filters,
+            *(ensemble_risk_filter_lookbacks or ()),
+            defensive_selection_lookback if defensive_basket and len(defensive_basket) > 1 else 0,
+            *(crash_trigger_lookback_choices if crash_hedge_symbols else (0,)),
+            *(crash_selection_lookback_choices if crash_hedge_symbols else (0,)),
+        )
     )
     rows: list[WalkForwardRow] = []
     train_start = start
@@ -145,54 +233,115 @@ def run_factor_walk_forward(
         score_benchmark = _slice_bars(benchmark_bars, score_warmup_start, train_end)
         test_benchmark = _slice_bars(benchmark_bars, test_warmup_start, test_end)
         candidates: list[tuple[FactorParams, FactorPortfolioResult]] = []
-        for momentum in momentum_lookbacks:
-            for reversal in reversal_lookbacks:
-                for volatility in volatility_lookbacks:
-                    for risk_filter in risk_filters:
-                        for top_n in top_ns:
-                            for weighting in weighting_modes:
-                                for candidate_rebalance in rebalances:
-                                    for candidate_defensive in defensive_choices:
-                                        for candidate_max_risk in risk_weight_choices:
-                                            for candidate_drawdown_guard in drawdown_guard_choices:
-                                                params = FactorParams(
-                                                    momentum,
-                                                    reversal,
-                                                    volatility,
-                                                    risk_filter,
-                                                    top_n,
-                                                    weighting,
-                                                    candidate_rebalance,
-                                                    candidate_defensive,
-                                                    candidate_max_risk,
-                                                    candidate_drawdown_guard,
-                                                    defensive_only,
-                                                )
-                                                try:
-                                                    score = run_factor_rotation_backtest(
-                                                        score_bars,
-                                                        benchmark_bars=score_benchmark,
-                                                        fundamentals_by_symbol=fundamentals_by_symbol,
-                                                        universe_members=universe_members,
-                                                        delisting_returns=delisting_returns,
-                                                        momentum_lookback=momentum,
-                                                        reversal_lookback=reversal,
-                                                        volatility_lookback=volatility,
-                                                        risk_filter_lookback=risk_filter,
-                                                        top_n=top_n,
-                                                        rebalance_days=candidate_rebalance,
-                                                        fee_bps=fee_bps,
-                                                        defensive_symbol=candidate_defensive,
-                                                        weighting=weighting,
-                                                        max_risk_weight=candidate_max_risk,
-                                                        drawdown_guard=candidate_drawdown_guard,
-                                                        defensive_only=defensive_only,
-                                                        trade_start=score_start,
-                                                        trade_end=train_end,
-                                                    )
-                                                except ValueError:
-                                                    continue
-                                                candidates.append((params, score))
+        for (
+            momentum,
+            reversal,
+            volatility,
+            risk_filter,
+            top_n,
+            weighting,
+            candidate_rebalance,
+            candidate_defensive,
+            candidate_max_risk,
+            candidate_drawdown_guard,
+            candidate_crash_weight,
+            candidate_crash_trigger_lookback,
+            candidate_crash_trigger_drawdown,
+            candidate_crash_selection_lookback,
+            candidate_crash_hold_days,
+        ) in product(
+            momentum_lookbacks,
+            reversal_lookbacks,
+            volatility_lookbacks,
+            risk_filters,
+            top_ns,
+            weighting_modes,
+            rebalances,
+            defensive_choices,
+            risk_weight_choices,
+            drawdown_guard_choices,
+            crash_weight_choices,
+            crash_trigger_lookback_choices,
+            crash_trigger_drawdown_choices,
+            crash_selection_lookback_choices,
+            crash_hold_day_choices,
+        ):
+            momentum_value = cast(int, momentum)
+            reversal_value = cast(int, reversal)
+            volatility_value = cast(int, volatility)
+            risk_filter_value = cast(int, risk_filter)
+            top_n_value = cast(int, top_n)
+            weighting_value = cast(str, weighting)
+            rebalance_value = cast(int, candidate_rebalance)
+            defensive_value = cast(str | None, candidate_defensive)
+            max_risk_value = cast(float, candidate_max_risk)
+            drawdown_guard_value = cast(float, candidate_drawdown_guard)
+            crash_weight_value = cast(float, candidate_crash_weight)
+            crash_trigger_lookback_value = cast(int, candidate_crash_trigger_lookback)
+            crash_trigger_drawdown_value = cast(float, candidate_crash_trigger_drawdown)
+            crash_selection_lookback_value = cast(int, candidate_crash_selection_lookback)
+            crash_hold_days_value = cast(int, candidate_crash_hold_days)
+            params = FactorParams(
+                momentum_value,
+                reversal_value,
+                volatility_value,
+                risk_filter_value,
+                top_n_value,
+                weighting_value,
+                rebalance_value,
+                defensive_value,
+                max_risk_value,
+                drawdown_guard_value,
+                defensive_only,
+                crash_weight_value,
+                crash_trigger_lookback_value,
+                crash_trigger_drawdown_value,
+                crash_selection_lookback_value,
+                crash_hold_days_value,
+            )
+            try:
+                score = run_factor_rotation_backtest(
+                    score_bars,
+                    benchmark_bars=score_benchmark,
+                    fundamentals_by_symbol=fundamentals_by_symbol,
+                    universe_members=universe_members,
+                    delisting_returns=delisting_returns,
+                    momentum_lookback=momentum_value,
+                    reversal_lookback=reversal_value,
+                    volatility_lookback=volatility_value,
+                    risk_filter_lookback=risk_filter_value,
+                    top_n=top_n_value,
+                    rebalance_days=rebalance_value,
+                    fee_bps=fee_bps,
+                    defensive_symbol=defensive_value,
+                    weighting=weighting_value,
+                    max_risk_weight=max_risk_value,
+                    drawdown_guard=drawdown_guard_value,
+                    defensive_only=defensive_only,
+                    ensemble_momentum_lookbacks=ensemble_momentum_lookbacks,
+                    ensemble_risk_filter_lookbacks=ensemble_risk_filter_lookbacks,
+                    risk_filter_vote_threshold=risk_filter_vote_threshold,
+                    defensive_symbols=defensive_basket,
+                    defensive_selection_lookback=defensive_selection_lookback,
+                    volatility_target=volatility_target,
+                    max_leverage=max_leverage,
+                    crash_hedge_symbols=crash_hedge_symbols,
+                    crash_hedge_weight=crash_weight_value,
+                    crash_hedge_trigger_lookback=crash_trigger_lookback_value,
+                    crash_hedge_trigger_drawdown=crash_trigger_drawdown_value,
+                    crash_hedge_selection_lookback=crash_selection_lookback_value,
+                    crash_hedge_hold_days=crash_hold_days_value,
+                    trade_start=score_start,
+                    trade_end=train_end,
+                    regime_cash_enable=regime_cash_enable,
+                    regime_cash_corr_symbol=regime_cash_corr_symbol,
+                    regime_cash_corr_window=regime_cash_corr_window,
+                    regime_cash_corr_threshold=regime_cash_corr_threshold,
+                    regime_cash_override_symbol=regime_cash_override_symbol,
+                )
+            except ValueError:
+                continue
+            candidates.append((params, score))
         if candidates:
             selected, _score = max(
                 candidates,
@@ -217,8 +366,26 @@ def run_factor_walk_forward(
                     max_risk_weight=selected.max_risk_weight,
                     drawdown_guard=selected.drawdown_guard,
                     defensive_only=selected.defensive_only,
+                    ensemble_momentum_lookbacks=ensemble_momentum_lookbacks,
+                    ensemble_risk_filter_lookbacks=ensemble_risk_filter_lookbacks,
+                    risk_filter_vote_threshold=risk_filter_vote_threshold,
+                    defensive_symbols=defensive_basket,
+                    defensive_selection_lookback=defensive_selection_lookback,
+                    volatility_target=volatility_target,
+                    max_leverage=max_leverage,
+                    crash_hedge_symbols=crash_hedge_symbols,
+                    crash_hedge_weight=selected.crash_hedge_weight,
+                    crash_hedge_trigger_lookback=selected.crash_hedge_trigger_lookback,
+                    crash_hedge_trigger_drawdown=selected.crash_hedge_trigger_drawdown,
+                    crash_hedge_selection_lookback=selected.crash_hedge_selection_lookback,
+                    crash_hedge_hold_days=selected.crash_hedge_hold_days,
                     trade_start=train_start,
                     trade_end=train_end,
+                    regime_cash_enable=regime_cash_enable,
+                    regime_cash_corr_symbol=regime_cash_corr_symbol,
+                    regime_cash_corr_window=regime_cash_corr_window,
+                    regime_cash_corr_threshold=regime_cash_corr_threshold,
+                    regime_cash_override_symbol=regime_cash_override_symbol,
                 )
                 test = run_factor_rotation_backtest(
                     test_bars,
@@ -238,8 +405,26 @@ def run_factor_walk_forward(
                     max_risk_weight=selected.max_risk_weight,
                     drawdown_guard=selected.drawdown_guard,
                     defensive_only=selected.defensive_only,
+                    ensemble_momentum_lookbacks=ensemble_momentum_lookbacks,
+                    ensemble_risk_filter_lookbacks=ensemble_risk_filter_lookbacks,
+                    risk_filter_vote_threshold=risk_filter_vote_threshold,
+                    defensive_symbols=defensive_basket,
+                    defensive_selection_lookback=defensive_selection_lookback,
+                    volatility_target=volatility_target,
+                    max_leverage=max_leverage,
+                    crash_hedge_symbols=crash_hedge_symbols,
+                    crash_hedge_weight=selected.crash_hedge_weight,
+                    crash_hedge_trigger_lookback=selected.crash_hedge_trigger_lookback,
+                    crash_hedge_trigger_drawdown=selected.crash_hedge_trigger_drawdown,
+                    crash_hedge_selection_lookback=selected.crash_hedge_selection_lookback,
+                    crash_hedge_hold_days=selected.crash_hedge_hold_days,
                     trade_start=test_start,
                     trade_end=test_end,
+                    regime_cash_enable=regime_cash_enable,
+                    regime_cash_corr_symbol=regime_cash_corr_symbol,
+                    regime_cash_corr_window=regime_cash_corr_window,
+                    regime_cash_corr_threshold=regime_cash_corr_threshold,
+                    regime_cash_override_symbol=regime_cash_override_symbol,
                 )
                 rows.append(
                     WalkForwardRow(
@@ -321,11 +506,15 @@ def _warmup_start(value: date, lookback: int) -> date:
 def _selection_score(result: FactorPortfolioResult, metric: str) -> float:
     if metric == "annualized-excess":
         return result.annualized_excess_return
+    if metric == "annualized-return":
+        return result.annualized_return
     if metric == "excess-sharpe":
         return result.sharpe - result.benchmark_sharpe
     if metric == "return-drawdown":
         return result.annualized_excess_return - result.max_drawdown
     if metric == "risk-first":
         excess_sharpe = result.sharpe - result.benchmark_sharpe
-        return result.annualized_excess_return + (0.05 * excess_sharpe) - (0.5 * result.max_drawdown)
+        return (
+            result.annualized_excess_return + (0.05 * excess_sharpe) - (0.5 * result.max_drawdown)
+        )
     raise ValueError(f"unknown selection metric: {metric}")

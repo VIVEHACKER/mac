@@ -1,0 +1,13 @@
+universe,symbol,market,start_date,end_date,source,confidence,asset_class,asset_subclass,role
+INDEXES_2016,SPY,us,2016-01-01,,manual:listed-before-window,high,equity,us-large-blend,risk
+INDEXES_2016,QQQ,us,2016-01-01,,manual:listed-before-window,high,equity,us-large-growth,risk
+INDEXES_2016,IWM,us,2016-01-01,,manual:listed-before-window,high,equity,us-small-cap,risk
+INDEXES_2016,DIA,us,2016-01-01,,manual:listed-before-window,high,equity,us-large-value,risk
+INDEXES_2016,MDY,us,2016-01-01,,manual:listed-before-window,high,equity,us-mid-cap,risk
+INDEXES_2016,RSP,us,2016-01-01,,manual:listed-before-window,high,equity,us-equal-weight,risk
+INDEXES_2016,EFA,us,2016-01-01,,manual:listed-before-window,high,equity,developed-ex-us,risk
+INDEXES_2016,EEM,us,2016-01-01,,manual:listed-before-window,high,equity,emerging-markets,risk
+INDEXES_2016,TLT,us,2016-01-01,,manual:listed-before-window,high,bond,treasury-long,defensive
+INDEXES_2016,IEF,us,2016-01-01,,manual:listed-before-window,high,bond,treasury-intermediate,defensive
+INDEXES_2016,SHY,us,2016-01-01,,manual:listed-before-window,high,bond,treasury-short,defensive
+INDEXES_2016,GLD,us,2016-01-01,,manual:listed-before-window,high,commodity,gold,risk

@@ -8,6 +8,7 @@ from data.models import (
     FlowRecord,
     FundamentalRecord,
     MacroObservation,
+    PriceBar,
     UniverseMember,
     ValuationRecord,
 )
@@ -202,3 +203,32 @@ def test_quality_can_require_reported_flow(tmp_path) -> None:
     )
 
     assert not any(issue.severity == "error" for issue in issues)
+
+
+def test_live_quality_blocks_missing_price_source(tmp_path) -> None:
+    catalog = MarketDataCatalog(tmp_path / "test.duckdb")
+    catalog.put_bars(
+        [
+            PriceBar(
+                "QQQ",
+                "us",
+                "QQQ",
+                date(2026, 5, 8),
+                100,
+                100,
+                100,
+                100,
+                100,
+            )
+        ]
+    )
+
+    issues = evaluate_catalog_quality(
+        catalog,
+        as_of=date(2026, 5, 8),
+        required_macro=(),
+        required_prices=(("QQQ", "us"),),
+        live_mode=True,
+    )
+
+    assert any("source is missing" in issue.message for issue in issues)

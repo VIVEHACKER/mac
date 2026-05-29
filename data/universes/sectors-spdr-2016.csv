@@ -1,0 +1,16 @@
+universe,symbol,market,start_date,end_date,source,confidence,asset_class,asset_subclass,role
+SECTORS_SPDR_2016,XLK,us,2016-01-01,,manual:listed-before-window,high,equity-sector,technology,risk
+SECTORS_SPDR_2016,XLF,us,2016-01-01,,manual:listed-before-window,high,equity-sector,financials,risk
+SECTORS_SPDR_2016,XLE,us,2016-01-01,,manual:listed-before-window,high,equity-sector,energy,risk
+SECTORS_SPDR_2016,XLV,us,2016-01-01,,manual:listed-before-window,high,equity-sector,health-care,risk
+SECTORS_SPDR_2016,XLY,us,2016-01-01,,manual:listed-before-window,high,equity-sector,consumer-discretionary,risk
+SECTORS_SPDR_2016,XLP,us,2016-01-01,,manual:listed-before-window,high,equity-sector,consumer-staples,risk
+SECTORS_SPDR_2016,XLI,us,2016-01-01,,manual:listed-before-window,high,equity-sector,industrials,risk
+SECTORS_SPDR_2016,XLB,us,2016-01-01,,manual:listed-before-window,high,equity-sector,materials,risk
+SECTORS_SPDR_2016,XLU,us,2016-01-01,,manual:listed-before-window,high,equity-sector,utilities,risk
+SECTORS_SPDR_2016,XLRE,us,2016-01-01,,manual:listed-2015-10-08-before-window,high,equity-sector,real-estate,risk
+SECTORS_SPDR_2016,XLC,us,2018-06-19,,manual:listed-2018-06-19-pit,high,equity-sector,communication-services,risk
+SECTORS_SPDR_2016,TLT,us,2016-01-01,,manual:listed-before-window,high,bond,treasury-long,defensive
+SECTORS_SPDR_2016,SHY,us,2016-01-01,,manual:listed-before-window,high,bond,treasury-short,defensive
+SECTORS_SPDR_2016,PSQ,us,2016-01-01,,manual:listed-before-window,high,inverse-equity,nasdaq-100-inverse,crash-hedge
+SECTORS_SPDR_2016,SH,us,2016-01-01,,manual:listed-before-window,high,inverse-equity,sp-500-inverse,crash-hedge

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from datetime import date
+from pathlib import Path
 
 from data.delistings import load_delisting_returns_csv
 from data.fundamentals_csv import load_fundamentals_csv
@@ -21,6 +23,35 @@ def test_load_universe_members_csv(tmp_path) -> None:
     assert rows[0].symbol == "QQQ"
     assert rows[0].start_date == date(2008, 1, 1)
     assert rows[0].end_date is None
+
+
+def test_multi_asset_etf_2008_universe_has_enough_portfolio_breadth() -> None:
+    path = Path(__file__).resolve().parents[2] / "data/universes/multi-asset-etf-2008.csv"
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    members = load_universe_members_csv(path)
+
+    assert len(rows) >= 40
+    assert len(members) == len(rows)
+    assert len({member.symbol for member in members}) == len(members)
+    assert all(member.start_date == date(2008, 1, 1) for member in members)
+    assert {row["asset_class"] for row in rows} >= {
+        "equity",
+        "equity-sector",
+        "bond",
+        "credit",
+        "commodity",
+        "real-asset",
+    }
+    assert {row["symbol"] for row in rows if row["role"] == "defensive"} >= {
+        "SHY",
+        "IEF",
+        "TLT",
+        "TIP",
+        "AGG",
+        "BND",
+    }
 
 
 def test_load_delisting_returns_csv(tmp_path) -> None:
