@@ -13,6 +13,9 @@ from engine.significance import normal_cdf
 
 ARCHETYPES = ("profitable_compounder", "hypergrowth_disruptor", "value_turnaround")
 
+Z_CLIP: float = 3.0  # FIX A: winsorize signed z-scores to this magnitude
+MIN_PRESENT_METRICS: int = 5  # FIX B: minimum non-None metrics required for ranking
+
 # (metric_key, weight). Negative weight = lower-is-better. Weights per archetype
 # sum to 1.0 over present metrics (renormalized when some are missing).
 _WEIGHTS: dict[str, list[tuple[str, float]]] = {
@@ -123,6 +126,7 @@ def score_archetypes(
                 if z is None:
                     continue
                 signed = z if w >= 0 else -z
+                signed = max(-Z_CLIP, min(Z_CLIP, signed))  # FIX A: winsorize
                 components[key] = signed
                 contrib += abs(w) * signed
                 wsum += abs(w)
@@ -149,7 +153,8 @@ def rank_compounders(
     candidates: list[CandidateScore] = []
     for symbol, arch_scores in all_scores.items():
         metrics = compute_metrics(universe[symbol][0], universe[symbol][1])
-        if not metrics:  # insufficient data -> excluded
+        present = sum(1 for v in metrics.values() if v is not None)
+        if present < MIN_PRESENT_METRICS:  # FIX B: coverage gate (includes empty dict)
             continue
         best_arch = max(arch_scores, key=lambda a: arch_scores[a].score)
         candidates.append(
