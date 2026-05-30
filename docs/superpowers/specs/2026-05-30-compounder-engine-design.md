@@ -154,3 +154,29 @@ Each phase is its own spec → plan → implementation cycle.
   deterministically and emits a ranked, archetype-tagged candidate report with dossiers.
 - Engine accepts an arbitrary universe with zero code change (only data) — verified by the
   CLI universe arg, so P2 is purely a data step.
+
+## 10. As-built notes (P1 delivered 2026-05-30)
+
+Delivered: `engine/compounder_metrics.py`, `engine/compounder.py`, `engine/compounder_dossier.py`,
+`trader compounder-scan` CLI, 28 tests. Full suite 209 passed, ruff + mypy clean. Sample output:
+`out/compounder-scan-sp100.md`. A final holistic review returned READY.
+
+Robustness safeguards added during review (beyond the original design): z-score winsorization
+(`Z_CLIP = 3.0`), a per-archetype coverage gate (`MIN_ARCHETYPE_COVERAGE = 0.5` — an archetype
+scores 0 if too little of its weight is present), and a global `MIN_PRESENT_METRICS = 5` gate.
+These were prompted by the SP100 smoke, where sparse/inconsistent SEC-EDGAR fields let a single
+outlier metric saturate a score to 100 (EMR). After the fixes, rankings are archetype-appropriate
+(PLTR hypergrowth, NVDA/AAPL profitable compounder, EMR reclassified to value-turnaround).
+
+Known gaps (low severity, intentional):
+- `reinvestment_rate` and `net_cash` (design §3.1 "durability") are NOT implemented: they are not
+  cleanly computable from the available `FundamentalRecord` fields (no cash or dividend line).
+  Deferred to P3 (richer alt-data ingest), where the inputs can be added. They feed neither
+  scoring nor the dossier today, so their absence has no effect on output.
+- The hypergrowth "unit-economics gate" (tolerate losses only if margins improve) is modeled as a
+  soft `margin_trend` weight plus a `margin-declining` flag, not a hard veto. A hard exclusion is a
+  tunable policy left for a later iteration.
+- Data quality: SP100 SEC-EDGAR `companyfacts` populates revenue/margins inconsistently for some
+  names (AAPL/MSFT show many `n/a`); financial-sector FCF can exceed revenue (SCHW). These are
+  ingest/data issues for P2 to resolve (consistent field population, optional sector filter), not
+  engine bugs — the engine handles missing data correctly (None-safe, coverage-gated).
