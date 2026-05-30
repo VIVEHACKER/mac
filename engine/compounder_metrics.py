@@ -62,6 +62,12 @@ def revenue_growth_acceleration(records: Sequence[FundamentalRecord]) -> float |
 
 
 def eps_growth(records: Sequence[FundamentalRecord], years: int = 3) -> float | None:
+    """Return signed EPS growth over *years* years: (latest - start) / abs(start).
+
+    Note: when both start.eps and latest.eps are negative the formula can return a
+    positive value (e.g. -2.0 → -1.0 yields +0.5, appearing as "improvement"); this
+    metric is informational only and is not used as a score input.
+    """
     latest = _latest(records)
     start = _record_years_before(records, years)
     if latest is None or start is None or latest.eps is None or start.eps is None:
