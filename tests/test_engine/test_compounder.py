@@ -79,3 +79,43 @@ def test_value_scores_highest_for_cheap_recovering_name():
     universe = {"CHP": (cheap, 8.0), "PRC": (pricey, 300.0)}
     scores = score_archetypes(universe)
     assert scores["CHP"]["value_turnaround"].score > scores["PRC"]["value_turnaround"].score
+
+
+def test_profitable_compounder_penalizes_dilution():
+    from datetime import date, datetime
+
+    rev = [100, 110, 121, 133]
+    ni = [20, 24, 30, 40]
+    fcf = [18, 22, 28, 38]
+    eps = 5.0
+    eq = 100.0
+    debt = 10.0
+
+    flat_records = _series("FLAT", rev, ni, fcf, eq, debt, 50.0, eps)
+
+    dil_shares = [50.0, 52.0, 55.0, 58.0]
+    dil_records = []
+    for i, year in enumerate((2020, 2021, 2022, 2023)):
+        dil_records.append(
+            FundamentalRecord(
+                symbol="DIL",
+                market="us",
+                period_end=date(year, 12, 31),
+                asof_ts=datetime(year + 1, 3, 1),
+                revenue=rev[i],
+                net_income=ni[i],
+                free_cash_flow=fcf[i],
+                total_equity=eq,
+                total_debt=debt,
+                shares_out=dil_shares[i],
+                eps=eps,
+            )
+        )
+
+    universe = {"FLAT": (flat_records, 60.0), "DIL": (dil_records, 60.0)}
+    scores = score_archetypes(universe)
+    flat_score = scores["FLAT"]["profitable_compounder"].score
+    dil_score = scores["DIL"]["profitable_compounder"].score
+    assert dil_score < flat_score, (
+        f"Expected DIL ({dil_score:.2f}) < FLAT ({flat_score:.2f}), but dilution was not penalized"
+    )

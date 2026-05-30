@@ -112,12 +112,14 @@ def score_archetypes(
 
     out: dict[str, dict[str, ArchetypeScore]] = {}
     for s in symbols:
+        if not metrics[s]:
+            continue
         out[s] = {}
         for arch, weights in _WEIGHTS.items():
             components: dict[str, float] = {}
             wsum, contrib = 0.0, 0.0
             for key, w in weights:
-                z = zmaps[key].get(s)
+                z = zmaps[key][s]
                 if z is None:
                     continue
                 signed = z if w >= 0 else -z
