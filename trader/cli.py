@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -34,6 +35,8 @@ from data.quality import DataQualityIssue, evaluate_catalog_quality, format_qual
 from data.universe import load_universe_members_csv
 from data.universe_audit import format_universe_audit_report, run_universe_audit
 from engine.backtest import format_backtest_report, run_momentum_backtest
+from engine.compounder import rank_compounders
+from engine.compounder_dossier import build_dossier, format_dossier_markdown
 from engine.factor_portfolio import (
     FactorPortfolioResult,
     FactorWeights,
@@ -126,6 +129,7 @@ CORE_COMMANDS = {
     "backtest",
     "portfolio",
     "factor-portfolio",
+    "compounder-scan",
     "walk-forward",
     "validate-model",
     "universe-audit",
@@ -187,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_portfolio(parsed)
     if parsed.command == "factor-portfolio":
         return _run_factor_portfolio(parsed)
+    if parsed.command == "compounder-scan":
+        return _run_compounder_scan(parsed)
     if parsed.command == "walk-forward":
         return _run_walk_forward(parsed)
     if parsed.command == "validate-model":
@@ -344,6 +350,29 @@ def build_parser() -> argparse.ArgumentParser:
         "for downstream statistical-significance analysis (DSR, block bootstrap).",
     )
     factor_portfolio.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
+
+    compounder = sub.add_parser(
+        "compounder-scan",
+        help="Score a universe as long-term compounder candidates (3 archetypes) + dossiers.",
+    )
+    _add_market_symbols_args(compounder)
+    compounder.add_argument("--as-of", default=date.today().isoformat())
+    compounder.add_argument("--top-n", type=int, default=20)
+    compounder.add_argument(
+        "--archetype",
+        default=None,
+        choices=["profitable_compounder", "hypergrowth_disruptor", "value_turnaround"],
+    )
+    compounder.add_argument(
+        "--snapshot",
+        type=Path,
+        default=None,
+        help="Pin fundamentals to a content-verified snapshot CSV.",
+    )
+    compounder.add_argument("--no-fetch", action="store_true", help="Use stored bars only.")
+    _add_pit_universe_args(compounder)
+    compounder.add_argument("--output", type=Path)
+    compounder.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
 
     walk_forward = sub.add_parser(
         "walk-forward",
@@ -1236,6 +1265,54 @@ def _run_factor_portfolio(args: argparse.Namespace) -> int:
     if getattr(args, "returns_output", None) is not None:
         _write_returns_csv(args.returns_output, result)
     return _emit(format_factor_portfolio_report(result), args.output)
+
+
+def _run_compounder_scan(args: argparse.Namespace) -> int:
+    as_of = _parse_date(args.as_of)
+    catalog = MarketDataCatalog(args.catalog_db)
+    pit_members = _load_pit_universe(catalog, args, market=args.market)
+    symbols = _symbols_for_request(args.symbols, pit_members)
+
+    # Fundamentals: snapshot (reproducible) or live catalog.
+    if args.snapshot is not None:
+        from collections import defaultdict
+
+        from data.fundamentals_snapshot import read_fundamentals_snapshot
+
+        idx: dict[str, list] = defaultdict(list)
+        for rec in read_fundamentals_snapshot(args.snapshot, verify=True):
+            idx[rec.symbol.upper()].append(rec)
+        funds_by_symbol = {
+            s: sorted(idx.get(s.upper(), []), key=lambda r: r.asof_ts) for s in symbols
+        }
+    else:
+        funds_by_symbol = {
+            s: sorted(
+                catalog.get_fundamentals(symbol=s, market=args.market, as_of=None, limit=500),
+                key=lambda r: r.asof_ts,
+            )
+            for s in symbols
+        }
+
+    universe: dict[str, tuple[Sequence[FundamentalRecord], float]] = {}
+    for s in symbols:
+        recs = [r for r in funds_by_symbol.get(s, []) if r.asof_ts.date() <= as_of]
+        if not recs:
+            continue
+        bars = catalog.get_bars(_catalog_symbol(s, args.market), market=args.market)
+        if not bars:
+            continue
+        universe[s] = (recs, float(bars[-1].close))
+
+    ranked = rank_compounders(universe, top_n=args.top_n)
+    if args.archetype:
+        ranked = [c for c in ranked if c.best_archetype == args.archetype]
+
+    lines = [f"# Compounder Scan — as-of {as_of} — {len(universe)} names scored", ""]
+    for c in ranked:
+        lines.append(format_dossier_markdown(build_dossier(c)))
+        lines.append("")
+    return _emit("\n".join(lines), args.output)
 
 
 def _write_returns_csv(path: Path, result: FactorPortfolioResult) -> None:

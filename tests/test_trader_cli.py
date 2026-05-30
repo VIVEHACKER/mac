@@ -1182,3 +1182,84 @@ def _option_chain(expiration: date, scale: float = 1.0) -> list[OptionQuote]:
         )
         for strike, call_mid, put_mid in rows
     ]
+
+
+def test_compounder_scan_runs_and_reports(tmp_path, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    catalog = MarketDataCatalog(catalog_db)
+    catalog.put_bars(_long_bars("AAA", 10.0, 0.0010))
+    catalog.put_bars(_long_bars("BBB", 10.0, 0.0002))
+    catalog.put_fundamentals(
+        [
+            FundamentalRecord(
+                "AAA",
+                "us",
+                date(2023, 12, 31),
+                datetime(2024, 3, 1),
+                revenue=200.0,
+                net_income=40.0,
+                free_cash_flow=30.0,
+                total_equity=100.0,
+                total_debt=10.0,
+                shares_out=50.0,
+                eps=5.0,
+            ),
+            FundamentalRecord(
+                "AAA",
+                "us",
+                date(2020, 12, 31),
+                datetime(2021, 3, 1),
+                revenue=100.0,
+                net_income=10.0,
+                free_cash_flow=8.0,
+                total_equity=100.0,
+                total_debt=10.0,
+                shares_out=50.0,
+                eps=2.0,
+            ),
+            FundamentalRecord(
+                "BBB",
+                "us",
+                date(2023, 12, 31),
+                datetime(2024, 3, 1),
+                revenue=110.0,
+                net_income=2.0,
+                free_cash_flow=1.0,
+                total_equity=100.0,
+                total_debt=200.0,
+                shares_out=60.0,
+                eps=0.2,
+            ),
+            FundamentalRecord(
+                "BBB",
+                "us",
+                date(2020, 12, 31),
+                datetime(2021, 3, 1),
+                revenue=100.0,
+                net_income=2.0,
+                free_cash_flow=1.0,
+                total_equity=100.0,
+                total_debt=200.0,
+                shares_out=55.0,
+                eps=0.2,
+            ),
+        ]
+    )
+
+    result = cli.main(
+        [
+            "compounder-scan",
+            "AAA,BBB",
+            "--as-of",
+            "2024-06-30",
+            "--top-n",
+            "2",
+            "--no-fetch",
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "AAA" in captured.out
+    assert "/100" in captured.out  # archetype score rendered
