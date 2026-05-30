@@ -6,6 +6,7 @@ Source: https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -257,26 +258,55 @@ def build_records(ticker: str, cik: int) -> list[FundamentalRecord]:
     return records
 
 
+def resolve_tickers(args: argparse.Namespace) -> list[str]:
+    """Ticker source: --tickers > --universe-csv > default megacap TICKERS."""
+    if getattr(args, "tickers", None):
+        return [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    if getattr(args, "universe_csv", None):
+        from data.universe import load_universe_members_csv
+
+        members = load_universe_members_csv(args.universe_csv)
+        # dedup, preserve first-seen order
+        seen: dict[str, None] = {}
+        for m in members:
+            seen.setdefault(m.symbol.upper(), None)
+        return list(seen)
+    return TICKERS
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Ingest SEC EDGAR companyfacts fundamentals.")
+    parser.add_argument(
+        "--universe-csv",
+        type=Path,
+        default=None,
+        help="Read tickers from a universe CSV (symbol column).",
+    )
+    parser.add_argument(
+        "--tickers", default=None, help="Comma-separated tickers (overrides --universe-csv)."
+    )
+    args = parser.parse_args()
+    tickers = resolve_tickers(args)
+    print(f"Ingesting {len(tickers)} tickers")
     print("Loading SEC CIK map...")
     cik_map = load_cik_map()
     print(f"Loaded {len(cik_map)} tickers")
 
     catalog = MarketDataCatalog()
     total = 0
-    for i, ticker in enumerate(TICKERS, 1):
+    for i, ticker in enumerate(tickers, 1):
         sec_ticker = ticker.replace("-", ".").upper()
         cik = cik_map.get(sec_ticker) or cik_map.get(ticker.upper())
         if cik is None:
-            print(f"[{i:02d}/{len(TICKERS)}] {ticker}: NO CIK")
+            print(f"[{i:02d}/{len(tickers)}] {ticker}: NO CIK")
             continue
         try:
             records = build_records(ticker, cik)
             catalog.put_fundamentals(records)
             total += len(records)
-            print(f"[{i:02d}/{len(TICKERS)}] {ticker}: CIK={cik}, stored {len(records)} records")
+            print(f"[{i:02d}/{len(tickers)}] {ticker}: CIK={cik}, stored {len(records)} records")
         except Exception as e:
-            print(f"[{i:02d}/{len(TICKERS)}] {ticker}: ERROR {e}")
+            print(f"[{i:02d}/{len(tickers)}] {ticker}: ERROR {e}")
         time.sleep(0.15)  # SEC fair-use rate limit (~10 req/sec)
 
     print(f"\nDONE. Total records stored: {total}")
