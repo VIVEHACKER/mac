@@ -7,6 +7,9 @@ from typing import Any
 
 from engine.compounder import CandidateScore
 
+# Decimal metrics displayed as percent (multiply by 100 when formatting).
+# Ratio metrics (fcf_conversion, debt_to_equity, pe, pfcf, ps, pb) are
+# intentionally excluded and shown as-is.
 _PCT = {
     "revenue_cagr",
     "revenue_growth_acceleration",
@@ -58,9 +61,10 @@ def _rationale(candidate: CandidateScore) -> str:
         if candidate.scores[candidate.best_archetype].flags
         else ""
     )
+    driven_by = f", driven by {drivers}" if drivers else ""
     return (
-        f"{candidate.symbol} fits the '{arch}' archetype (score {candidate.best_score:.0f}/100), "
-        f"driven by {drivers}.{flag_txt}"
+        f"{candidate.symbol} fits the '{arch}' archetype (score {candidate.best_score:.0f}/100)"
+        f"{driven_by}.{flag_txt}"
     )
 
 

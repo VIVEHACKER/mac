@@ -50,3 +50,34 @@ def test_format_dossier_markdown_contains_key_fields():
     assert "QLT" in md
     assert "ROIC" in md or "roic" in md
     assert d.rationale in md
+
+
+def test_format_dossier_markdown_renders_flags():
+    # FLG: declining margins (net_income falls sharply) + high debt (200 vs equity 50)
+    flg = _series(
+        "FLG",
+        rev=[100, 100, 100, 100],
+        ni=[30, 20, 10, 5],
+        fcf=[5, 4, 3, 2],
+        eq=50.0,
+        debt=200.0,
+        sh=50.0,
+        eps=0.1,
+    )
+    # CLN: healthy control name so Z-scores are defined (2-name universe)
+    cln = _series(
+        "CLN",
+        rev=[100, 120, 144, 173],
+        ni=[20, 25, 31, 38],
+        fcf=[18, 22, 27, 33],
+        eq=200.0,
+        debt=10.0,
+        sh=50.0,
+        eps=5.0,
+    )
+    ranked = rank_compounders({"FLG": (flg, 20.0), "CLN": (cln, 60.0)}, top_n=2)
+    flg_candidate = next(c for c in ranked if c.symbol == "FLG")
+    d = build_dossier(flg_candidate)
+    md = format_dossier_markdown(d)
+    assert "**Flags:**" in md
+    assert any(flag in md for flag in ("high-debt", "margin-declining"))
