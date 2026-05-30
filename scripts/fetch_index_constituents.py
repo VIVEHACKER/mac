@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,3 +46,63 @@ def parse_ishares_holdings(text: str) -> list[str]:
         if asset_class == "Equity" and ticker and ticker not in {"-", "USD"}:
             out.append(ticker.upper())
     return out
+
+
+UNIVERSE_NAME = "SP400_600_CURRENT"
+UNIVERSE_HEADER = (
+    "universe,symbol,market,start_date,end_date,source,confidence,asset_class,asset_subclass,role"
+)
+
+
+def write_universe_csv(mapping: dict[str, str], path: Path, *, run_date: date, source: str) -> int:
+    """Write a universe CSV (existing schema). ``mapping`` is {ticker: asset_subclass}."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [UNIVERSE_HEADER]
+    for ticker in sorted(mapping):
+        subclass = mapping[ticker]
+        lines.append(
+            f"{UNIVERSE_NAME},{ticker},us,{run_date.isoformat()},,{source},"
+            f"medium,equity,{subclass},risk"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(mapping)
+
+
+def _fetch(url: str) -> str:
+    import urllib.request
+
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 RegimeResearch jjuni@local.research"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def main() -> None:
+    import sys
+
+    out_path = ROOT / "data" / "universes" / "sp400-600-current.csv"
+    mapping: dict[str, str] = {}
+    source = "ishares"
+    for subclass, url in ISHARES_URLS.items():
+        try:
+            text = _fetch(url)
+            tickers = parse_ishares_holdings(text)
+            for t in tickers:
+                mapping.setdefault(t, subclass)  # first file (mid) wins on dup
+            print(f"{subclass}: {len(tickers)} tickers")
+        except Exception as e:  # noqa: BLE001
+            print(f"{subclass}: FETCH FAILED ({e})", file=sys.stderr)
+    if not mapping:
+        print(
+            "No constituents fetched (iShares blocked?). Supply a CSV of tickers "
+            "and re-run, or add a fallback source.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    n = write_universe_csv(mapping, out_path, run_date=date.today(), source=source)
+    print(f"Wrote {out_path} ({n} unique tickers)")
+
+
+if __name__ == "__main__":
+    main()

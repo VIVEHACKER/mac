@@ -36,3 +36,24 @@ def test_parse_handles_leading_whitespace_header():
     whitespace_sample = "\n".join(" " + line for line in SAMPLE.splitlines())
     tickers = parse_ishares_holdings(whitespace_sample)
     assert tickers == ["AAA", "BBB", "CCC"]
+
+
+from datetime import date  # noqa: E402
+
+from scripts.fetch_index_constituents import write_universe_csv  # noqa: E402
+
+
+def test_write_universe_csv_schema(tmp_path):
+    out = tmp_path / "u.csv"
+    # write_universe_csv writes a {ticker: subclass} mapping; dedup is main()'s job.
+    mapping = {"AAA": "us-mid-cap", "BBB": "us-small-cap"}
+    n = write_universe_csv(mapping, out, run_date=date(2026, 5, 31), source="ishares")
+    assert n == 2
+    text = out.read_text(encoding="utf-8")
+    header = text.splitlines()[0]
+    assert header == (
+        "universe,symbol,market,start_date,end_date,source,confidence,"
+        "asset_class,asset_subclass,role"
+    )
+    assert "SP400_600_CURRENT,AAA,us,2026-05-31,,ishares,medium,equity,us-mid-cap,risk" in text
+    assert "SP400_600_CURRENT,BBB,us,2026-05-31,,ishares,medium,equity,us-small-cap,risk" in text
