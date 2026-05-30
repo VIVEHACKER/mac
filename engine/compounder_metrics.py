@@ -52,9 +52,11 @@ def revenue_growth_acceleration(records: Sequence[FundamentalRecord]) -> float |
     latest = _latest(records)
     one = _record_years_before(records, 1)
     two = _record_years_before(records, 2)
-    if None in (latest, one, two):
+    if latest is None or one is None or two is None:
         return None
-    if not all(r.revenue and r.revenue > 0 for r in (latest, one, two)):
+    if latest.revenue is None or one.revenue is None or two.revenue is None:
+        return None
+    if latest.revenue <= 0 or one.revenue <= 0 or two.revenue <= 0:
         return None
     yoy_recent = latest.revenue / one.revenue - 1.0
     yoy_prior = one.revenue / two.revenue - 1.0
