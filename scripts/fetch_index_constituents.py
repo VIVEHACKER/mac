@@ -37,7 +37,7 @@ def parse_ishares_holdings(text: str) -> list[str]:
             break
     if header_idx is None:
         return []
-    reader = csv.DictReader(io.StringIO("\n".join(lines[header_idx:])))
+    reader = csv.DictReader(io.StringIO("\n".join(line.strip() for line in lines[header_idx:])))
     out: list[str] = []
     for row in reader:
         ticker = (row.get("Ticker") or "").strip()

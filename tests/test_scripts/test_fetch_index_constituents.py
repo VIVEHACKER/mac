@@ -29,3 +29,10 @@ def test_parse_skips_preamble_and_non_equity():
 
 def test_parse_empty_or_headerless_returns_empty():
     assert parse_ishares_holdings("garbage\nno header here\n") == []
+
+
+def test_parse_handles_leading_whitespace_header():
+    # Prefix every line with a single space to simulate leading-whitespace CSV
+    whitespace_sample = "\n".join(" " + line for line in SAMPLE.splitlines())
+    tickers = parse_ishares_holdings(whitespace_sample)
+    assert tickers == ["AAA", "BBB", "CCC"]
