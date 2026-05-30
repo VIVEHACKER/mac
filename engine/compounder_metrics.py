@@ -75,3 +75,56 @@ def eps_growth(records: Sequence[FundamentalRecord], years: int = 3) -> float | 
     if start.eps == 0:
         return None
     return (latest.eps - start.eps) / abs(start.eps)
+
+
+def _ratio(num: float | None, den: float | None, *, den_positive: bool = False) -> float | None:
+    if num is None or den is None or den == 0:
+        return None
+    if den_positive and den <= 0:
+        return None
+    return num / den
+
+
+def operating_margin(rec: FundamentalRecord) -> float | None:
+    return _ratio(rec.operating_income, rec.revenue, den_positive=True)
+
+
+def net_margin(rec: FundamentalRecord) -> float | None:
+    return _ratio(rec.net_income, rec.revenue, den_positive=True)
+
+
+def _ols_slope(ys: list[float]) -> float:
+    n = len(ys)
+    xs = list(range(n))
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    denom = sum((x - mx) ** 2 for x in xs)
+    if denom == 0:
+        return 0.0
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / denom
+
+
+def margin_trend(records: Sequence[FundamentalRecord]) -> float | None:
+    margins = [m for r in _sorted(records) if (m := net_margin(r)) is not None]
+    if len(margins) < 2:
+        return None
+    return _ols_slope(margins)
+
+
+def roic(rec: FundamentalRecord) -> float | None:
+    if rec.net_income is None or rec.total_equity is None or rec.total_debt is None:
+        return None
+    capital = rec.total_equity + rec.total_debt
+    if capital <= 0:
+        return None
+    return rec.net_income / capital
+
+
+def fcf_margin(rec: FundamentalRecord) -> float | None:
+    return _ratio(rec.free_cash_flow, rec.revenue, den_positive=True)
+
+
+def fcf_conversion(rec: FundamentalRecord) -> float | None:
+    if rec.net_income is None or rec.net_income <= 0 or rec.free_cash_flow is None:
+        return None
+    return rec.free_cash_flow / rec.net_income

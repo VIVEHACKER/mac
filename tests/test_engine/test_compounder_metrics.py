@@ -65,6 +65,49 @@ def test_eps_growth_both_negative():
     assert eps_growth(recs, years=3) == pytest.approx(0.5, abs=1e-9)
 
 
+from engine.compounder_metrics import (  # noqa: E402
+    operating_margin,
+    net_margin,
+    margin_trend,
+    roic,
+    fcf_margin,
+    fcf_conversion,
+)
+
+
+def test_margins():
+    r = _rec(2023, revenue=200.0, net_income=40.0, operating_income=60.0)
+    assert net_margin(r) == 0.20
+    assert operating_margin(r) == 0.30
+    assert net_margin(_rec(2023, revenue=0.0, net_income=1.0)) is None
+
+
+def test_margin_trend_slope_positive():
+    # net margins 0.10, 0.20, 0.30 over x=0,1,2 -> OLS slope 0.10
+    recs = [
+        _rec(2021, revenue=100.0, net_income=10.0),
+        _rec(2022, revenue=100.0, net_income=20.0),
+        _rec(2023, revenue=100.0, net_income=30.0),
+    ]
+    assert margin_trend(recs) == pytest.approx(0.10, abs=1e-9)
+
+
+def test_roic_and_fcf():
+    r = _rec(
+        2023,
+        revenue=200.0,
+        net_income=40.0,
+        free_cash_flow=30.0,
+        total_equity=100.0,
+        total_debt=100.0,
+    )
+    assert roic(r) == pytest.approx(0.20, abs=1e-9)  # 40/(100+100)
+    assert fcf_margin(r) == pytest.approx(0.15, abs=1e-9)  # 30/200
+    assert fcf_conversion(r) == pytest.approx(0.75, abs=1e-9)  # 30/40
+    assert fcf_conversion(_rec(2023, net_income=-5.0, free_cash_flow=10.0)) is None
+    assert roic(_rec(2023, net_income=10.0, total_equity=0.0, total_debt=0.0)) is None
+
+
 def test_record_tolerance_boundary():
     # Case 1: prior record exactly at target date (diff ≈ 0) → CAGR returned
     # latest=2023-12-31 rev=200, start=2020-12-31 rev=100, years=3
