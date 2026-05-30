@@ -40,7 +40,56 @@ def test_parse_handles_leading_whitespace_header():
 
 from datetime import date  # noqa: E402
 
-from scripts.fetch_index_constituents import write_universe_csv  # noqa: E402
+from scripts.fetch_index_constituents import (  # noqa: E402
+    parse_wikipedia_constituents,
+    write_universe_csv,
+)
+
+# ---------------------------------------------------------------------------
+# Wikipedia constituent parser tests
+# ---------------------------------------------------------------------------
+
+_WIKI_FIXTURE = """\
+<html><body>
+<h2>Constituents</h2>
+<table class="wikitable sortable jquery-tablesorter">
+<tbody>
+<tr><th>Symbol</th><th>Security</th><th>Sector</th></tr>
+<tr><td><a href="/wiki/AAA">AAA</a></td><td>Alpha Corp</td><td>Tech</td></tr>
+<tr><td><a href="/wiki/BBB">BBB</a></td><td>Beta Inc</td><td>Finance</td></tr>
+<tr><td><a href="/wiki/CCC">CCC</a></td><td>Gamma Ltd</td><td>Health</td></tr>
+</tbody>
+</table>
+<h2>Unrelated section</h2>
+<table>
+<tr><td><a href="/wiki/DDD">DDD</a></td><td>Delta Co</td></tr>
+</table>
+</body></html>
+"""
+
+
+def test_parse_wikipedia_constituents_only_reads_symbol_table():
+    tickers = parse_wikipedia_constituents(_WIKI_FIXTURE)
+    assert tickers == ["AAA", "BBB", "CCC"]
+    assert "DDD" not in tickers
+
+
+def test_parse_wikipedia_constituents_no_symbol_table_returns_empty():
+    html = '<table class="wikitable sortable"><tr><th>Name</th><th>Sector</th></tr><tr><td>X</td></tr></table>'
+    assert parse_wikipedia_constituents(html) == []
+
+
+def test_parse_wikipedia_constituents_dedup_preserves_order():
+    html = """\
+<table class="wikitable sortable">
+<tr><th>Symbol</th><th>Security</th></tr>
+<tr><td>AAA</td><td>Alpha</td></tr>
+<tr><td>BBB</td><td>Beta</td></tr>
+<tr><td>AAA</td><td>Alpha Dup</td></tr>
+</table>
+"""
+    tickers = parse_wikipedia_constituents(html)
+    assert tickers == ["AAA", "BBB"]
 
 
 def test_write_universe_csv_schema(tmp_path):
