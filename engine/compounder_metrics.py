@@ -128,3 +128,42 @@ def fcf_conversion(rec: FundamentalRecord) -> float | None:
     if rec.net_income is None or rec.net_income <= 0 or rec.free_cash_flow is None:
         return None
     return rec.free_cash_flow / rec.net_income
+
+
+def debt_to_equity(rec: FundamentalRecord) -> float | None:
+    return _ratio(rec.total_debt, rec.total_equity, den_positive=True)
+
+
+def share_growth(records: Sequence[FundamentalRecord], years: int = 3) -> float | None:
+    latest = _latest(records)
+    start = _record_years_before(records, years)
+    if latest is None or start is None or latest.shares_out is None or start.shares_out is None:
+        return None
+    if start.shares_out <= 0 or latest.shares_out <= 0:
+        return None
+    return (latest.shares_out / start.shares_out) ** (1.0 / years) - 1.0
+
+
+def market_cap(rec: FundamentalRecord, price: float) -> float | None:
+    if rec.shares_out is None or rec.shares_out <= 0:
+        return None
+    return price * rec.shares_out
+
+
+def pe(rec: FundamentalRecord, price: float) -> float | None:
+    return _ratio(price, rec.eps, den_positive=True)
+
+
+def pfcf(rec: FundamentalRecord, price: float) -> float | None:
+    mc = market_cap(rec, price)
+    return _ratio(mc, rec.free_cash_flow, den_positive=True)
+
+
+def ps(rec: FundamentalRecord, price: float) -> float | None:
+    mc = market_cap(rec, price)
+    return _ratio(mc, rec.revenue, den_positive=True)
+
+
+def pb(rec: FundamentalRecord, price: float) -> float | None:
+    mc = market_cap(rec, price)
+    return _ratio(mc, rec.total_equity, den_positive=True)

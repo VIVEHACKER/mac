@@ -139,3 +139,40 @@ def test_record_tolerance_boundary():
         ),
     ]
     assert revenue_cagr(recs_beyond, years=3) is None
+
+
+from engine.compounder_metrics import (  # noqa: E402
+    debt_to_equity,
+    share_growth,
+    market_cap,
+    pe,
+    pfcf,
+    ps,
+    pb,
+)
+
+
+def test_durability_and_dilution():
+    r = _rec(2023, total_debt=50.0, total_equity=100.0, shares_out=110.0)
+    assert debt_to_equity(r) == 0.5
+    recs = [_rec(2020, shares_out=100.0), _rec(2023, shares_out=110.0)]
+    # (110/100)^(1/3) - 1 ≈ 0.0323 dilution
+    assert share_growth(recs, years=3) == pytest.approx(0.0323, abs=1e-3)
+
+
+def test_valuation_ratios():
+    r = _rec(
+        2023,
+        revenue=200.0,
+        net_income=40.0,
+        free_cash_flow=20.0,
+        total_equity=100.0,
+        eps=4.0,
+        shares_out=10.0,
+    )
+    assert market_cap(r, price=80.0) == 800.0  # 80 * 10
+    assert pe(r, price=80.0) == 20.0  # 80 / 4
+    assert pfcf(r, price=80.0) == 40.0  # 800 / 20
+    assert ps(r, price=80.0) == 4.0  # 800 / 200
+    assert pb(r, price=80.0) == 8.0  # 800 / 100
+    assert pe(_rec(2023, eps=-1.0), price=80.0) is None
