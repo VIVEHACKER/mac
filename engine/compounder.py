@@ -130,3 +130,36 @@ def score_archetypes(
             score = normal_cdf(blended) * 100.0
             out[s][arch] = ArchetypeScore(arch, score, components, _flags(metrics[s]))
     return out
+
+
+@dataclass(frozen=True)
+class CandidateScore:
+    symbol: str
+    best_archetype: str
+    best_score: float
+    scores: dict[str, ArchetypeScore]
+    metrics: dict[str, float | None]
+
+
+def rank_compounders(
+    universe: dict[str, tuple[Sequence[FundamentalRecord], float]],
+    top_n: int = 20,
+) -> list[CandidateScore]:
+    all_scores = score_archetypes(universe)
+    candidates: list[CandidateScore] = []
+    for symbol, arch_scores in all_scores.items():
+        metrics = compute_metrics(universe[symbol][0], universe[symbol][1])
+        if not metrics:  # insufficient data -> excluded
+            continue
+        best_arch = max(arch_scores, key=lambda a: arch_scores[a].score)
+        candidates.append(
+            CandidateScore(
+                symbol=symbol,
+                best_archetype=best_arch,
+                best_score=arch_scores[best_arch].score,
+                scores=arch_scores,
+                metrics=metrics,
+            )
+        )
+    candidates.sort(key=lambda c: c.best_score, reverse=True)
+    return candidates[:top_n]

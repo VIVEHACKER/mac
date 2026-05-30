@@ -81,6 +81,41 @@ def test_value_scores_highest_for_cheap_recovering_name():
     assert scores["CHP"]["value_turnaround"].score > scores["PRC"]["value_turnaround"].score
 
 
+from engine.compounder import CandidateScore, rank_compounders  # noqa: E402
+
+
+def test_rank_assigns_best_archetype_and_orders_by_score():
+    quality = _series(
+        "QLT", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    grower = _series(
+        "GRW", [100, 160, 256, 410], [-5, -3, 0, 5], [-4, -2, 1, 6], 50.0, 0.0, 40.0, 0.5
+    )
+    junk = _series("JNK", [100, 101, 102, 103], [1, 1, 1, 1], [0, 0, 0, 0], 100.0, 250.0, 70.0, 0.1)
+    universe = {"QLT": (quality, 60.0), "GRW": (grower, 30.0), "JNK": (junk, 5.0)}
+
+    ranked = rank_compounders(universe, top_n=2)
+    assert all(isinstance(c, CandidateScore) for c in ranked)
+    assert len(ranked) == 2
+    # descending by best_score
+    assert ranked[0].best_score >= ranked[1].best_score
+    # junk should not be in the top 2
+    assert "JNK" not in [c.symbol for c in ranked]
+    # best_archetype is the max-scoring archetype for that name
+    top = ranked[0]
+    assert top.best_archetype == max(top.scores, key=lambda a: top.scores[a].score)
+
+
+def test_rank_excludes_names_without_metrics():
+    empty = []  # no records -> compute_metrics returns {}
+    good = _series(
+        "OK", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    universe = {"OK": (good, 60.0), "BAD": (empty, 10.0)}
+    ranked = rank_compounders(universe, top_n=5)
+    assert [c.symbol for c in ranked] == ["OK"]
+
+
 def test_profitable_compounder_penalizes_dilution():
     from datetime import date, datetime
 
