@@ -266,6 +266,155 @@ def _sparse_minimal_record(symbol: str) -> list[FundamentalRecord]:
     return records
 
 
+# ── NEW: per-archetype coverage gate ─────────────────────────────────────────
+
+
+def _two_record_series(symbol: str) -> list[FundamentalRecord]:
+    """2 annual records (2022-2023) with revenue/ni/fcf/equity present.
+
+    2 records → revenue_cagr(3y) returns None (no record ~3y back).
+    revenue_growth_acceleration also returns None (needs records at 1y and 2y).
+    margin_trend CAN compute (needs ≥2 net_margin values).
+    So hypergrowth_disruptor has only 1 of 3 weighted metrics present.
+    """
+    out = []
+    for i, year in enumerate((2022, 2023)):
+        out.append(
+            FundamentalRecord(
+                symbol=symbol,
+                market="us",
+                period_end=date(year, 12, 31),
+                asof_ts=datetime(year + 1, 3, 1),
+                revenue=100.0 * (1.5**i),
+                net_income=10.0 * (1.3**i),
+                free_cash_flow=8.0 * (1.3**i),
+                total_equity=80.0,
+                total_debt=10.0,
+                shares_out=50.0,
+                eps=2.0,
+            )
+        )
+    return out
+
+
+def test_archetype_coverage_field_populated() -> None:
+    """A full-data name (4 records) should have profitable_compounder coverage == 1.0."""
+    full = _series(
+        "FULL",
+        [100, 120, 150, 190],
+        [10, 14, 20, 30],
+        [8, 12, 18, 28],
+        100.0,
+        20.0,
+        50.0,
+        3.0,
+    )
+    peer1 = _series(
+        "P1", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    peer2 = _series("P2", [100, 103, 106, 109], [5, 5, 5, 5], [4, 4, 4, 4], 80.0, 15.0, 45.0, 1.0)
+    universe = {"FULL": (full, 60.0), "P1": (peer1, 50.0), "P2": (peer2, 40.0)}
+    scores = score_archetypes(universe)
+    pc = scores["FULL"]["profitable_compounder"]
+    assert hasattr(pc, "coverage"), "ArchetypeScore must have a coverage field"
+    import pytest
+
+    assert pc.coverage == pytest.approx(1.0), (
+        f"profitable_compounder has 5 weighted metrics; full-data name should have coverage=1.0, got {pc.coverage}"
+    )
+
+
+def test_single_metric_archetype_is_disqualified() -> None:
+    """THIN has only margin_trend among hypergrowth's 3 weighted metrics.
+    Its hypergrowth coverage < 0.5 and score must be 0.0."""
+    import pytest
+
+    thin = _two_record_series("THIN")
+    peer1 = _series(
+        "PA", [100, 160, 256, 410], [-5, -3, 0, 5], [-4, -2, 1, 6], 50.0, 0.0, 40.0, 0.5
+    )
+    peer2 = _series(
+        "PB", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    universe = {"THIN": (thin, 30.0), "PA": (peer1, 30.0), "PB": (peer2, 50.0)}
+
+    # Verify THIN's hypergrowth metrics: only margin_trend present
+    thin_metrics = compute_metrics(thin, price=30.0)
+    assert thin_metrics.get("revenue_cagr") is None, "revenue_cagr must be None for 2-record series"
+    assert thin_metrics.get("revenue_growth_acceleration") is None, (
+        "revenue_growth_acceleration must be None for 2-record series"
+    )
+    assert thin_metrics.get("margin_trend") is not None, (
+        "margin_trend must be computable from 2 records"
+    )
+
+    scores = score_archetypes(universe)
+    hg = scores["THIN"]["hypergrowth_disruptor"]
+    assert hg.coverage < 0.5, (
+        f"THIN hypergrowth coverage should be < 0.5 (only 1/3 metrics present), got {hg.coverage:.3f}"
+    )
+    assert hg.score == pytest.approx(0.0), (
+        f"THIN hypergrowth score should be 0.0 (disqualified), got {hg.score:.4f}"
+    )
+
+
+def test_rank_excludes_name_with_no_covered_archetype() -> None:
+    """A name whose present metrics give every archetype coverage < 0.5 is excluded
+    from rank_compounders, while a full-data name is included."""
+    # Build a name that fails coverage on ALL three archetypes.
+    # Use a 2-record series but with None revenue/ni to strip away even more metrics.
+    # We need: profitable_compounder coverage < 0.5 (needs roic,fcf_margin,margin_trend,revenue_cagr,share_growth)
+    #          hypergrowth_disruptor coverage < 0.5 (needs revenue_cagr, rev_growth_accel, margin_trend)
+    #          value_turnaround coverage < 0.5 (needs pfcf, pb, margin_trend, fcf_margin)
+    #
+    # Strategy: provide ONLY shares_out + total_equity (no revenue/ni/fcf/price-dependent)
+    # so that only pb and share_growth can compute (~2 present metrics total),
+    # meaning each archetype has very low coverage.
+    nocov_records = []
+    for _i, year in enumerate((2022, 2023)):
+        nocov_records.append(
+            FundamentalRecord(
+                symbol="NOCOV",
+                market="us",
+                period_end=date(year, 12, 31),
+                asof_ts=datetime(year + 1, 3, 1),
+                revenue=None,
+                net_income=None,
+                free_cash_flow=None,
+                total_equity=100.0,
+                total_debt=None,
+                shares_out=50.0,
+                eps=None,
+            )
+        )
+
+    full = _series(
+        "GOOD",
+        [100, 120, 150, 190],
+        [10, 14, 20, 30],
+        [8, 12, 18, 28],
+        100.0,
+        20.0,
+        50.0,
+        3.0,
+    )
+    peer = _series(
+        "PEER", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    universe = {
+        "NOCOV": (nocov_records, 10.0),
+        "GOOD": (full, 60.0),
+        "PEER": (peer, 50.0),
+    }
+
+    ranked = rank_compounders(universe, top_n=10)
+    symbols = [c.symbol for c in ranked]
+    assert "NOCOV" not in symbols, (
+        "NOCOV has no archetype meeting coverage >= 0.5 and must be excluded from ranking"
+    )
+    assert "GOOD" in symbols, "GOOD (full data) must appear in ranking"
+
+
 def test_coverage_gate_excludes_sparse_name() -> None:
     """FIX B: A name with fewer than MIN_PRESENT_METRICS non-None metrics must
     be excluded from rank_compounders even if it has an extreme value."""

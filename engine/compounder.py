@@ -15,6 +15,7 @@ ARCHETYPES = ("profitable_compounder", "hypergrowth_disruptor", "value_turnaroun
 
 Z_CLIP: float = 3.0  # FIX A: winsorize signed z-scores to this magnitude
 MIN_PRESENT_METRICS: int = 5  # FIX B: minimum non-None metrics required for ranking
+MIN_ARCHETYPE_COVERAGE: float = 0.5  # FIX C: min fraction of archetype |weight| present
 
 # (metric_key, weight). Negative weight = lower-is-better. Weights per archetype
 # sum to 1.0 over present metrics (renormalized when some are missing).
@@ -46,6 +47,7 @@ class ArchetypeScore:
     score: float
     components: dict[str, float]
     flags: tuple[str, ...]
+    coverage: float = 1.0  # fraction of total |weight| that was present
 
 
 def compute_metrics(records: Sequence[FundamentalRecord], price: float) -> dict[str, float | None]:
@@ -121,6 +123,7 @@ def score_archetypes(
         for arch, weights in _WEIGHTS.items():
             components: dict[str, float] = {}
             wsum, contrib = 0.0, 0.0
+            total_abs_weight = sum(abs(w) for _, w in weights)
             for key, w in weights:
                 z = zmaps[key][s]
                 if z is None:
@@ -130,9 +133,12 @@ def score_archetypes(
                 components[key] = signed
                 contrib += abs(w) * signed
                 wsum += abs(w)
+            coverage = wsum / total_abs_weight if total_abs_weight > 0 else 0.0
             blended = contrib / wsum if wsum > 0 else 0.0
-            score = normal_cdf(blended) * 100.0
-            out[s][arch] = ArchetypeScore(arch, score, components, _flags(metrics[s]))
+            score = (
+                0.0 if coverage < MIN_ARCHETYPE_COVERAGE else normal_cdf(blended) * 100.0
+            )  # FIX C
+            out[s][arch] = ArchetypeScore(arch, score, components, _flags(metrics[s]), coverage)
     return out
 
 
@@ -156,12 +162,20 @@ def rank_compounders(
         present = sum(1 for v in metrics.values() if v is not None)
         if present < MIN_PRESENT_METRICS:  # FIX B: coverage gate (includes empty dict)
             continue
-        best_arch = max(arch_scores, key=lambda a: arch_scores[a].score)
+        # FIX C: only consider archetypes with sufficient coverage
+        covered = {
+            a: arch_scores[a]
+            for a in arch_scores
+            if arch_scores[a].coverage >= MIN_ARCHETYPE_COVERAGE
+        }
+        if not covered:
+            continue  # no archetype has enough data — exclude from ranking
+        best_arch = max(covered, key=lambda a: covered[a].score)
         candidates.append(
             CandidateScore(
                 symbol=symbol,
                 best_archetype=best_arch,
-                best_score=arch_scores[best_arch].score,
+                best_score=covered[best_arch].score,
                 scores=arch_scores,
                 metrics=metrics,
             )
