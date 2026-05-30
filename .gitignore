@@ -13,6 +13,9 @@ data/store/
 *.duckdb.wal
 *.db
 
+# 펀더멘털 스냅샷 CSV는 대용량 — manifest(해시/provenance)만 커밋, CSV는 로컬에만
+data/snapshots/*.csv
+
 # Python
 __pycache__/
 *.py[cod]
