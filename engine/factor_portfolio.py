@@ -938,7 +938,7 @@ def _bond_equity_corr(
         return 0.0
     mu_s = mean(spy_returns)
     mu_b = mean(bond_returns)
-    cov = sum((s - mu_s) * (b - mu_b) for s, b in zip(spy_returns, bond_returns)) / n
+    cov = sum((s - mu_s) * (b - mu_b) for s, b in zip(spy_returns, bond_returns, strict=True)) / n
     std_s = pstdev(spy_returns)
     std_b = pstdev(bond_returns)
     if std_s == 0 or std_b == 0:

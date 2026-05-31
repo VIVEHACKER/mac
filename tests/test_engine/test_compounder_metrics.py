@@ -66,12 +66,12 @@ def test_eps_growth_both_negative():
 
 
 from engine.compounder_metrics import (  # noqa: E402
-    operating_margin,
-    net_margin,
-    margin_trend,
-    roic,
-    fcf_margin,
     fcf_conversion,
+    fcf_margin,
+    margin_trend,
+    net_margin,
+    operating_margin,
+    roic,
 )
 
 
@@ -170,12 +170,12 @@ def test_margin_trend_unaffected_when_within_band():
 
 from engine.compounder_metrics import (  # noqa: E402
     debt_to_equity,
-    share_growth,
     market_cap,
+    pb,
     pe,
     pfcf,
     ps,
-    pb,
+    share_growth,
 )
 
 
