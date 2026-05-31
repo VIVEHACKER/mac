@@ -1759,7 +1759,11 @@ def _run_validate_model(args: argparse.Namespace) -> int:
             average_test_annualized_excess=suite.walk_forward.average_test_annualized_excess,
             worst_test_drawdown=suite.worst_test_drawdown,
             fee_stress_passed=suite.fee_stress_passed,
-            pit_audit_passed=bool(pit_members),
+            pit_audit_passed=(
+                bool(pit_members)
+                and not getattr(args, "skip_universe_audit", False)
+                and bool(getattr(args, "pit_universe", None))
+            ),
             full_sample_annualized_return=suite.full_sample.annualized_return,
             full_sample_max_drawdown=suite.full_sample.max_drawdown,
             stress_windows_tested=suite.tested_stress_windows,

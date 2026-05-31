@@ -1435,3 +1435,122 @@ def test_compounder_scan_uses_as_of_price_not_future_bar(tmp_path, capsys) -> No
         "Future bar close (999.0) leaked into compounder-scan output; "
         "bars[-1] used instead of the as-of-or-earlier close"
     )
+
+
+# ---------------------------------------------------------------------------
+# BUG E: validate-model --record-gate must record pit_audit_passed=False when
+#         --skip-universe-audit bypasses the PIT audit.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_model_record_gate_pit_audit_false_when_skipped(tmp_path, capsys) -> None:
+    """BUG E regression: pit_audit_passed must be False when --skip-universe-audit is set.
+
+    The bug: pit_audit_passed=bool(pit_members).  When a --pit-universe IS provided
+    (pit_members is non-empty) but --skip-universe-audit is also given, the audit is
+    bypassed yet the evidence still records pit_audit_passed=True.
+    """
+    import json
+
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry_path = tmp_path / "registry.jsonl"
+    catalog = MarketDataCatalog(catalog_db)
+    for symbol, daily_return in {
+        "AAA": 0.0010,
+        "BBB": 0.0002,
+        "SPY": 0.0003,
+    }.items():
+        catalog.put_bars(_long_bars(symbol, 10.0, daily_return))
+
+    # Seed a real PIT universe so pit_members is non-empty → triggers the bug.
+    catalog.put_universe_members(
+        [
+            UniverseMember(
+                universe="test-u",
+                symbol="AAA",
+                market="us",
+                start_date=date(2020, 1, 1),
+                end_date=None,
+            ),
+            UniverseMember(
+                universe="test-u",
+                symbol="BBB",
+                market="us",
+                start_date=date(2020, 1, 1),
+                end_date=None,
+            ),
+        ]
+    )
+
+    result = cli.main(
+        [
+            "validate-model",
+            "AAA,BBB",
+            "--start",
+            "2020-01-01",
+            "--end",
+            "2023-12-31",
+            "--benchmark",
+            "SPY",
+            "--no-fetch",
+            "--momentum-lookback",
+            "21",
+            "--reversal-lookback",
+            "5",
+            "--volatility-lookback",
+            "10",
+            "--risk-filter-lookback",
+            "20",
+            "--top-n",
+            "1",
+            "--rebalance-days",
+            "21",
+            "--weighting",
+            "equal",
+            "--train-years",
+            "1",
+            "--test-years",
+            "1",
+            "--step-years",
+            "1",
+            "--momentum-lookbacks",
+            "21",
+            "--top-ns",
+            "1",
+            "--risk-filter-lookbacks",
+            "0",
+            "--weighting-modes",
+            "equal",
+            "--rebalance-days-values",
+            "21",
+            "--fee-stress-bps",
+            "2",
+            "--min-walk-forward-windows",
+            "1",
+            "--min-positive-test-rate",
+            "0.5",
+            "--min-parameter-positive-rate",
+            "0.5",
+            "--record-gate",
+            "--strategy-id",
+            "test-skip-audit",
+            "--registry",
+            str(registry_path),
+            "--pit-universe",
+            "test-u",
+            "--skip-universe-audit",
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    assert result in {0, 2}
+
+    rows = [json.loads(line) for line in registry_path.read_text().splitlines() if line.strip()]
+    assert rows, "registry should have at least one row after --record-gate"
+    latest = rows[-1]
+    evidence_payload = latest["evidence"]
+    assert evidence_payload["pit_audit_passed"] is False, (
+        f"Expected pit_audit_passed=False when --skip-universe-audit is set, "
+        f"got {evidence_payload['pit_audit_passed']!r}"
+    )
