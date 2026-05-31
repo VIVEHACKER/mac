@@ -81,3 +81,24 @@ def test_format_dossier_markdown_renders_flags():
     md = format_dossier_markdown(d)
     assert "**Flags:**" in md
     assert any(flag in md for flag in ("high-debt", "margin-declining"))
+
+
+def test_dossier_carries_sector_and_financial_note():
+    q = _series(
+        "BNK", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    ranked = rank_compounders({"BNK": (q, 60.0)}, top_n=1)
+    d = build_dossier(ranked[0], sector="financials")
+    assert d.sector == "financials"
+    md = format_dossier_markdown(d)
+    assert "financials" in md
+    assert "FCF" in md  # the FCF-excluded note appears for financials
+
+
+def test_dossier_default_sector_unknown_no_note():
+    q = _series(
+        "XYZ", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    d = build_dossier(rank_compounders({"XYZ": (q, 60.0)}, top_n=1)[0])
+    assert d.sector == "unknown"
+    assert "FCF-based metrics excluded" not in format_dossier_markdown(d)

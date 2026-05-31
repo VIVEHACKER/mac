@@ -48,6 +48,7 @@ class Dossier:
     metrics: dict[str, float | None]
     flags: tuple[str, ...]
     rationale: str
+    sector: str = "unknown"
     alt_signals: dict[str, Any] = field(default_factory=dict)
 
 
@@ -68,7 +69,7 @@ def _rationale(candidate: CandidateScore) -> str:
     )
 
 
-def build_dossier(candidate: CandidateScore) -> Dossier:
+def build_dossier(candidate: CandidateScore, sector: str = "unknown") -> Dossier:
     best = candidate.scores[candidate.best_archetype]
     return Dossier(
         symbol=candidate.symbol,
@@ -77,6 +78,7 @@ def build_dossier(candidate: CandidateScore) -> Dossier:
         metrics=candidate.metrics,
         flags=best.flags,
         rationale=_rationale(candidate),
+        sector=sector,
     )
 
 
@@ -90,9 +92,14 @@ def _fmt(key: str, value: float | None) -> str:
 
 def format_dossier_markdown(d: Dossier) -> str:
     lines = [
-        f"### {d.symbol} — {d.archetype.replace('_', ' ')} ({d.score:.0f}/100)",
+        f"### {d.symbol} — {d.archetype.replace('_', ' ')} ({d.score:.0f}/100) [{d.sector}]",
         "",
         d.rationale,
+        *(
+            ["", "_FCF-based metrics excluded from scoring (not meaningful for financials)._"]
+            if d.sector == "financials"
+            else []
+        ),
         "",
         "| Metric | Value |",
         "|---|---:|",
