@@ -132,3 +132,54 @@ def test_resolve_from_universe_csv(tmp_path):
         encoding="utf-8",
     )
     assert resolve_tickers(_args(universe_csv=csv_path)) == ["AAA", "BBB"]
+
+
+def _facts_with(**tag_vals) -> dict:
+    """Build a companyfacts dict: tag -> {period_end: (val, unit)}."""
+    us_gaap = {}
+    for tag, (val, unit, end, filed) in tag_vals.items():
+        us_gaap[tag] = {"units": {unit: [{"form": "10-K", "end": end, "filed": filed, "val": val}]}}
+    return {"facts": {"us-gaap": us_gaap}}
+
+
+def test_concept_tags_include_gross_and_assets():
+    from scripts.sec_edgar_ingest import CONCEPT_TAGS
+
+    assert "gross_profit" in CONCEPT_TAGS
+    assert "cost_of_revenue" in CONCEPT_TAGS
+    assert "assets" in CONCEPT_TAGS
+    assert "operating_income" in CONCEPT_TAGS
+    assert "GrossProfit" in CONCEPT_TAGS["gross_profit"]
+    assert "Assets" in CONCEPT_TAGS["assets"]
+
+
+def test_records_from_facts_populates_gross_profit_and_assets():
+    from scripts.sec_edgar_ingest import records_from_facts
+
+    facts = _facts_with(
+        Revenues=(200.0, "USD", "2023-12-31", "2024-02-01"),
+        GrossProfit=(140.0, "USD", "2023-12-31", "2024-02-01"),
+        Assets=(400.0, "USD", "2023-12-31", "2024-02-01"),
+        OperatingIncomeLoss=(60.0, "USD", "2023-12-31", "2024-02-01"),
+    )
+    recs = records_from_facts("NVDA", facts)
+    assert len(recs) == 1
+    r = recs[0]
+    assert r.gross_profit == 140.0
+    assert r.total_assets == 400.0
+    assert r.operating_income == 60.0
+
+
+def test_records_from_facts_derives_gross_profit_from_cogs():
+    from scripts.sec_edgar_ingest import records_from_facts
+
+    facts = _facts_with(
+        Revenues=(200.0, "USD", "2023-12-31", "2024-02-01"),
+        CostOfRevenue=(130.0, "USD", "2023-12-31", "2024-02-01"),
+        Assets=(350.0, "USD", "2023-12-31", "2024-02-01"),
+    )
+    recs = records_from_facts("T", facts)
+    assert len(recs) == 1
+    # gross_profit derived = revenue - cogs = 70; cost_of_revenue stored raw
+    assert recs[0].gross_profit == 70.0
+    assert recs[0].cost_of_revenue == 130.0

@@ -40,6 +40,8 @@ _COLS = [
     "total_debt",
     "shares_out",
     "eps",
+    "gross_profit",
+    "cost_of_revenue",
     "source",
 ]
 
@@ -64,6 +66,8 @@ def _to_record(row: tuple) -> FundamentalRecord:
         total_debt=d["total_debt"],
         shares_out=d["shares_out"],
         eps=d["eps"],
+        gross_profit=d["gross_profit"],
+        cost_of_revenue=d["cost_of_revenue"],
         source=d["source"] or "",
     )
 
@@ -71,6 +75,13 @@ def _to_record(row: tuple) -> FundamentalRecord:
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else "fundamentals-current"
     db_path = ROOT / DEFAULT_CATALOG_PATH
+    # Migrate first (read-write): ensures gross_profit/cost_of_revenue columns exist before the
+    # read-only SELECT below. Pass the SAME absolute db_path the SELECT uses (ROOT-relative) so
+    # invoking the script from outside the repo root migrates the catalog actually being read,
+    # not a cwd-relative one.
+    from data.catalog import MarketDataCatalog
+
+    MarketDataCatalog(db_path=db_path).initialize()
     con = duckdb.connect(str(db_path), read_only=True)
     rows = con.execute(f"SELECT {', '.join(_COLS)} FROM fundamentals_q").fetchall()
     con.close()

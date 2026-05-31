@@ -160,3 +160,117 @@ def test_none_value_round_trips(tmp_path) -> None:
     loaded = read_fundamentals_snapshot(tmp_path / "snap.csv", verify=True)
     assert loaded[0].net_income is None
     assert loaded[0].total_equity == 100.0
+
+
+def test_snapshot_round_trips_gross_profit_fields(tmp_path) -> None:
+    """gross_profit / cost_of_revenue must survive write -> read -> verify."""
+    rec = FundamentalRecord(
+        symbol="NVDA",
+        market="us",
+        period_end=date(2023, 12, 31),
+        asof_ts=datetime(2024, 2, 1),
+        revenue=200.0,
+        gross_profit=140.0,
+        cost_of_revenue=60.0,
+        total_assets=400.0,
+        source="sec_edgar:companyfacts",
+    )
+    write_fundamentals_snapshot([rec], tmp_path, name="gp")
+    loaded = read_fundamentals_snapshot(tmp_path / "gp.csv", verify=True)
+    assert len(loaded) == 1
+    assert loaded[0].gross_profit == 140.0
+    assert loaded[0].cost_of_revenue == 60.0
+    assert loaded[0].total_assets == 400.0
+
+
+def test_snapshot_columns_include_gross_fields() -> None:
+    from data.fundamentals_snapshot import SNAPSHOT_COLUMNS
+
+    assert "gross_profit" in SNAPSHOT_COLUMNS
+    assert "cost_of_revenue" in SNAPSHOT_COLUMNS
+
+
+def test_old_schema_snapshot_still_verifies(tmp_path) -> None:
+    """A snapshot written before gross_profit/cost_of_revenue existed (14-col manifest)
+    must still verify — hash must be computed against the manifest's recorded columns."""
+    import json as _json
+
+    from data.fundamentals_snapshot import snapshot_sha256
+
+    old_columns = (
+        "symbol",
+        "market",
+        "period_end",
+        "asof_ts",
+        "revenue",
+        "operating_income",
+        "net_income",
+        "free_cash_flow",
+        "total_assets",
+        "total_equity",
+        "total_debt",
+        "shares_out",
+        "eps",
+        "source",
+    )
+    rec = FundamentalRecord(
+        symbol="OLD",
+        market="us",
+        period_end=date(2020, 12, 31),
+        asof_ts=datetime(2021, 2, 1),
+        revenue=100.0,
+        net_income=10.0,
+        source="sec_edgar:companyfacts",
+    )
+    # hash + CSV body written with the OLD 14-column schema
+    old_hash = snapshot_sha256([rec], columns=old_columns)
+    body = ",".join(
+        rec.symbol
+        if c == "symbol"
+        else rec.market
+        if c == "market"
+        else rec.period_end.isoformat()
+        if c == "period_end"
+        else rec.asof_ts.isoformat()
+        if c == "asof_ts"
+        else rec.source
+        if c == "source"
+        else ("" if getattr(rec, c) is None else repr(float(getattr(rec, c))))
+        for c in old_columns
+    )
+    (tmp_path / "old.csv").write_text(",".join(old_columns) + "\n" + body + "\n", encoding="utf-8")
+    (tmp_path / "old.manifest.json").write_text(
+        _json.dumps({"sha256": old_hash, "columns": list(old_columns)}), encoding="utf-8"
+    )
+    loaded = read_fundamentals_snapshot(tmp_path / "old.csv", verify=True)
+    assert len(loaded) == 1
+    assert loaded[0].gross_profit is None
+
+
+def test_old_schema_ignores_unverified_extra_columns(tmp_path) -> None:
+    """An old-schema manifest must NOT let an unverified gross_profit column leak through."""
+    import json as _json
+
+    from data.fundamentals_snapshot import snapshot_sha256
+
+    old_columns = (
+        "symbol", "market", "period_end", "asof_ts", "revenue", "operating_income",
+        "net_income", "free_cash_flow", "total_assets", "total_equity", "total_debt",
+        "shares_out", "eps", "source",
+    )
+    rec = FundamentalRecord(
+        symbol="X", market="us",
+        period_end=date(2020, 12, 31), asof_ts=datetime(2021, 2, 1),
+        revenue=100.0, source="sec_edgar:companyfacts",
+    )
+    old_hash = snapshot_sha256([rec], columns=old_columns)
+    # CSV carries an EXTRA, unverified gross_profit column appended by a tamperer.
+    header = ",".join(old_columns) + ",gross_profit"
+    body = "X,us,2020-12-31,2021-02-01,100.0,,,,,,,,,sec_edgar:companyfacts,999.0"
+    (tmp_path / "t.csv").write_text(header + "\n" + body + "\n", encoding="utf-8")
+    (tmp_path / "t.manifest.json").write_text(
+        _json.dumps({"sha256": old_hash, "columns": list(old_columns)}), encoding="utf-8"
+    )
+    loaded = read_fundamentals_snapshot(tmp_path / "t.csv", verify=True)
+    # hash passes (extra col not in manifest cols) but the unverified value must be dropped
+    assert loaded[0].gross_profit is None

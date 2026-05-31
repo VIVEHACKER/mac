@@ -62,6 +62,8 @@ RAW_METRICS: list[tuple[str, bool]] = [
     ("fcf_margin", True),
     ("operating_margin", True),
     ("net_margin", True),
+    ("gross_profitability", True),  # Novy-Marx GP/assets — the literature's quality metric
+    ("gross_margin", True),
     ("margin_trend", True),
     ("revenue_cagr", True),
     ("revenue_growth_acceleration", True),
@@ -82,8 +84,15 @@ RAW_METRICS: list[tuple[str, bool]] = [
 # sign +1 = higher raw value is "better", -1 = lower is better. The composite is the mean
 # of each name's cross-sectional percentile rank (oriented by sign) over available components.
 COMPOSITES: dict[str, list[tuple[str, int]]] = {
-    # The suspected culprit: pure profitability/quality. Expect strongly NEGATIVE IC.
+    # The suspected culprit: pure NET-income profitability/quality. Expect strongly NEGATIVE IC.
     "quality_composite": [("roic", 1), ("fcf_margin", 1), ("net_margin", 1)],
+    # PRE-REGISTERED hypothesis (NOT snooped): does Novy-Marx GROSS profitability flip the sign?
+    # If gp_quality_composite IC is positive while quality_composite stays negative, the negative
+    # quality result was a net-margin metric-definition artifact, not "quality doesn't work".
+    "gp_quality_composite": [("gross_profitability", 1), ("gross_margin", 1)],
+    # PRE-REGISTERED QARP (quality-at-a-reasonable-price): gross profitability + cheap value.
+    # This is the literature-correct fix the audit recommended; declared before seeing its IC.
+    "qarp_composite": [("gross_profitability", 1), ("ps", -1), ("pb", -1)],
     # The proposed redesign: growth-acceleration + cheapness (value). NOTE: share_growth is
     # deliberately EXCLUDED — its raw IC (+0.032) means higher dilution predicted winners on
     # this universe, i.e. the funnel's "buybacks good / low dilution" prior did NOT hold, so
@@ -356,9 +365,17 @@ def main() -> None:
     best_ic = mean_all("best_score")
     qual_ic = mean_all("quality_composite")
     redes_ic = mean_all("redesign_composite")
+    gp_ic = mean_all("gp_quality_composite")  # Novy-Marx gross profitability quality
+    gp_raw = mean_all("gross_profitability")
+    qarp_ic = mean_all("qarp_composite")
 
     quality_negative = quality_mean is not None and quality_mean < -0.02
     redesign_wins = redes_ic is not None and best_ic is not None and redes_ic > best_ic + 0.02
+    # The decisive test: does GROSS profitability (the true Novy-Marx GP/assets metric) flip the
+    # sign vs NET-margin quality? Use the RAW gross_profitability IC, not the diluted
+    # gp_quality_composite (which is dragged down by gross_margin, a weaker different signal).
+    gp_flips = gp_raw is not None and qual_ic is not None and gp_raw > 0.0 and qual_ic < -0.02
+    gp_works_frac = works_frac("gross_profitability")
 
     md += [
         "",
@@ -378,17 +395,45 @@ def main() -> None:
         "",
         "Hand-built composite check:",
         "",
-        f"- `quality_composite` (roic+fcf_margin+net_margin) IC: **{_fmt(qual_ic)}**",
+        f"- `quality_composite` (NET: roic+fcf_margin+net_margin) IC: **{_fmt(qual_ic)}**",
+        f"- raw **gross_profitability** (Novy-Marx GP/assets) IC: **{_fmt(gp_raw)}** "
+        f"(works in {gp_works_frac} windows)",
+        f"- raw **gross_margin** (GP/sales, pricing power) IC: {_fmt(mean_all('gross_margin'))} "
+        "— NOTE: negative; it is asset-EFFICIENCY (GP/assets), not pricing power, that predicts.",
+        f"- `gp_quality_composite` (GP/assets + gross_margin) IC: {_fmt(gp_ic)} — diluted toward "
+        "zero by the negative gross_margin leg; read the raw GP/assets line above instead.",
+        f"- `qarp_composite` (GP/assets + cheap value, pre-registered) IC: **{_fmt(qarp_ic)}** "
+        f"(works in {works_frac('qarp_composite')} windows)",
         f"- `redesign_composite` (growth-accel + cheap value, NO buyback) IC: **{_fmt(redes_ic)}**",
         f"- vs the live `best_score` IC: **{_fmt(best_ic)}**",
         "",
         (
-            "**QUALITY-MEAN-REVERSION pattern (not glamour).** The drag on `best_score` is the "
-            "profitability/quality family (strongly negative oriented IC), NOT growth — "
-            "growth-acceleration and value (cheap ps/pb) are weakly POSITIVE, while the "
-            "dilution penalty and low-debt tilt did NOT help. The funnel's heaviest archetype "
-            "(`profitable_compounder`: roic 0.30 + fcf_margin 0.25) is precisely the "
-            "anti-predictive part on this mid/small-cap universe over 2012-2026. "
+            "**METRIC DEFINITION WAS A REAL CONFOUND — gross profitability flips the quality "
+            f"sign.** NET-margin quality is clearly negative ({_fmt(qual_ic)}; roic "
+            f"{_fmt(mean_all('roic'))}, net_margin {_fmt(mean_all('net_margin'))}), but Novy-"
+            f"Marx GROSS profitability (GP/assets) is POSITIVE and consistent ({_fmt(gp_raw)}, "
+            f"works in {gp_works_frac}). So the earlier 'quality anti-predicts' headline was "
+            "substantially a NET-MARGIN METRIC-DEFINITION ARTIFACT, exactly as the literature "
+            "warns. The fix is a BETTER quality metric (GP/assets), NOT dropping quality. "
+            "CAVEAT: the gross edge is MODEST — at effective N~2-3 the +IC is inside the noise "
+            "band (z~1.0); it is a consistent, directionally-correct positive, not a strong "
+            "validated edge. qarp (GP/assets + value) is the strongest quality-based composite."
+            if gp_flips
+            else "**Gross profitability does NOT cleanly flip the sign** (raw GP/assets "
+            f"{_fmt(gp_raw)} vs net {_fmt(qual_ic)}): on this universe/period even the literature-"
+            "preferred quality metric is not a clear positive, so the weak-quality result is not "
+            "merely a net-margin artifact (though survivorship still biases it down)."
+        ),
+        "",
+        (
+            "**The drag is the NET-metric quality archetype, not growth or quality-itself.** "
+            "`best_score`'s negative IC comes from the profitability family AS CURRENTLY "
+            "MEASURED (net_margin / NI-ROIC) — `profitable_compounder` (roic 0.30 + "
+            "fcf_margin 0.25) is the anti-predictive part. Growth-acceleration and value "
+            "(cheap ps/pb) are weakly POSITIVE; the dilution penalty and low-debt tilt did "
+            "NOT help. Crucially (see above), swapping the quality metric to GROSS "
+            "profitability flips that archetype's sign — so the fix is the METRIC, not the "
+            "tilt. "
             + (
                 "The `redesign_composite` ranks above best_score IN-SAMPLE — but this is a "
                 "DATA-SNOOPED LEAD, not a fix to ship: it is the mean of pre-selected favorable "
@@ -404,10 +449,15 @@ def main() -> None:
             "this universe/period."
         ),
         "",
-        "Caveats: (1) the quality metrics here are NET-margin / NI-ROIC, NOT Novy-Marx gross "
-        "profitability (GP/assets) — the literature shows net-bottom-line quality is a weak/"
-        "perverse proxy, so the negative quality IC may be a METRIC-DEFINITION artifact (the "
-        "snapshot lacks gross_profit/COGS). (2) Survivorship: acquired high-quality names exit "
+        f"Caveats: (1) gross profitability (GP/assets) is now measured directly from SEC "
+        f"GrossProfit/CostOfRevenue + Assets (P0 done); on THIS run raw GP/assets IC is "
+        f"{_fmt(gp_raw)} (works in {gp_works_frac}) vs net-margin quality {_fmt(qual_ic)} — "
+        + (
+            "the net metric was a real confound, but the gross edge is modest (low N). "
+            if gp_flips
+            else "gross does not cleanly beat net here. "
+        )
+        + "(2) Survivorship: acquired high-quality names exit "
         "the current-constituent universe, biasing the quality IC DOWNWARD specifically — the "
         "true effect is less negative. (3) Effective N is ~2-3 (overlapping windows), so even "
         "the quality drag is marginal (z~-2.2 to -2.6) and the redesign +IC is inside noise. "

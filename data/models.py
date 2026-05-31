@@ -56,6 +56,8 @@ class FundamentalRecord:
     total_debt: float | None = None
     shares_out: float | None = None
     eps: float | None = None
+    gross_profit: float | None = None
+    cost_of_revenue: float | None = None
     source: str = ""
 
 

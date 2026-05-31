@@ -93,6 +93,15 @@ CONCEPT_TAGS: dict[str, list[str]] = {
         "RevenueFromContractWithCustomerIncludingAssessedTax",
         "SalesRevenueNet",
     ],
+    "gross_profit": ["GrossProfit"],
+    # AGGREGATE cost tags only. CostOfGoodsSold / CostOfServices are PARTIAL components that
+    # some filers report separately without an aggregate; using one alone would understate COGS
+    # and overstate the derived gross profit. extract_concept keeps one value per period (not a
+    # sum), so we deliberately exclude components — a filer reporting only split components gets
+    # gross_profit=None (no false signal) rather than a wrong derived value.
+    "cost_of_revenue": ["CostOfRevenue", "CostOfGoodsAndServicesSold"],
+    "assets": ["Assets"],
+    "operating_income": ["OperatingIncomeLoss"],
     "net_income": ["NetIncomeLoss"],
     "equity": [
         "StockholdersEquity",
@@ -114,6 +123,10 @@ CONCEPT_TAGS: dict[str, list[str]] = {
 
 UNIT_FOR: dict[str, str] = {
     "revenue": "USD",
+    "gross_profit": "USD",
+    "cost_of_revenue": "USD",
+    "assets": "USD",
+    "operating_income": "USD",
     "net_income": "USD",
     "equity": "USD",
     "ocf": "USD",
@@ -185,7 +198,11 @@ def extract_concept(facts: dict, tag_choices: list[str], unit: str) -> dict[str,
 def build_records(ticker: str, cik: int) -> list[FundamentalRecord]:
     url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
     facts = fetch_json(url)
+    return records_from_facts(ticker, facts)
 
+
+def records_from_facts(ticker: str, facts: dict) -> list[FundamentalRecord]:
+    """Pure transform of a companyfacts payload to PIT records (no network)."""
     extracted: dict[str, dict[str, tuple[float, str]]] = {
         key: extract_concept(facts, tags, UNIT_FOR[key]) for key, tags in CONCEPT_TAGS.items()
     }
@@ -202,6 +219,10 @@ def build_records(ticker: str, cik: int) -> list[FundamentalRecord]:
             continue
 
         rev = extracted["revenue"].get(period_end_str)
+        gp = extracted["gross_profit"].get(period_end_str)
+        cogs = extracted["cost_of_revenue"].get(period_end_str)
+        assets = extracted["assets"].get(period_end_str)
+        opinc = extracted["operating_income"].get(period_end_str)
         ni = extracted["net_income"].get(period_end_str)
         eq = extracted["equity"].get(period_end_str)
         ocf = extracted["ocf"].get(period_end_str)
@@ -215,7 +236,11 @@ def build_records(ticker: str, cik: int) -> list[FundamentalRecord]:
         if rev is None and ni is None and eq is None:
             continue
 
-        filed_candidates = [x[1] for x in (rev, ni, eq, ocf, capex, shares, eps) if x is not None]
+        filed_candidates = [
+            x[1]
+            for x in (rev, gp, cogs, assets, opinc, ni, eq, ocf, capex, shares, eps)
+            if x is not None
+        ]
         if not filed_candidates:
             continue
         filed_str = max(filed_candidates)
@@ -237,6 +262,13 @@ def build_records(ticker: str, cik: int) -> list[FundamentalRecord]:
         elif dst is not None:
             total_debt = dst[0]
 
+        # Direct GrossProfit wins; else derive from revenue - cost_of_revenue.
+        gross_profit = None
+        if gp is not None:
+            gross_profit = gp[0]
+        elif rev is not None and cogs is not None:
+            gross_profit = rev[0] - cogs[0]
+
         records.append(
             FundamentalRecord(
                 symbol=ticker,
@@ -244,12 +276,16 @@ def build_records(ticker: str, cik: int) -> list[FundamentalRecord]:
                 period_end=period_end,
                 asof_ts=asof,
                 revenue=rev[0] if rev else None,
+                operating_income=opinc[0] if opinc else None,
                 net_income=ni[0] if ni else None,
                 free_cash_flow=fcf,
+                total_assets=assets[0] if assets else None,
                 total_equity=eq[0] if eq else None,
                 total_debt=total_debt,
                 shares_out=shares[0] if shares else None,
                 eps=eps[0] if eps else None,
+                gross_profit=gross_profit,
+                cost_of_revenue=cogs[0] if cogs else None,
                 source="sec_edgar:companyfacts",
             )
         )

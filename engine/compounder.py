@@ -66,6 +66,8 @@ def compute_metrics(records: Sequence[FundamentalRecord], price: float) -> dict[
         "eps_growth": cm.eps_growth(records, 3),
         "operating_margin": cm.operating_margin(latest),
         "net_margin": cm.net_margin(latest),
+        "gross_margin": cm.gross_margin(latest),
+        "gross_profitability": cm.gross_profitability(latest),
         "margin_trend": cm.margin_trend(records),
         "roic": cm.roic(latest),
         "fcf_margin": cm.fcf_margin(latest),

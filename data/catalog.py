@@ -119,10 +119,16 @@ class MarketDataCatalog:
                     total_debt DOUBLE,
                     shares_out DOUBLE,
                     eps DOUBLE,
+                    gross_profit DOUBLE,
+                    cost_of_revenue DOUBLE,
                     source TEXT NOT NULL
                 )
                 """
             )
+            # Migration: add gross-profit columns to pre-existing fundamentals_q tables.
+            # ADD COLUMN IF NOT EXISTS is a no-op when the freshly-created table already has them.
+            for _col in ("gross_profit", "cost_of_revenue"):
+                con.execute(f"ALTER TABLE fundamentals_q ADD COLUMN IF NOT EXISTS {_col} DOUBLE")
             con.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS fundamentals_key
@@ -629,6 +635,8 @@ class MarketDataCatalog:
                 item.total_debt,
                 item.shares_out,
                 item.eps,
+                item.gross_profit,
+                item.cost_of_revenue,
                 item.source,
             )
             for item in records
@@ -646,9 +654,9 @@ class MarketDataCatalog:
                 INSERT INTO fundamentals_q (
                     symbol, market, period_end, asof_ts, revenue, operating_income,
                     net_income, free_cash_flow, total_assets, total_equity, total_debt,
-                    shares_out, eps, source
+                    shares_out, eps, gross_profit, cost_of_revenue, source
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -666,7 +674,7 @@ class MarketDataCatalog:
             """
             SELECT symbol, market, period_end, asof_ts, revenue, operating_income,
                    net_income, free_cash_flow, total_assets, total_equity, total_debt,
-                   shares_out, eps, source
+                   shares_out, eps, gross_profit, cost_of_revenue, source
             FROM fundamentals_q
             WHERE symbol = ? AND market = ?
             """
@@ -696,7 +704,9 @@ class MarketDataCatalog:
                 total_debt=row[10],
                 shares_out=row[11],
                 eps=row[12],
-                source=row[13],
+                gross_profit=row[13],
+                cost_of_revenue=row[14],
+                source=row[15],
             )
             for row in rows
         ]

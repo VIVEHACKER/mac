@@ -203,3 +203,39 @@ def test_valuation_ratios():
     assert ps(r, price=80.0) == 4.0  # 800 / 200
     assert pb(r, price=80.0) == 8.0  # 800 / 100
     assert pe(_rec(2023, eps=-1.0), price=80.0) is None
+
+
+from engine.compounder_metrics import (  # noqa: E402
+    gross_margin,
+    gross_profitability,
+)
+
+
+def test_gross_profitability_direct():
+    # Novy-Marx: gross_profit / total_assets. Direct GrossProfit takes precedence.
+    r = _rec(2023, revenue=200.0, gross_profit=80.0, total_assets=400.0)
+    assert gross_profitability(r) == pytest.approx(0.20)  # 80 / 400
+    assert gross_margin(r) == pytest.approx(0.40)  # 80 / 200
+
+
+def test_gross_profit_falls_back_to_revenue_minus_cogs():
+    # When GrossProfit is absent, derive it from revenue - cost_of_revenue.
+    r = _rec(2023, revenue=200.0, cost_of_revenue=130.0, total_assets=350.0)
+    assert gross_profitability(r) == pytest.approx(70.0 / 350.0)  # (200-130)/350
+    assert gross_margin(r) == pytest.approx(70.0 / 200.0)
+
+
+def test_gross_profitability_none_paths():
+    # No gross_profit and no cost_of_revenue -> None.
+    assert gross_profitability(_rec(2023, revenue=200.0, total_assets=400.0)) is None
+    # gross_profit present but assets missing/non-positive -> None.
+    assert gross_profitability(_rec(2023, gross_profit=80.0)) is None
+    assert gross_profitability(_rec(2023, gross_profit=80.0, total_assets=0.0)) is None
+    # gross_margin needs positive revenue.
+    assert gross_margin(_rec(2023, gross_profit=80.0, revenue=0.0)) is None
+
+
+def test_direct_gross_profit_preferred_over_derived():
+    # If both present, the direct GrossProfit value wins (issuers report it net of nuances).
+    r = _rec(2023, revenue=200.0, gross_profit=90.0, cost_of_revenue=130.0, total_assets=400.0)
+    assert gross_profitability(r) == pytest.approx(90.0 / 400.0)

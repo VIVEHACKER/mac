@@ -29,6 +29,8 @@ def _fundamental_from_row(row: dict[str, str]) -> FundamentalRecord:
         total_debt=_optional_float(row, "total_debt"),
         shares_out=_optional_float(row, "shares_out"),
         eps=_optional_float(row, "eps"),
+        gross_profit=_optional_float(row, "gross_profit"),
+        cost_of_revenue=_optional_float(row, "cost_of_revenue"),
         source=row.get("source") or "csv:fundamentals",
     )
 

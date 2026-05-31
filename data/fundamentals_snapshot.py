@@ -36,6 +36,8 @@ SNAPSHOT_COLUMNS = (
     "total_debt",
     "shares_out",
     "eps",
+    "gross_profit",
+    "cost_of_revenue",
     "source",
 )
 
@@ -49,12 +51,14 @@ _NUMERIC = (
     "total_debt",
     "shares_out",
     "eps",
+    "gross_profit",
+    "cost_of_revenue",
 )
 
-# The content hash excludes `source`: it is provenance metadata, not financial
-# data, and `data.fundamentals_csv` defaults empty source to "csv:fundamentals"
-# on load, which would otherwise break round-trip verification.
-_HASH_COLUMNS = tuple(c for c in SNAPSHOT_COLUMNS if c != "source")
+# The content hash excludes `source` (provenance, not financial data): `data.fundamentals_csv`
+# defaults empty source to "csv:fundamentals" on load, which would break round-trip
+# verification. See `_hash_columns()` — the hash basis is derived per-snapshot from its column
+# set so adding an optional column never invalidates older pins.
 
 
 @dataclass(frozen=True)
@@ -97,17 +101,30 @@ def _csv_lines(records: Sequence[FundamentalRecord]) -> list[str]:
     return sorted(",".join(_cell(rec, col) for col in SNAPSHOT_COLUMNS) for rec in records)
 
 
-def _hash_lines(records: Sequence[FundamentalRecord]) -> list[str]:
-    """Sorted rows excluding source — the canonical basis for the content hash."""
-    return sorted(",".join(_cell(rec, col) for col in _HASH_COLUMNS) for rec in records)
+def _hash_columns(columns: Sequence[str]) -> tuple[str, ...]:
+    """The hash basis = the given column set minus the provenance-only ``source`` field."""
+    return tuple(c for c in columns if c != "source")
 
 
-def snapshot_sha256(records: Sequence[FundamentalRecord]) -> str:
-    """Order-independent content hash of the records (excludes the source field)."""
+def _hash_lines(records: Sequence[FundamentalRecord], hcols: Sequence[str]) -> list[str]:
+    """Sorted rows over ``hcols`` — the canonical basis for the content hash."""
+    return sorted(",".join(_cell(rec, col) for col in hcols) for rec in records)
+
+
+def snapshot_sha256(
+    records: Sequence[FundamentalRecord], columns: Sequence[str] = SNAPSHOT_COLUMNS
+) -> str:
+    """Order-independent content hash of the records over ``columns`` (excludes ``source``).
+
+    The column set is parameterized so a snapshot written under an OLD schema (fewer columns)
+    still verifies against its own manifest: pass the manifest's recorded ``columns``. Adding a
+    new optional column to ``SNAPSHOT_COLUMNS`` therefore does NOT break old snapshots.
+    """
+    hcols = _hash_columns(columns)
     digest = hashlib.sha256()
-    digest.update(",".join(_HASH_COLUMNS).encode("utf-8"))
+    digest.update(",".join(hcols).encode("utf-8"))
     digest.update(b"\n")
-    for line in _hash_lines(records):
+    for line in _hash_lines(records, hcols):
         digest.update(line.encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
@@ -153,11 +170,22 @@ def read_fundamentals_snapshot(csv_path: Path, verify: bool = True) -> list[Fund
                 f"missing manifest for {csv_path.name}; cannot verify snapshot integrity "
                 f"(pass verify=False to load unverified)"
             )
-        expected = json.loads(manifest_path.read_text(encoding="utf-8"))["sha256"]
-        actual = snapshot_sha256(records)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected = manifest["sha256"]
+        # Hash against the manifest's recorded column set so snapshots written under an older
+        # schema still verify (a newly-added optional column must not invalidate old pins).
+        cols = tuple(manifest.get("columns") or SNAPSHOT_COLUMNS)
+        actual = snapshot_sha256(records, columns=cols)
         if actual != expected:
             raise ValueError(
                 f"snapshot hash mismatch for {csv_path.name}: "
                 f"expected {expected[:12]}…, got {actual[:12]}… (tampered or stale)"
             )
+        # Null out any numeric field NOT covered by the manifest's columns: the hash only
+        # verified `cols`, so an extra CSV column (e.g. gross_profit added to an old-schema
+        # snapshot) is UNVERIFIED and must not leak into downstream metrics.
+        unverified = [c for c in _NUMERIC if c not in cols]
+        if unverified:
+            blanks = dict.fromkeys(unverified, None)
+            records = [FundamentalRecord(**{**asdict(r), **blanks}) for r in records]
     return records

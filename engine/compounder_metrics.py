@@ -96,6 +96,35 @@ def net_margin(rec: FundamentalRecord) -> float | None:
     return _ratio(rec.net_income, rec.revenue, den_positive=True)
 
 
+def _gross_profit(rec: FundamentalRecord) -> float | None:
+    """Direct reported GrossProfit if present, else revenue - cost_of_revenue.
+
+    Direct wins because issuers report GrossProfit net of allocation nuances that a
+    naive revenue - COGS subtraction would miss.
+    """
+    if rec.gross_profit is not None:
+        return rec.gross_profit
+    if rec.revenue is not None and rec.cost_of_revenue is not None:
+        return rec.revenue - rec.cost_of_revenue
+    return None
+
+
+def gross_profitability(rec: FundamentalRecord) -> float | None:
+    """Novy-Marx (2013) gross profitability = gross profit / total assets.
+
+    The literature's strongest quality predictor: it is "cleaner" than net-income
+    metrics because below-the-line items (taxes, one-offs, interest) that contaminate
+    net margin / ROIC are excluded, and it scales by assets (not equity), avoiding
+    leverage distortion.
+    """
+    return _ratio(_gross_profit(rec), rec.total_assets, den_positive=True)
+
+
+def gross_margin(rec: FundamentalRecord) -> float | None:
+    """Gross profit / revenue (the income-statement view of pricing power)."""
+    return _ratio(_gross_profit(rec), rec.revenue, den_positive=True)
+
+
 def _ols_slope(ys: list[float]) -> float:
     n = len(ys)
     xs = list(range(n))

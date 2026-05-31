@@ -101,19 +101,21 @@ Before adding a name to the concentrated book, the dossier is the START, not the
 ## Forward-return validation (P5 — done) → full record: `docs/COMPOUNDER_VALIDATION.md`
 
 PIT replay at 8 as-of dates (2012–2019) × horizons {3y,5y,7y}, scored by Spearman rank IC and
-quintile spread, then a 5-lens adversarial audit. **Bottom line: the funnel has no *validated*
-forward edge** — `best_score` mean IC is −0.031 (negative at every horizon; top-30 watchlist
-underperformed the universe). The drag is the *profitability/quality* family (quality_composite
-IC −0.079), not growth. **BUT** the audit showed this is confounded: the metric is *net*-margin/
-NI-ROIC (not Novy-Marx gross profitability), survivorship biases quality IC downward (acquired
-compounders exit the universe), and effective N≈2–3 makes it marginal. A growth-accel + value
-(cheap) `redesign_composite` scores +0.070 **in-sample only** (data-snooped, inside the noise
-band — NOT a fix to ship). Note: the value factor (cheap ps/pb) is the strongest positive
-signal, and the funnel's buyback/low-dilution penalty did NOT help here.
+quintile spread, then a 5-lens adversarial audit and a P0 gross-profitability follow-up.
+**Bottom line: the funnel has no *validated* forward edge** — `best_score` mean IC ≈ −0.034
+(negative at every horizon; top-30 watchlist underperformed the universe).
 
-**Operating consequence:** keep the funnel as a screen; do **not** change `_WEIGHTS`. The path
-to a real edge (add gross profitability, pre-register a QARP composite, validate strictly OOS,
-reconstruct PIT membership) is the action plan in `docs/COMPOUNDER_VALIDATION.md`.
+**P0 update (the key finding):** the drag was the quality family AS MEASURED — net_margin
+(−0.087), NI-ROIC (−0.061) — but **Novy-Marx GROSS profitability (GP/assets) is POSITIVE and
+consistent (≈+0.04, ~21/23 windows)**, and a QARP composite (GP/assets + cheap value) is ≈+0.07.
+So "quality anti-predicts" was substantially a **net-margin metric-definition artifact**: the
+fix is to re-measure quality (net→gross), NOT to drop the quality tilt. The gross edge is still
+modest (z≈1.0 at N≈2–3) → promising, not yet validated.
+
+**Operating consequence:** keep the funnel as a screen; do **not** change `_WEIGHTS` yet. The
+path to a real edge (re-tool `profitable_compounder` to gross profitability, build a QARP
+composite, validate strictly OOS, reconstruct PIT membership) is the action plan in
+`docs/COMPOUNDER_VALIDATION.md`.
 
 Re-run (regenerate the snapshot first, then):
 ```bash
