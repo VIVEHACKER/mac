@@ -28,6 +28,9 @@
 | [docs/DERIVATIVES_DATA.md](docs/DERIVATIVES_DATA.md) | 파생/마이크로구조 (Crypto funding+OI / CBOE VIX·SKEW·Put-Call / Deribit / 옵션 체인) |
 | [docs/VALUATION.md](docs/VALUATION.md) | **적정가·고저평가·진입가** (DCF / Multiples / RIM / 크립토 NVT-MVRV / MoS ladder) |
 | [docs/LIVE_OPERATIONS.md](docs/LIVE_OPERATIONS.md) | 실자금 자동운용 전환을 위한 live gate, halt, model promotion, dry-run 운영 런북 |
+| [docs/DEPLOYMENT_READINESS.md](docs/DEPLOYMENT_READINESS.md) | **IDEAL 라인(aqr_top7_cap20_trail10) 배포 준비도** — 통계 유의성(PSR/DSR/부트스트랩), 재현성, 운영자 게이트 |
+| [docs/COMPOUNDER_OPERATIONS.md](docs/COMPOUNDER_OPERATIONS.md) | **컴파운더(텐베거) 워치리스트 운영 런북** — 월간 절차, 도시에 읽는 법, 확신 체크리스트, 한계 |
+| [docs/superpowers/](docs/superpowers/) | brainstorm→spec→plan 산출물 (통계엄밀성·컴파운더 P1/P2/P3 설계·구현 계획) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 9단계 구현 로드맵 + 검증 기준 |
 | [setup/install.sh](setup/install.sh) | Mac 초기 셋업 자동화 |
 | [CLAUDE.md](CLAUDE.md) | 다음 Claude Code 세션이 즉시 컨텍스트를 잡기 위한 핸드오프 |
@@ -127,6 +130,22 @@ uv run trader vix-calc --source yahoo --underlying SPY --as-of 2026-05-07 --stri
 # 페이퍼 주문 시뮬레이션 + kill switch
 uv run trader paper MSFT --side buy --qty 2 --price 420 --cash 10000
 uv run trader risk-check --start-equity 10000 --current-equity 9950 --gross-exposure 0.8
+
+# --- 통계 유의성 검증 (PSR/Deflated Sharpe/블록 부트스트랩) ---
+# 전략 일별 수익률 시리즈 추출 → 유의성 배터리. engine/significance.py + scripts/significance_test.py
+uv run trader factor-portfolio ALL --pit-universe SP100_PIT_2008 ... --returns-output out/variantN-returns.csv
+# 결과·해석: out/significance-report.md, docs/DEPLOYMENT_READINESS.md (IDEAL 라인 배포 판정)
+
+# --- 컴파운더(텐베거) 라인: 의사결정 지원 funnel (3 아키타입, 섹터 인지) ---
+uv run python scripts/snapshot_fundamentals.py fundamentals-$(date +%F)          # 펀더멘털 핀(재현성)
+uv run python scripts/fetch_index_constituents.py                                 # S&P400+600 구성종목(→universe CSV)
+uv run python scripts/fetch_sectors.py --universe-csv data/universes/sp400-600-current.csv
+uv run python scripts/fetch_latest_closes.py --universe-csv data/universes/sp400-600-current.csv
+uv run trader compounder-scan ALL --universe-csv data/universes/sp400-600-current.csv \
+  --snapshot data/snapshots/fundamentals-$(date +%F).csv \
+  --sectors-csv data/sectors/sp400-600-current-sectors.csv --top-n 30 --no-fetch \
+  --output out/compounder-scan.md
+# 운영 절차·한계: docs/COMPOUNDER_OPERATIONS.md
 
 # 실자금 전환 게이트: 정책/승격/영구 halt/dry-run 주문 의도
 uv run trader live-policy
