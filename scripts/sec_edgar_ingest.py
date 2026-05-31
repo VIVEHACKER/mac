@@ -179,8 +179,6 @@ def extract_concept(facts: dict, tag_choices: list[str], unit: str) -> dict[str,
             existing = result.get(end)
             if existing is None or filed < existing[1]:
                 result[end] = (float(val), filed)
-        if result:
-            return result
     return result
 
 
