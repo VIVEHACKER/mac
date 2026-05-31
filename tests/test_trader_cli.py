@@ -1348,3 +1348,90 @@ def test_compounder_scan_sectors_csv_excludes_financial_fcf(tmp_path, capsys) ->
     assert result == 0
     assert "[financials]" in captured.out  # BNKX dossier tagged
     assert "FCF-based metrics excluded" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# BUG C: compounder-scan must not use bars beyond --as-of (price look-ahead)
+# ---------------------------------------------------------------------------
+
+
+def test_compounder_scan_uses_as_of_price_not_future_bar(tmp_path, capsys) -> None:
+    """BUG C regression: bars[-1] leaks future price; fix uses last bar <= as_of."""
+    catalog_db = tmp_path / "catalog.duckdb"
+    catalog = MarketDataCatalog(catalog_db)
+
+    as_of = date(2024, 1, 31)
+    early_close = 10.0  # the price that should be used (on or before as_of)
+    late_close = 999.0  # future bar — must NOT affect valuation
+
+    # GOODCO has two bars: one on the as_of date, one well after it.
+    early_bar = _price_bar("GOODCO", as_of, early_close)
+    late_bar = _price_bar("GOODCO", date(2025, 6, 1), late_close)
+    catalog.put_bars([early_bar, late_bar])
+
+    # NOPRICE only has a bar AFTER as_of — should be excluded from results.
+    catalog.put_bars([_price_bar("NOPRICE", date(2025, 1, 1), 50.0)])
+
+    # Fundamentals for both, filed before as_of.
+    catalog.put_fundamentals(
+        [
+            FundamentalRecord(
+                "GOODCO",
+                "us",
+                date(2023, 12, 31),
+                datetime(2024, 1, 15),  # asof_ts before as_of
+                revenue=100.0,
+                net_income=20.0,
+                free_cash_flow=15.0,
+                total_equity=80.0,
+                total_debt=5.0,
+                shares_out=10.0,
+                eps=2.0,
+            ),
+            FundamentalRecord(
+                "NOPRICE",
+                "us",
+                date(2023, 12, 31),
+                datetime(2024, 1, 15),
+                revenue=100.0,
+                net_income=20.0,
+                free_cash_flow=15.0,
+                total_equity=80.0,
+                total_debt=5.0,
+                shares_out=10.0,
+                eps=2.0,
+            ),
+        ]
+    )
+
+    result = cli.main(
+        [
+            "compounder-scan",
+            "GOODCO,NOPRICE",
+            "--as-of",
+            as_of.isoformat(),
+            "--top-n",
+            "5",
+            "--no-fetch",
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 0
+
+    # NOPRICE has no bar on or before as_of → must be absent from output.
+    assert "NOPRICE" not in captured.out, (
+        "NOPRICE has no bar <= as_of; it should be excluded from compounder-scan output"
+    )
+
+    # GOODCO P/E = price / eps.  With the correct (early) close = 10.0 and
+    # shares_out=10 → market_cap=100 → P/E = market_cap / net_income = 100/20 = 5.
+    # With the wrong (late) close = 999.0 → market_cap=9990 → P/E ≈ 499.5.
+    # The output contains "GOODCO" and a P/E line — verify late_close is not used
+    # by checking the output does NOT contain the string "999" (the leaking price).
+    assert "GOODCO" in captured.out, "GOODCO should appear in compounder-scan output"
+    assert "999" not in captured.out, (
+        "Future bar close (999.0) leaked into compounder-scan output; "
+        "bars[-1] used instead of the as-of-or-earlier close"
+    )

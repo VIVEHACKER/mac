@@ -1307,9 +1307,13 @@ def _run_compounder_scan(args: argparse.Namespace) -> int:
         if not recs:
             continue
         bars = catalog.get_bars(_catalog_symbol(s, args.market), market=args.market)
-        if not bars:
+        # Use the latest bar whose timestamp is on or before the as-of date so that
+        # valuation ratios (P/E, P/FCF, …) are point-in-time and do not leak future
+        # or current prices into historical scans.
+        pit_bars = [b for b in bars if b.ts <= as_of]
+        if not pit_bars:
             continue
-        universe[s] = (recs, float(bars[-1].close))
+        universe[s] = (recs, float(pit_bars[-1].close))
 
     sectors: dict[str, str] = {}
     if args.sectors_csv is not None and args.sectors_csv.exists():
