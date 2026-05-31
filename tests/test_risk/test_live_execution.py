@@ -90,7 +90,9 @@ def test_pretrade_blocks_limit_price_far_from_mark() -> None:
 
     result = evaluate_pretrade_order(
         intent,
-        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0, max_limit_deviation=0.03),
+        policy=RiskPolicy(
+            max_order_notional=1_000, max_symbol_weight=1.0, max_limit_deviation=0.03
+        ),
         account=AccountSnapshot("test", buying_power=100_000, cash=100_000, equity=100_000),
         positions=[],
         marks={"QQQ": 100},
@@ -193,6 +195,89 @@ def test_reconciler_reports_position_mismatch() -> None:
 
     assert len(issues) == 1
     assert issues[0].symbol == "QQQ"
+
+
+def test_batch_cumulative_pretrade_rejects_second_buy_that_jointly_exceeds_symbol_weight(
+    tmp_path,
+) -> None:
+    """Regression: two individually-valid buys must not both pass when they jointly
+    exceed max_symbol_weight.
+
+    Setup:
+      equity = 10_000, no existing positions
+      max_symbol_weight = 0.30  (30 %)
+      each buy: 25 QQQ @ $100 = $2 500 notional → single weight 25 % < 30 % (passes alone)
+      together: $5 000 notional → weight 50 % >> 30 % (second must be blocked)
+    """
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=10_000, cash=10_000, equity=10_000)
+    )
+
+    # Two distinct intents for the same symbol in a single batch.
+    intent_a = OrderIntent(
+        strategy="approved-etf",
+        symbol="QQQ",
+        market="us",
+        side="buy",
+        qty=25,
+        order_type="limit",
+        limit_price=100,
+        rebalance_key="batch-a",
+        asof_ts=datetime(2026, 5, 12, tzinfo=UTC),
+    ).normalized()
+    intent_b = OrderIntent(
+        strategy="approved-etf",
+        symbol="QQQ",
+        market="us",
+        side="buy",
+        qty=25,
+        order_type="limit",
+        limit_price=100,
+        rebalance_key="batch-b",
+        asof_ts=datetime(2026, 5, 12, tzinfo=UTC),
+    ).normalized()
+
+    _policy = RiskPolicy(
+        max_order_notional=5_000,
+        max_daily_new_notional=10_000,
+        max_symbol_weight=0.30,
+        max_gross_exposure=2.0,
+        min_cash_fraction=0.0,
+        max_orders_per_day=20,
+    )
+
+    # Verify individually: each alone would pass symbol-weight check.
+    for intent in (intent_a, intent_b):
+        check = evaluate_pretrade_order(
+            intent,
+            policy=_policy,
+            account=AccountSnapshot("test", buying_power=10_000, cash=10_000, equity=10_000),
+            positions=[],
+            marks={"QQQ": 100},
+        )
+        assert check.passed, f"Expected individual intent to pass, got: {check.reasons}"
+
+    # Now submit BOTH in a single batch — second must be blocked cumulatively.
+    results = process_order_intents(
+        [intent_a, intent_b],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=_policy,
+        marks={"QQQ": 100},
+        dry_run=True,
+    )
+
+    assert results[0].status == "accepted", f"First buy unexpectedly blocked: {results[0].reasons}"
+    assert results[1].status == "risk_block", (
+        "BUG: second buy should be blocked by cumulative symbol-weight check, "
+        f"but got status={results[1].status!r}"
+    )
+    assert any("weight" in r for r in results[1].reasons), (
+        f"Expected weight-related block reason, got: {results[1].reasons}"
+    )
 
 
 def _intent(qty: float = 2, rebalance_key: str = "2026-05-12") -> OrderIntent:

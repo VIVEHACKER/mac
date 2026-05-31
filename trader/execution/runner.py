@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from risk.halt_state import HaltStateStore
 from risk.policy import RiskPolicy
-from risk.pretrade import evaluate_pretrade_order
-from trader.execution.broker import BrokerAdapter, BrokerRejectedError, BrokerTemporaryError
+from risk.pretrade import _project_positions, evaluate_pretrade_order
+from trader.execution.broker import (
+    BrokerAdapter,
+    BrokerRejectedError,
+    BrokerTemporaryError,
+)
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore, OrderEvent
 
@@ -60,8 +64,25 @@ def process_order_intents(
                     message="; ".join(check.reasons),
                 )
             )
-            results.append(ExecutionResult(intent.client_order_id, "block", "risk_block", check.reasons))
+            results.append(
+                ExecutionResult(intent.client_order_id, "block", "risk_block", check.reasons)
+            )
             continue
+        # --- Cumulative batch accumulation ---
+        # Project in-memory state forward so subsequent intents in the same batch
+        # are evaluated against the exposure already committed by earlier accepted
+        # intents. Risk-reducing sells lower exposure and free cash; buys consume
+        # cash/buying_power and inflate symbol weight.
+        mark_price = marks.get(intent.symbol) or intent.limit_price or 0.0
+        if mark_price > 0:
+            positions = _project_positions(positions, intent, mark_price)
+            if intent.side == "buy":
+                notional = intent.qty * mark_price
+                account = replace(
+                    account,
+                    cash=account.cash - notional,
+                    buying_power=account.buying_power - notional,
+                )
         if dry_run:
             store.record_event(
                 OrderEvent(
@@ -86,7 +107,9 @@ def process_order_intents(
                     message=str(exc),
                 )
             )
-            results.append(ExecutionResult(intent.client_order_id, "submit", "rejected", (str(exc),)))
+            results.append(
+                ExecutionResult(intent.client_order_id, "submit", "rejected", (str(exc),))
+            )
             continue
         except BrokerTemporaryError as exc:
             halt_store.activate(
@@ -102,7 +125,9 @@ def process_order_intents(
                     message=str(exc),
                 )
             )
-            results.append(ExecutionResult(intent.client_order_id, "submit", "uncertain", (str(exc),)))
+            results.append(
+                ExecutionResult(intent.client_order_id, "submit", "uncertain", (str(exc),))
+            )
             continue
         store.record_broker_order("broker_submit", order)
         results.append(ExecutionResult(intent.client_order_id, "submit", order.status))
