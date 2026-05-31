@@ -280,6 +280,54 @@ def test_batch_cumulative_pretrade_rejects_second_buy_that_jointly_exceeds_symbo
     )
 
 
+def test_risk_reducing_sell_not_blocked_by_daily_new_notional_cap() -> None:
+    """P2 regression: a SELL that reduces an existing long position must NOT be
+    counted against the daily new-notional cap.
+
+    Setup:
+      - existing long: 20 QQQ @ $100 (market_value = $2 000)
+      - daily new-notional cap: $1 500
+      - new_notional_today already at $1 400  (only $100 headroom left)
+      - sell order: 10 QQQ @ $100 = $1 000 notional  (> $100 headroom)
+
+    Before fix: pretrade rejects with "daily new notional limit would be exceeded"
+    After fix : pretrade passes (sell reduces exposure, cap is irrelevant)
+    """
+    sell_intent = OrderIntent(
+        strategy="approved-etf",
+        symbol="QQQ",
+        market="us",
+        side="sell",
+        qty=10,
+        order_type="limit",
+        limit_price=100,
+        rebalance_key="2026-05-12-sell",
+        asof_ts=datetime(2026, 5, 12, tzinfo=UTC),
+    ).normalized()
+
+    result = evaluate_pretrade_order(
+        sell_intent,
+        policy=RiskPolicy(
+            max_order_notional=2_000,
+            max_daily_new_notional=1_500,
+            max_symbol_weight=1.0,
+            max_gross_exposure=2.0,
+            min_cash_fraction=0.0,
+            allow_short=False,
+        ),
+        account=AccountSnapshot("test", buying_power=100_000, cash=100_000, equity=10_000),
+        positions=[PositionSnapshot("QQQ", "us", qty=20, market_value=2_000)],
+        marks={"QQQ": 100},
+        new_notional_today=1_400.0,  # only $100 headroom — sell notional ($1 000) exceeds it
+    )
+
+    assert result.passed, (
+        "Risk-reducing SELL must not be blocked by the daily new-notional cap. "
+        f"Got reasons: {result.reasons}"
+    )
+    assert not any("daily new notional" in r for r in result.reasons)
+
+
 def _intent(qty: float = 2, rebalance_key: str = "2026-05-12") -> OrderIntent:
     return OrderIntent(
         strategy="approved-etf",

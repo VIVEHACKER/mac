@@ -62,14 +62,19 @@ def evaluate_pretrade_order(
                         f"{allowed_deviation:.1%} below mark {reference_mark:.2f}"
                     )
         if notional > policy.max_order_notional:
-            reasons.append(
-                f"order notional {notional:.2f} exceeds {policy.max_order_notional:.2f}"
-            )
+            reasons.append(f"order notional {notional:.2f} exceeds {policy.max_order_notional:.2f}")
         if normalized.side == "buy" and notional > account.buying_power:
             reasons.append(
                 f"order notional {notional:.2f} exceeds buying power {account.buying_power:.2f}"
             )
-        if new_notional_today + max(notional, 0.0) > policy.max_daily_new_notional:
+        # Only BUY / exposure-increasing orders count against the new-notional cap.
+        # A sell that reduces an existing long is risk-reducing and must not be blocked
+        # by a limit that is designed to constrain NEW buy risk.
+        is_exposure_increasing = normalized.side == "buy"
+        if (
+            is_exposure_increasing
+            and new_notional_today + max(notional, 0.0) > policy.max_daily_new_notional
+        ):
             reasons.append("daily new notional limit would be exceeded")
 
     if orders_today >= policy.max_orders_per_day:
