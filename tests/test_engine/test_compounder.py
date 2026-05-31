@@ -448,7 +448,7 @@ def test_coverage_gate_excludes_sparse_name() -> None:
     assert "F2" in symbols, "F2 should be included in ranking"
 
 
-from engine.compounder import SECTOR_INVALID_METRICS, score_archetypes  # noqa: E402
+from engine.compounder import SECTOR_INVALID_METRICS  # noqa: E402
 
 
 def test_sector_invalid_metrics_defines_financials():
@@ -489,5 +489,7 @@ def test_score_archetypes_sectors_default_none_unchanged():
     q = _series(
         "QLT", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
     )
-    universe = {"QLT": (q, 60.0)}
+    j = _series("JNK", [100, 101, 102, 103], [1, 1, 1, 1], [0, 0, 0, 0], 100.0, 250.0, 60.0, 0.1)
+    universe = {"QLT": (q, 60.0), "JNK": (j, 5.0)}
     assert score_archetypes(universe) == score_archetypes(universe, sectors=None)
+    assert score_archetypes(universe) == score_archetypes(universe, sectors={})
