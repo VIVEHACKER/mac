@@ -88,6 +88,9 @@ def compute_metrics(records: Sequence[FundamentalRecord], price: float) -> dict[
         "pfcf": cm.pfcf(latest, price),
         "ps": cm.ps(latest, price),
         "pb": cm.pb(latest, price),
+        # Diagnostic only (NOT a _WEIGHTS scoring input): the size anchor, needed to test the
+        # "is GP/assets just a size tilt?" confound and for size-neutral validation IC.
+        "market_cap": cm.market_cap(latest, price),
     }
 
 

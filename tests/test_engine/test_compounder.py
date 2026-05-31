@@ -520,3 +520,18 @@ def test_financials_sector_nulls_gross_metrics():
     fin = SECTOR_INVALID_METRICS["financials"]
     assert "gross_profitability" in fin
     assert "gross_margin" in fin
+
+
+def test_compute_metrics_surfaces_market_cap():
+    """market_cap must be surfaced (size anchor for size-proxy check + size-neutral IC).
+
+    It is NOT in _WEIGHTS (no scoring effect) — only available for diagnostics/validation."""
+    recs = _series(
+        "MC", [100, 120, 150, 190], [10, 14, 20, 30], [8, 12, 18, 28], 100.0, 20.0, 50.0, 3.0
+    )
+    m = compute_metrics(recs, price=60.0)
+    assert "market_cap" in m
+    assert m["market_cap"] == 60.0 * 50.0  # price * shares_out
+    # market_cap is a diagnostic only — must NOT be a scoring weight in any archetype
+    for arch in _WEIGHTS.values():
+        assert "market_cap" not in [k for k, _ in arch]
