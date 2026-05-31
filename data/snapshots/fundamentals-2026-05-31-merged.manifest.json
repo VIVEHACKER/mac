@@ -1,9 +1,9 @@
 {
-  "name": "fundamentals-2026-05-31",
-  "sha256": "8ffcb183c56e04bf1f94758abb4123c74e38ef386eee6f7a9aa9d0495560b472",
-  "record_count": 65794,
+  "name": "fundamentals-2026-05-31-merged",
+  "sha256": "237d2edab7c39314ecf431008a5226c135873485b0e510deec1e1093886f2bde",
+  "record_count": 69700,
   "symbol_count": 1110,
-  "period_start": "1997-06-30",
+  "period_start": "1980-07-21",
   "period_end": "2026-05-03",
   "columns": [
     "symbol",
