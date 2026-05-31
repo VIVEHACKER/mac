@@ -12,8 +12,9 @@ evidence-driven and to surface candidates you'd never screen by hand.
 
 - **Is:** a quantitative candidate generator + dossier. Narrows ~1,000 names to a ranked,
   archetype-tagged shortlist with the metrics behind each score.
-- **Isn't:** a guarantee, a backtest of forward 10x returns (that validation — P5 — is not
-  done; see Limitations), or a substitute for reading the business.
+- **Isn't:** a guarantee or a forward-return predictor, or a substitute for reading the
+  business. P5 (forward-return validation) is now **done** and found NO established
+  forward edge — see "Forward-return validation" below. Treat the ranking as a screen.
 
 ## Monthly procedure
 
@@ -79,8 +80,10 @@ Before adding a name to the concentrated book, the dossier is the START, not the
 
 ## Known limitations (do not omit when deciding)
 
-1. **Not validated for forward 10x** — the funnel is built on quantitative *precursors* of past
-   compounders, not a proven predictor. P5 (PIT historical hit-rate backtest) is not done.
+1. **No established forward edge (P5 done)** — the funnel is built on quantitative *precursors*
+   of past compounders, and the forward-return validation found NO reliable edge (mean Q5−Q1
+   quintile spread +0.1%, top-30 excess −3.3% vs universe). It is a **screen**, not a return
+   predictor. See "Forward-return validation" below.
 2. **Survivorship** — the universe is *current* S&P 400+600 constituents. Good for a forward
    watchlist; a historical backtest on it would be survivorship-biased (delisted names absent).
 3. **Data quality** — SEC `companyfacts` tags are inconsistent; the ingest now merges revenue
@@ -94,10 +97,40 @@ Before adding a name to the concentrated book, the dossier is the START, not the
 6. **Megacap universe** (`--pit-universe SP100_PIT_2008`) surfaces large compounders, not 10x
    candidates — use the S&P 400+600 universe for ten-bagger hunting.
 
+## Forward-return validation (P5 — done)
+
+`scripts/compounder_forward_validation.py` replays the scan at 4 past as-of dates
+(2014/2016/2018/2020-06-30) using PIT fundamentals (snapshot, asof ≤ date) + as-of price,
+buckets the scored names into score quintiles, and measures each quintile's median 3-year
+forward return. Because the universe is current constituents (survivors), absolute returns
+are inflated; the **fair signal is the top-vs-bottom (Q5−Q1) quintile spread**, since
+survivorship hits both quintiles similarly.
+
+| As-of → fwd | N | Q5−Q1 spread | top-30 | universe |
+|---|--:|--:|--:|--:|
+| 2014→2017 | 533 | +3.3% | +4.1% | +24.3% |
+| 2016→2019 | 582 | +5.0% | +49.3% | +42.7% |
+| 2018→2021 | 674 | +8.4% | +42.1% | +39.6% |
+| 2020→2023 | 808 | −16.3% | +43.7% | +45.8% |
+
+**Mean Q5−Q1 +0.1% (near-zero); top-30 excess vs universe −3.3% (positive in 2/4).**
+Verdict: **NO established forward predictive value** — quality/growth is largely priced in,
+and the 2022 rate shock inverted the 2020→2023 window. **Use the ranking as an
+evidence-backed screen to seed human conviction, not as a return signal.**
+Caveat both ways: 3y is short for a multi-year compounding thesis (re-rating dominates),
+4 overlapping windows = low power — insufficient to certify *or* condemn; revisit at 5–7y.
+
+Re-run (regenerate the snapshot first, then):
+```bash
+.venv/bin/python scripts/compounder_forward_validation.py \
+  --snapshot data/snapshots/fundamentals-$(date +%F).csv   # -> out/compounder-forward-validation.md
+```
+
 ## Roadmap to strengthen
 
-- **P5** — PIT forward-return backtest (needs historical prices + delisting data): does a high
-  compounder score actually precede outperformance?
+- **P5 follow-up** — re-run at a 5–7y horizon (the compounding thesis is multi-year; 3y is
+  dominated by re-rating, not realized compounding) and, ideally, with delisting-inclusive
+  prices to remove the survivorship floor under all quintiles.
 - **Alt-data / qualitative** — insider buying (Form 4), low analyst coverage (undiscovered),
   institutional accumulation, news narrative → enrich the dossier's `alt_signals` hook.
 - **Broaden universe** — Russell 2000 / micro-caps (where 10x more often starts).
