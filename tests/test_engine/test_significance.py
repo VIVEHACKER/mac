@@ -186,9 +186,14 @@ def test_dsr_from_stats_reduces_to_psr_when_no_variance() -> None:
 
 
 def test_dsr_decreases_with_more_trials() -> None:
-    kwargs = {"observed_sr": 0.12, "n": 200, "skew": -0.3, "kurt": 5.0, "trial_sr_variance": 0.01}
-    dsr_few = dsr_from_stats(n_trials=5, **kwargs)
-    dsr_many = dsr_from_stats(n_trials=500, **kwargs)
+    # Pass args explicitly (a mixed int/float **kwargs dict infers dict[str, float],
+    # which makes mypy reject the int `n`).
+    dsr_few = dsr_from_stats(
+        observed_sr=0.12, n=200, skew=-0.3, kurt=5.0, n_trials=5, trial_sr_variance=0.01
+    )
+    dsr_many = dsr_from_stats(
+        observed_sr=0.12, n=200, skew=-0.3, kurt=5.0, n_trials=500, trial_sr_variance=0.01
+    )
     assert dsr_many < dsr_few
 
 

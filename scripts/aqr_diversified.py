@@ -197,7 +197,7 @@ def run_config(
 ) -> dict:
     equity = 10_000.0
     spy_eq = 10_000.0
-    records = []
+    records: list[dict] = []
 
     for as_of in rebal_dates:
         valid = prices.index[prices.index <= as_of]
