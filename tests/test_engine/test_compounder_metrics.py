@@ -142,6 +142,33 @@ def test_record_tolerance_boundary():
 
 
 from engine.compounder_metrics import (  # noqa: E402
+    _ols_slope,
+)
+
+
+def test_margin_trend_winsorizes_artifact_period():
+    """Artifact period (revenue=10, NI=500 → net_margin=50.0) must be clipped to 1.0."""
+    recs = [
+        _rec(2020, revenue=100.0, net_income=10.0),  # net_margin = 0.10
+        _rec(2021, revenue=100.0, net_income=20.0),  # net_margin = 0.20
+        _rec(2022, revenue=100.0, net_income=30.0),  # net_margin = 0.30
+        _rec(2023, revenue=10.0, net_income=500.0),  # net_margin = 50.0 → clipped to 1.0
+    ]
+    expected = _ols_slope([0.10, 0.20, 0.30, 1.0])
+    assert margin_trend(recs) == pytest.approx(expected, abs=1e-9)
+
+
+def test_margin_trend_unaffected_when_within_band():
+    """Margins within ±100% must pass through unchanged."""
+    recs = [
+        _rec(2021, revenue=100.0, net_income=10.0),  # net_margin = 0.10
+        _rec(2022, revenue=100.0, net_income=20.0),  # net_margin = 0.20
+        _rec(2023, revenue=100.0, net_income=30.0),  # net_margin = 0.30
+    ]
+    assert margin_trend(recs) == pytest.approx(_ols_slope([0.1, 0.2, 0.3]), abs=1e-9)
+
+
+from engine.compounder_metrics import (  # noqa: E402
     debt_to_equity,
     share_growth,
     market_cap,

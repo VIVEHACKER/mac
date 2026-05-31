@@ -10,6 +10,7 @@ from datetime import timedelta
 from data.models import FundamentalRecord
 
 _TOL_DAYS = 120
+MARGIN_WINSOR: float = 1.0
 
 
 def _sorted(records: Sequence[FundamentalRecord]) -> list[FundamentalRecord]:
@@ -110,7 +111,8 @@ def margin_trend(records: Sequence[FundamentalRecord]) -> float | None:
     margins = [m for r in _sorted(records) if (m := net_margin(r)) is not None]
     if len(margins) < 2:
         return None
-    return _ols_slope(margins)
+    clipped = [max(-MARGIN_WINSOR, min(MARGIN_WINSOR, m)) for m in margins]
+    return _ols_slope(clipped)
 
 
 def roic(rec: FundamentalRecord) -> float | None:
