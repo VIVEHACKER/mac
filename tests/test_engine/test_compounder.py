@@ -13,7 +13,10 @@ from engine.significance import normal_cdf
 
 
 def _series(symbol, rev, ni, fcf, eq, debt, sh, eps):
-    """4 annual records 2020-2023 with constant per-field values except revenue ramp."""
+    """4 annual records 2020-2023 with constant per-field values except revenue ramp.
+
+    gross_profit (0.4*revenue) and total_assets (equity+debt+100) are populated so that
+    gross_profitability is computable for full-data names (profitable_compounder weights it)."""
     out = []
     for i, year in enumerate((2020, 2021, 2022, 2023)):
         out.append(
@@ -25,10 +28,12 @@ def _series(symbol, rev, ni, fcf, eq, debt, sh, eps):
                 revenue=rev[i],
                 net_income=ni[i],
                 free_cash_flow=fcf[i],
+                total_assets=eq + debt + 100.0,
                 total_equity=eq,
                 total_debt=debt,
                 shares_out=sh,
                 eps=eps,
+                gross_profit=0.4 * rev[i],
             )
         )
     return out
@@ -320,7 +325,7 @@ def test_archetype_coverage_field_populated() -> None:
     import pytest
 
     assert pc.coverage == pytest.approx(1.0), (
-        f"profitable_compounder has 5 weighted metrics; full-data name should have coverage=1.0, got {pc.coverage}"
+        f"profitable_compounder has 6 weighted metrics; full-data name should have coverage=1.0, got {pc.coverage}"
     )
 
 
@@ -493,3 +498,25 @@ def test_score_archetypes_sectors_default_none_unchanged():
     universe = {"QLT": (q, 60.0), "JNK": (j, 5.0)}
     assert score_archetypes(universe) == score_archetypes(universe, sectors=None)
     assert score_archetypes(universe) == score_archetypes(universe, sectors={})
+
+
+from engine.compounder import _WEIGHTS  # noqa: E402
+
+
+def test_profitable_compounder_includes_gross_profitability():
+    """P0 OOS de-risking: gross_profitability is ADDED to the quality archetype (roic/fcf kept).
+
+    Net-margin/ROIC quality anti-predicts forward returns (P5, z~-2.6); GP/assets is the
+    less-bad literature metric. We ADD it at a small weight rather than replace (coverage)."""
+    keys = [k for k, _ in _WEIGHTS["profitable_compounder"]]
+    assert "gross_profitability" in keys, "gross_profitability must be a weighted signal"
+    # roic and fcf_margin are KEPT (reversible ADD, not a coverage-crashing replace)
+    assert "roic" in keys
+    assert "fcf_margin" in keys
+
+
+def test_financials_sector_nulls_gross_metrics():
+    """Banks/insurers have no COGS/gross profit -> gross metrics must be sector-nulled like FCF."""
+    fin = SECTOR_INVALID_METRICS["financials"]
+    assert "gross_profitability" in fin
+    assert "gross_margin" in fin

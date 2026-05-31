@@ -112,10 +112,14 @@ So "quality anti-predicts" was substantially a **net-margin metric-definition ar
 fix is to re-measure quality (net→gross), NOT to drop the quality tilt. The gross edge is still
 modest (z≈1.0 at N≈2–3) → promising, not yet validated.
 
-**Operating consequence:** keep the funnel as a screen; do **not** change `_WEIGHTS` yet. The
-path to a real edge (re-tool `profitable_compounder` to gross profitability, build a QARP
-composite, validate strictly OOS, reconstruct PIT membership) is the action plan in
-`docs/COMPOUNDER_VALIDATION.md`.
+**Operating consequence:** the funnel stays a SCREEN. A reversible **defensive ADD** shipped
+(2026-06-01): `gross_profitability` is now weighted 0.15 in `profitable_compounder` (roic/fcf
+kept; gross metrics sector-nulled for financials) — this de-risks the dominance of the
+anti-predictive net-margin metric without claiming alpha (moves ~2/20 top names, coverage held
+~84.5%). A **confident** value-led QARP reweight is GATED on a true held-out time period (pinned
+prices, long-only, sector/size-neutral, t>2). Full record + OOS audit: the OOS follow-up and
+action plan in `docs/COMPOUNDER_VALIDATION.md`. The OOS run itself:
+`scripts/compounder_oos_validation.py`.
 
 Re-run (regenerate the snapshot first, then):
 ```bash

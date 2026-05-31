@@ -20,11 +20,18 @@ MIN_ARCHETYPE_COVERAGE: float = 0.5  # FIX C: min fraction of archetype |weight|
 # (metric_key, weight). Negative weight = lower-is-better. Weights per archetype
 # sum to 1.0 over present metrics (renormalized when some are missing).
 _WEIGHTS: dict[str, list[tuple[str, float]]] = {
+    # P0 OOS de-risking (2026-06-01): net-margin/NI-ROIC quality ANTI-predicts forward returns
+    # (P5: IC -0.084, z~-2.6); Novy-Marx gross profitability (GP/assets) is the less-bad metric
+    # (marginally +, z~1.0). We ADD gross_profitability at a small weight (KEEP roic/fcf — a
+    # wholesale replace would crash coverage 85%->52%). This is a reversible screen-stage nudge,
+    # NOT a validated alpha; a confident value-led QARP re-weight is gated on a held-out time
+    # period (see docs/COMPOUNDER_VALIDATION.md). Engine renormalizes over present weights.
     "profitable_compounder": [
         ("roic", 0.30),
         ("fcf_margin", 0.25),
         ("margin_trend", 0.20),
         ("revenue_cagr", 0.15),
+        ("gross_profitability", 0.15),
         ("share_growth", -0.10),
     ],
     "hypergrowth_disruptor": [
@@ -41,9 +48,12 @@ _WEIGHTS: dict[str, list[tuple[str, float]]] = {
 }
 
 # Metrics that are meaningless for a sector and must be excluded from scoring.
-# Financials (banks/insurers/REITs): free-cash-flow ratios are not comparable.
+# Financials (banks/insurers/REITs): free-cash-flow ratios are not comparable, and they have no
+# cost-of-revenue/gross-profit line, so gross_profitability / gross_margin are meaningless too.
 SECTOR_INVALID_METRICS: dict[str, frozenset[str]] = {
-    "financials": frozenset({"fcf_margin", "fcf_conversion", "pfcf"}),
+    "financials": frozenset(
+        {"fcf_margin", "fcf_conversion", "pfcf", "gross_profitability", "gross_margin"}
+    ),
 }
 
 

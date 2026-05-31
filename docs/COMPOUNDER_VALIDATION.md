@@ -98,13 +98,14 @@ redesign architect · synthesis) stress-tested the finding. Verified conclusions
    selection, Spearman/composite math, and archetype score sign were all code-audited (IC
    matches `scipy.stats.spearmanr`; `asof_ts` are real SEC filing dates, ~39-day median lag).
    The negative quality IC is a genuine property of this data.
-2. **It does NOT contradict QMJ / Novy-Marx.** The quality metrics here are *net*-margin and
-   NI-based ROIC, **not** gross profitability (GP/total assets). Novy-Marx (2013) showed net-
-   bottom-line quality is a weak/perverse proxy and gross profitability is the strong one. QMJ
-   (Asness–Frazzini–Pedersen) is a *price-controlled long-short*, mostly large-cap. This is
+2. **It does NOT contradict QMJ / Novy-Marx.** The original quality metrics were *net*-margin
+   and NI-based ROIC, **not** gross profitability (GP/total assets). Novy-Marx (2013) showed
+   net-bottom-line quality is a weak/perverse proxy and gross profitability is the strong one.
+   QMJ (Asness–Frazzini–Pedersen) is a *price-controlled long-short*, mostly large-cap. This is
    long-only raw-quality rank IC on a mid/small-cap *survivor* set — the construction the
-   literature predicts will fail. The snapshot lacks `gross_profit`/`COGS`, so the right
-   metric is currently untestable.
+   literature predicts will fail. The P0 follow-up added `gross_profit`/`cost_of_revenue` and
+   confirmed that GP/assets flips the quality sign, but the edge is still modest and needs OOS
+   validation before `_WEIGHTS` changes.
 3. **The redesign is NOT a validated edge.** `redesign_composite` was built *after* seeing
    which signals had positive IC (data-snooping). Its +0.070 ≈ the mean of its pre-selected
    components (mostly the value premium); at honest effective N ≈ 2–3 (overlapping windows) it
@@ -131,13 +132,37 @@ gross profitability (GP/assets) is positive and consistent (≈+0.04, ~21/23). S
 is **NOT to drop the quality tilt but to re-measure it (net→gross)**, then validate OOS before
 changing `_WEIGHTS`. (Medium confidence — the gross edge is modest, z≈1.0 at low N.)
 
+## OOS follow-up (2026-06-01) — what the OOS tests actually showed (4-lens audited)
+
+`scripts/compounder_oos_validation.py` ran 4 pre-registered tests (regime split, decile L/S +
+cost, out-of-universe, 6-split cross-sectional breadth). A 4-lens adversarial audit then
+**corrected an overstated "OOS SUPPORTED" headline**. The honest reading:
+
+- **Statistically REAL: net-margin/NI-ROIC quality ANTI-predicts** — negative in both regimes,
+  in 11/12 half-splits, and a −32% decile L/S (full-P5 IC −0.084, z ≈ −2.4 to −2.9). Decisive.
+- **Gross profitability is the LESS-BAD metric, only MARGINALLY positive — NOT a validated
+  edge.** IC ≈ +0.04 sits inside the noise band (z ≈ 1.0–1.6) and is smaller than its own
+  run-to-run drift (+0.031..+0.070, unpinned prices). The regime + 6-split breadth are NOT
+  independent OOS: effective N ≈ 2–3 (overlapping windows, slow fundamentals); all 12 half-ICs
+  (6 splits × 2) are pseudo-replicates of one period/universe — a breadth check, not held-out
+  time — and after the financials sector-null, gross_quality breadth softens to 9/12 positive
+  (3/6 splits both-halves +ve), while value-led qarp stays 12/12. The decile L/S is
+  short-leg-inflated and irrelevant to a long-only screen. The "gross flips +" hypothesis was
+  discovered in-sample on this same data — this is a re-test on the discovery sample, not fresh.
+
+**Decision: defensive ADD now, confident reweight GATED.** A wholesale net→gross replace would
+crash archetype coverage ~85%→52% (GP present for only ~52% of rows). So we did the reversible
+ADD (item 3a) and gate the confident value-led QARP reweight on a true held-out time period
+(item 3b).
+
 ## Action plan (the path to an actual edge)
 
 | # | Action | Why | Priority |
 |---|---|---|---|
-| 1 | Keep the funnel as a screen; do NOT ship the in-sample `redesign_composite` or change `_WEIGHTS` before OOS. | The redesign is data-snooped and inside the noise band. | P0 |
-| 2 | ✅ DONE (2026-06-01) — added `gross_profit`/`cost_of_revenue`, re-ingested SEC GP/COGS/Assets (1,003 names), re-ran IC. | GP/assets is positive (≈+0.04, ~21/23) while net quality is negative (−0.084): the net metric was the confound, exactly as Novy-Marx predicts. Fix the metric, keep quality. | P0 |
-| 3 | Re-tool the `profitable_compounder` archetype to weight **gross_profitability (GP/assets)** instead of roic/net_margin, build a QARP composite (GP/assets + cheap value), and validate strictly OOS: never-touched hold-out (2009–2011 and/or 2020–2022), walk-forward (fit 2012–2015 / test 2016–2019), Russell 2000, turnover cost haircut. Require IC>0 with t>2 honoring window overlap BEFORE editing `_WEIGHTS`. | qarp is ≈+0.07 in-sample but z≈1.7 at N≈2–3 — promising, not validated. OOS-by-regime is mandatory (the regime split flips best_score by entry year). | P0 |
+| 1 | Funnel stays a SCREEN, not a return predictor. Do NOT ship the in-sample `redesign_composite`/`qarp` as alpha. | All composites sit inside the noise band at honest N. | P0 |
+| 2 | ✅ DONE (2026-06-01) — added `gross_profit`/`cost_of_revenue`, re-ingested SEC GP/COGS/Assets (1,003 names), re-ran IC. | GP/assets +ve while net quality −ve: the net metric was the confound (Novy-Marx). | P0 |
+| 3a | ✅ DONE (2026-06-01) — **defensive ADD**: `gross_profitability` weighted 0.15 in `profitable_compounder` (roic/fcf KEPT), gross metrics sector-nulled for financials. Reversible one-file change; coverage held ~84.5% (vs 52% for a replace); moves ~2/20 top names. | Removes the dominance of a z≈−2.6 anti-predictive net metric at near-zero downside — a screen-stage de-risking, NOT a claimed alpha. | P0 |
+| 3b | GATED — confident value-led QARP archetype + reweight: validate on a never-touched **held-out TIME period** (2020–2023 and/or pre-2012 as-of), with **pinned prices**, **long-only top-decile-vs-benchmark** (not short-leg L/S), **sector/size-neutralized** IC, require IC>0 at **t>2** honoring window overlap. Only then change weights confidently. | The positive gross edge is marginal/in-sample; only a held-out period earns a confident reweight. | P0 |
 | 4 | Reconstruct point-in-time index membership (restore delisted/acquired names). | Acquired compounders exiting the current set biases quality IC downward; if it moves toward zero/positive once dead names return, the redesign premise collapses. Biggest single threat to the whole conclusion. | P1 |
 | 5 | Surface `market_cap` in `compute_metrics` (the function exists but is never called). | Restores the small-cap size anchor for the pipeline self-check (currently only value ratios anchor it). | P1 |
 | 6 | Emit per-cell raw IC arrays + block-bootstrap significance from `compounder_factor_ic.py`. | Confirm whether quality_composite −0.079 is the marginal effect (z≈−2.2 to −2.6) the stats lens estimates, vs noise. | P2 |
@@ -145,7 +170,7 @@ changing `_WEIGHTS`. (Medium confidence — the gross edge is modest, z≈1.0 at
 ## Caveats (always cite when deciding)
 
 Survivorship (above); effective N ≈ 2–3 (overlapping windows → low power, marginal
-significance); horizon trends are overlap artifacts; no transaction costs/taxes/turnover; PIT
-index membership not reconstructed; net-margin quality ≠ academic gross-profitability quality;
-value self-check only half-passes (pb/ps clearly negative, pe/pfcf near-zero, market_cap
-missing). Read signs and direction, not precise magnitudes.
+significance); horizon trends are overlap artifacts; no transaction costs/taxes/turnover in the
+main P5 run; PIT index membership not reconstructed; net-margin quality was the wrong proxy for
+academic gross-profitability quality; value self-check only half-passes (pb/ps clearly negative,
+pe/pfcf near-zero, market_cap missing). Read signs and direction, not precise magnitudes.
