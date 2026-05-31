@@ -373,6 +373,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_pit_universe_args(compounder)
     compounder.add_argument("--output", type=Path)
     compounder.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
+    compounder.add_argument(
+        "--sectors-csv",
+        type=Path,
+        default=None,
+        help="CSV (symbol,sic,sector) to enable sector-aware scoring "
+        "(financials: FCF metrics excluded).",
+    )
 
     walk_forward = sub.add_parser(
         "walk-forward",
@@ -1304,13 +1311,25 @@ def _run_compounder_scan(args: argparse.Namespace) -> int:
             continue
         universe[s] = (recs, float(bars[-1].close))
 
-    ranked = rank_compounders(universe, top_n=args.top_n)
+    sectors: dict[str, str] = {}
+    if args.sectors_csv is not None and args.sectors_csv.exists():
+        import csv as _csv
+
+        with args.sectors_csv.open(encoding="utf-8", newline="") as fh:
+            for row in _csv.DictReader(fh):
+                sym = (row.get("symbol") or "").upper()
+                if sym:
+                    sectors[sym] = row.get("sector") or "unknown"
+
+    ranked = rank_compounders(universe, top_n=args.top_n, sectors=sectors or None)
     if args.archetype:
         ranked = [c for c in ranked if c.best_archetype == args.archetype]
 
     lines = [f"# Compounder Scan — as-of {as_of} — {len(universe)} names scored", ""]
     for c in ranked:
-        lines.append(format_dossier_markdown(build_dossier(c)))
+        lines.append(
+            format_dossier_markdown(build_dossier(c, sector=sectors.get(c.symbol, "unknown")))
+        )
         lines.append("")
     return _emit("\n".join(lines), args.output)
 

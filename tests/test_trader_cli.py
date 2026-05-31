@@ -1263,3 +1263,88 @@ def test_compounder_scan_runs_and_reports(tmp_path, capsys) -> None:
     assert result == 0
     assert "AAA" in captured.out
     assert "/100" in captured.out  # archetype score rendered
+
+
+def test_compounder_scan_sectors_csv_excludes_financial_fcf(tmp_path, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    catalog = MarketDataCatalog(catalog_db)
+    catalog.put_bars(_long_bars("BNKX", 10.0, 0.0010))
+    catalog.put_bars(_long_bars("TCH", 10.0, 0.0011))
+    catalog.put_fundamentals(
+        [
+            FundamentalRecord(
+                "BNKX",
+                "us",
+                date(2023, 12, 31),
+                datetime(2024, 3, 1),
+                revenue=200.0,
+                net_income=40.0,
+                free_cash_flow=900.0,
+                total_equity=100.0,
+                total_debt=10.0,
+                shares_out=50.0,
+                eps=5.0,
+            ),
+            FundamentalRecord(
+                "BNKX",
+                "us",
+                date(2020, 12, 31),
+                datetime(2021, 3, 1),
+                revenue=100.0,
+                net_income=10.0,
+                free_cash_flow=400.0,
+                total_equity=100.0,
+                total_debt=10.0,
+                shares_out=50.0,
+                eps=2.0,
+            ),
+            FundamentalRecord(
+                "TCH",
+                "us",
+                date(2023, 12, 31),
+                datetime(2024, 3, 1),
+                revenue=200.0,
+                net_income=40.0,
+                free_cash_flow=30.0,
+                total_equity=100.0,
+                total_debt=10.0,
+                shares_out=50.0,
+                eps=5.0,
+            ),
+            FundamentalRecord(
+                "TCH",
+                "us",
+                date(2020, 12, 31),
+                datetime(2021, 3, 1),
+                revenue=100.0,
+                net_income=10.0,
+                free_cash_flow=8.0,
+                total_equity=100.0,
+                total_debt=10.0,
+                shares_out=50.0,
+                eps=2.0,
+            ),
+        ]
+    )
+    sectors = tmp_path / "sectors.csv"
+    sectors.write_text("symbol,sic,sector\nBNKX,6021,financials\nTCH,7372,tech\n", encoding="utf-8")
+
+    result = cli.main(
+        [
+            "compounder-scan",
+            "BNKX,TCH",
+            "--as-of",
+            "2024-06-30",
+            "--top-n",
+            "2",
+            "--no-fetch",
+            "--sectors-csv",
+            str(sectors),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "[financials]" in captured.out  # BNKX dossier tagged
+    assert "FCF-based metrics excluded" in captured.out
