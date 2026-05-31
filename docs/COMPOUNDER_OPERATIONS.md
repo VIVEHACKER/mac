@@ -112,14 +112,15 @@ So "quality anti-predicts" was substantially a **net-margin metric-definition ar
 fix is to re-measure quality (net→gross), NOT to drop the quality tilt. The gross edge is still
 modest (z≈1.0 at N≈2–3) → promising, not yet validated.
 
-**Operating consequence:** the funnel stays a SCREEN. A reversible **defensive ADD** shipped
-(2026-06-01): `gross_profitability` is now weighted 0.15 in `profitable_compounder` (roic/fcf
-kept; gross metrics sector-nulled for financials) — this de-risks the dominance of the
-anti-predictive net-margin metric without claiming alpha (moves ~2/20 top names, coverage held
-~84.5%). A **confident** value-led QARP reweight is GATED on a true held-out time period (pinned
-prices, long-only, sector/size-neutral, t>2). Full record + OOS audit: the OOS follow-up and
-action plan in `docs/COMPOUNDER_VALIDATION.md`. The OOS run itself:
-`scripts/compounder_oos_validation.py`.
+**Operating consequence:** the funnel stays a SCREEN with its ORIGINAL `profitable_compounder`
+weights. A `gross_profitability` 0.15 ADD was tried then **REVERTED**: the held-out-time gate
+(`scripts/compounder_heldout_oos.py`, pinned prices, as-of 2020/2021/2022) did NOT confirm it
+(held-out gross_quality IC −0.014, size-partial −0.020 — did not survive a size control). The
+held-out-durable signal is **VALUE** (qarp +0.191, 3/3, +31% long-only top-decile); net-margin
+quality is durably anti-predictive. A value-led reweight is the documented future direction but
+needs more power before touching `_WEIGHTS`. Full record: the held-out gate + action plan in
+`docs/COMPOUNDER_VALIDATION.md`. Runs: `scripts/compounder_oos_validation.py`,
+`scripts/compounder_heldout_oos.py`.
 
 Re-run (regenerate the snapshot first, then):
 ```bash

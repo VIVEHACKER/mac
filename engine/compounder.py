@@ -20,18 +20,19 @@ MIN_ARCHETYPE_COVERAGE: float = 0.5  # FIX C: min fraction of archetype |weight|
 # (metric_key, weight). Negative weight = lower-is-better. Weights per archetype
 # sum to 1.0 over present metrics (renormalized when some are missing).
 _WEIGHTS: dict[str, list[tuple[str, float]]] = {
-    # P0 OOS de-risking (2026-06-01): net-margin/NI-ROIC quality ANTI-predicts forward returns
-    # (P5: IC -0.084, z~-2.6); Novy-Marx gross profitability (GP/assets) is the less-bad metric
-    # (marginally +, z~1.0). We ADD gross_profitability at a small weight (KEEP roic/fcf — a
-    # wholesale replace would crash coverage 85%->52%). This is a reversible screen-stage nudge,
-    # NOT a validated alpha; a confident value-led QARP re-weight is gated on a held-out time
-    # period (see docs/COMPOUNDER_VALIDATION.md). Engine renormalizes over present weights.
+    # NOTE (2026-06-01): a gross_profitability ADD was tried here (net-margin/NI-ROIC quality
+    # anti-predicts forward returns — P5 IC -0.084, z~-2.6 — and Novy-Marx gross profitability
+    # looked less-bad in-sample). It was REVERTED: the held-out-time OOS (action 3b) did NOT
+    # confirm it (held-out gross_quality IC -0.014, 1/3 windows, size-partial -0.020 — the
+    # in-sample +0.04 did not generalize to 2020-2022). Validate-before-trust: don't weight an
+    # unconfirmed signal. gross_profitability stays MEASURED (compute_metrics) for diagnostics
+    # only. The held-out-DURABLE signal is VALUE (qarp +0.191, 3/3); a value-led reweight is the
+    # documented next step, gated on more power. See docs/COMPOUNDER_VALIDATION.md.
     "profitable_compounder": [
         ("roic", 0.30),
         ("fcf_margin", 0.25),
         ("margin_trend", 0.20),
         ("revenue_cagr", 0.15),
-        ("gross_profitability", 0.15),
         ("share_growth", -0.10),
     ],
     "hypergrowth_disruptor": [

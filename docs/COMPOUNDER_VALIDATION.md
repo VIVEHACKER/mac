@@ -155,17 +155,41 @@ crash archetype coverage ~85%→52% (GP present for only ~52% of rows). So we di
 ADD (item 3a) and gate the confident value-led QARP reweight on a true held-out time period
 (item 3b).
 
+## Held-out-time gate (2026-06-01) — 3b result
+
+`scripts/compounder_heldout_oos.py` used pinned prices (`prices-2026-06-01`) and tested as-of
+2020/2021/2022-06-30 with 3y forward returns. **Gate result: NOT PASSED for gross_quality.**
+
+| Composite | raw IC | pos | sector-neutral IC | size-partial IC | long-only top-decile excess |
+|---|--:|--:|--:|--:|--:|
+| gross_quality | −0.014 | 1/3 | +0.008 | −0.020 | −3.9% |
+| qarp | +0.191 | 3/3 | +0.160 | +0.173 | +31.0% |
+| net_quality | −0.045 | 0/3 | −0.057 | +0.022 | −11.8% |
+
+Read this conservatively: only 3 overlapping windows, so it does NOT crown QARP as an alpha.
+But it is decisive for the pending decision: **gross_quality did NOT confirm out-of-time** (raw
+−0.014, 1/3 windows, and the market_cap-partial IC −0.020 means it does not survive a size
+control — it may even have been a size/sector tilt). The in-sample +0.04 was period-specific.
+
+**Consequence — the defensive gross ADD was REVERTED** (engine/compounder.py): validate-before-
+trust does not allow an unconfirmed signal to stay weighted in the live funnel. gross_profitability
+remains MEASURED (`compute_metrics`) for diagnostics and sector-nulled for financials, but is NOT
+a scoring weight. The funnel reverts to its prior `profitable_compounder` weights and stays a
+SCREEN. The held-out-DURABLE finding is **VALUE** (qarp +0.191, 3/3, +31% long-only top-decile,
+size-robust) and the durable NEGATIVE is net-margin quality — a future value-led redesign is the
+right direction, but needs more power than 3 overlapping windows before touching `_WEIGHTS`.
+
 ## Action plan (the path to an actual edge)
 
 | # | Action | Why | Priority |
 |---|---|---|---|
 | 1 | Funnel stays a SCREEN, not a return predictor. Do NOT ship the in-sample `redesign_composite`/`qarp` as alpha. | All composites sit inside the noise band at honest N. | P0 |
 | 2 | ✅ DONE (2026-06-01) — added `gross_profit`/`cost_of_revenue`, re-ingested SEC GP/COGS/Assets (1,003 names), re-ran IC. | GP/assets +ve while net quality −ve: the net metric was the confound (Novy-Marx). | P0 |
-| 3a | ✅ DONE (2026-06-01) — **defensive ADD**: `gross_profitability` weighted 0.15 in `profitable_compounder` (roic/fcf KEPT), gross metrics sector-nulled for financials. Reversible one-file change; coverage held ~84.5% (vs 52% for a replace); moves ~2/20 top names. | Removes the dominance of a z≈−2.6 anti-predictive net metric at near-zero downside — a screen-stage de-risking, NOT a claimed alpha. | P0 |
-| 3b | GATED — confident value-led QARP archetype + reweight: validate on a never-touched **held-out TIME period** (2020–2023 and/or pre-2012 as-of), with **pinned prices**, **long-only top-decile-vs-benchmark** (not short-leg L/S), **sector/size-neutralized** IC, require IC>0 at **t>2** honoring window overlap. Only then change weights confidently. | The positive gross edge is marginal/in-sample; only a held-out period earns a confident reweight. | P0 |
-| 4 | Reconstruct point-in-time index membership (restore delisted/acquired names). | Acquired compounders exiting the current set biases quality IC downward; if it moves toward zero/positive once dead names return, the redesign premise collapses. Biggest single threat to the whole conclusion. | P1 |
-| 5 | ✅ DONE (2026-06-01) — surfaced `market_cap` in `compute_metrics` (diagnostic only, not a `_WEIGHTS` input). | Enables the size anchor for the pipeline self-check + testing whether GP/assets is a size tilt, and size-neutral IC for the gated 3b. | P1 |
-| 6 | Emit per-cell raw IC arrays + block-bootstrap significance from `compounder_factor_ic.py`. | Confirm whether quality_composite −0.079 is the marginal effect (z≈−2.2 to −2.6) the stats lens estimates, vs noise. | P2 |
+| 3a | ↩️ TRIED then REVERTED (2026-06-01) — a `gross_profitability` 0.15 ADD was shipped, then removed after 3b failed to confirm it out-of-time. gross_profitability stays measured (diagnostics) + sector-nulled for financials, but is NOT a `_WEIGHTS` input. | Validate-before-trust: an unconfirmed signal must not stay weighted live. | P0 |
+| 3b | ✅ TESTED / ❌ NOT PASSED (2026-06-01) — held-out-time gate, pinned prices (2020/2021/2022 as-of, 3y fwd): `gross_quality` raw IC −0.014 (1/3), size-partial −0.020, top-decile −3.9%. Blocked the reweight and triggered the 3a revert. The durable held-out signal is VALUE (qarp +0.191, 3/3, +31% top-decile). | Only a properly-powered held-out test earns a confident reweight; gross did not pass. | P0 |
+| 4 | Reconstruct point-in-time index membership (restore delisted/acquired names). | Acquired compounders exiting the current set biases quality IC downward; biggest single threat to the whole conclusion. | P1 |
+| 5 | ✅ DONE (2026-06-01) — surfaced `market_cap` in `compute_metrics` (diagnostic only, not a `_WEIGHTS` input); used in 3b's size-partial IC. | Enables testing whether GP/assets is a size tilt (it did not survive — see 3b) + size-neutral validation IC. | P1 |
+| 6 | Price pinning ✅ DONE (`data/price_snapshot.py`, `prices-2026-06-01` sha256 4a9de78e) — used by 3b. Next: a properly-powered value-led held-out study (more windows / pre-2012 if coverage allows) before any `_WEIGHTS` change. | Pinned prices remove the run-to-run IC drift that confounded earlier reads. | P2 |
 
 ## Caveats (always cite when deciding)
 
@@ -173,4 +197,6 @@ Survivorship (above); effective N ≈ 2–3 (overlapping windows → low power, 
 significance); horizon trends are overlap artifacts; no transaction costs/taxes/turnover in the
 main P5 run; PIT index membership not reconstructed; net-margin quality was the wrong proxy for
 academic gross-profitability quality; value self-check only half-passes (pb/ps clearly negative,
-pe/pfcf near-zero, market_cap missing). Read signs and direction, not precise magnitudes.
+pe/pfcf near-zero). `market_cap` is now surfaced and used in action 3b's size-partial IC, but
+the original OOS table above is still not a fully sector/size-neutral study. Read signs and
+direction, not precise magnitudes.

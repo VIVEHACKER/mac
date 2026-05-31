@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 
 from data.fundamentals_snapshot import read_fundamentals_snapshot  # noqa: E402
 from data.models import FundamentalRecord  # noqa: E402
+from data.price_snapshot import read_price_snapshot, write_price_snapshot  # noqa: E402
 from engine.compounder import SECTOR_INVALID_METRICS, rank_compounders  # noqa: E402
 
 DEFAULT_UNIVERSE = ROOT / "data" / "universes" / "sp400-600-current.csv"
@@ -96,8 +97,27 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--sectors2", type=Path, default=None)
     p.add_argument("--label2", default="megacap", help="label for the out-of-universe set")
+    p.add_argument(
+        "--price-snapshot",
+        type=Path,
+        default=None,
+        help="Read a content-hashed close-price snapshot instead of downloading yfinance prices.",
+    )
+    p.add_argument(
+        "--write-price-snapshot",
+        type=Path,
+        default=None,
+        help="Write downloaded prices to this snapshot CSV path for reproducible reruns.",
+    )
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
     return p.parse_args()
+
+
+def write_price_snapshot_path(closes: pd.DataFrame, csv_path: Path) -> None:
+    """Write a price snapshot to an explicit CSV path, with the matching manifest beside it."""
+    if csv_path.suffix != ".csv":
+        raise ValueError("--write-price-snapshot must end with .csv")
+    write_price_snapshot(closes, csv_path.parent, csv_path.stem)
 
 
 def price_asof(close: pd.Series, as_of: date) -> float | None:
@@ -283,10 +303,19 @@ def main() -> None:
     if args.universe2 and args.universe2.exists():
         sets.append((args.label2, load_symbols(args.universe2), load_sectors(args.sectors2)))
 
-    all_syms = sorted({s for _, syms, _ in sets for s in syms})
-    print(f"Downloading prices for {len(all_syms)} symbols ({PRICE_START}..{PRICE_END})...")
-    raw = yf.download(all_syms, start=PRICE_START, end=PRICE_END, auto_adjust=True, progress=False)
-    closes = raw["Close"]
+    if args.price_snapshot:
+        print(f"Reading pinned prices from {args.price_snapshot}...")
+        closes = read_price_snapshot(args.price_snapshot, verify=True)
+    else:
+        all_syms = sorted({s for _, syms, _ in sets for s in syms})
+        print(f"Downloading prices for {len(all_syms)} symbols ({PRICE_START}..{PRICE_END})...")
+        raw = yf.download(
+            all_syms, start=PRICE_START, end=PRICE_END, auto_adjust=True, progress=False
+        )
+        closes = raw["Close"]
+        if args.write_price_snapshot:
+            write_price_snapshot_path(closes, args.write_price_snapshot)
+            print(f"Wrote price snapshot {args.write_price_snapshot}")
 
     results = {}
     for i, (label, syms, sectors) in enumerate(sets):
@@ -533,7 +562,8 @@ def main() -> None:
         "Test 2 L/S short leg unrealistic + cost haircut omits borrow and mis-annualizes "
         "turnover; out-of-universe (megacap) EMPTY for gross_quality (generalization unproven); "
         "no sector/size neutralization, so GP/assets could partly be an asset-light-sector or "
-        "size tilt (market_cap not yet surfaced). Pre-registration of formulas is genuine, but "
+        "size tilt (market_cap is surfaced, but not yet used for neutralized IC here). "
+        "Pre-registration of formulas is genuine, but "
         "the 'gross flips +' hypothesis was found in-sample on this SAME data — this is a "
         "re-test on the discovery sample, not fresh data.",
     ]

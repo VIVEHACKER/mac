@@ -325,7 +325,7 @@ def test_archetype_coverage_field_populated() -> None:
     import pytest
 
     assert pc.coverage == pytest.approx(1.0), (
-        f"profitable_compounder has 6 weighted metrics; full-data name should have coverage=1.0, got {pc.coverage}"
+        f"profitable_compounder has 5 weighted metrics; full-data name should have coverage=1.0, got {pc.coverage}"
     )
 
 
@@ -503,16 +503,16 @@ def test_score_archetypes_sectors_default_none_unchanged():
 from engine.compounder import _WEIGHTS  # noqa: E402
 
 
-def test_profitable_compounder_includes_gross_profitability():
-    """P0 OOS de-risking: gross_profitability is ADDED to the quality archetype (roic/fcf kept).
-
-    Net-margin/ROIC quality anti-predicts forward returns (P5, z~-2.6); GP/assets is the
-    less-bad literature metric. We ADD it at a small weight rather than replace (coverage)."""
+def test_gross_profitability_not_weighted_pending_heldout_validation():
+    """The gross_profitability ADD was REVERTED after the held-out-time OOS (action 3b) failed
+    to confirm it: held-out gross_quality IC -0.014 (1/3 windows, size-partial -0.020) — the
+    in-sample +0.04 did NOT generalize to 2020-2022. Validate-before-trust: an unconfirmed
+    signal must not stay weighted in the live funnel. It remains MEASURED (compute_metrics) for
+    diagnostics, and sector-nulled for financials, but is NOT a _WEIGHTS scoring input.
+    The held-out-durable signal is VALUE (qarp +0.191, 3/3); net-margin quality is durably bad."""
     keys = [k for k, _ in _WEIGHTS["profitable_compounder"]]
-    assert "gross_profitability" in keys, "gross_profitability must be a weighted signal"
-    # roic and fcf_margin are KEPT (reversible ADD, not a coverage-crashing replace)
-    assert "roic" in keys
-    assert "fcf_margin" in keys
+    assert "gross_profitability" not in keys, "reverted: not held-out-validated"
+    assert "market_cap" not in keys  # diagnostics-only, never weighted
 
 
 def test_financials_sector_nulls_gross_metrics():
