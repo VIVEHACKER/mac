@@ -73,7 +73,7 @@ def process_order_intents(
         # are evaluated against the exposure already committed by earlier accepted
         # intents. Risk-reducing sells lower exposure and free cash; buys consume
         # cash/buying_power and inflate symbol weight.
-        mark_price = marks.get(intent.symbol) or intent.limit_price or 0.0
+        mark_price = intent.limit_price or marks.get(intent.symbol) or 0.0
         if mark_price > 0:
             positions = _project_positions(positions, intent, mark_price)
             if intent.side == "buy":
