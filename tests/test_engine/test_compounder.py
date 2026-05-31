@@ -446,3 +446,48 @@ def test_coverage_gate_excludes_sparse_name() -> None:
     )
     assert "F1" in symbols, "F1 should be included in ranking"
     assert "F2" in symbols, "F2 should be included in ranking"
+
+
+from engine.compounder import SECTOR_INVALID_METRICS, score_archetypes  # noqa: E402
+
+
+def test_sector_invalid_metrics_defines_financials():
+    assert "fcf_margin" in SECTOR_INVALID_METRICS["financials"]
+    assert "fcf_conversion" in SECTOR_INVALID_METRICS["financials"]
+    assert "pfcf" in SECTOR_INVALID_METRICS["financials"]
+
+
+def test_financial_sector_excludes_fcf_from_scoring():
+    # A "bank" with a huge FCF artifact vs a peer; with sectors, FCF is excluded.
+    bank = _series(
+        "BANKX",
+        [100, 110, 121, 133],
+        [20, 24, 30, 40],
+        [900, 900, 900, 900],
+        100.0,
+        10.0,
+        50.0,
+        5.0,
+    )  # absurd FCF (artifact)
+    peer = _series(
+        "PEER", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    universe = {"BANKX": (bank, 60.0), "PEER": (peer, 60.0)}
+
+    no_sector = score_archetypes(universe)
+    with_sector = score_archetypes(universe, sectors={"BANKX": "financials", "PEER": "tech"})
+
+    # Without sector info, the bank's profitable-compounder score uses its huge FCF margin.
+    # With sector info, FCF metrics are nulled for the bank, so its components must NOT
+    # include fcf_margin, and PEER (non-financial) is unaffected.
+    assert "fcf_margin" in no_sector["BANKX"]["profitable_compounder"].components
+    assert "fcf_margin" not in with_sector["BANKX"]["profitable_compounder"].components
+    assert "fcf_margin" in with_sector["PEER"]["profitable_compounder"].components
+
+
+def test_score_archetypes_sectors_default_none_unchanged():
+    q = _series(
+        "QLT", [100, 110, 121, 133], [20, 24, 30, 40], [18, 22, 28, 38], 100.0, 10.0, 50.0, 5.0
+    )
+    universe = {"QLT": (q, 60.0)}
+    assert score_archetypes(universe) == score_archetypes(universe, sectors=None)

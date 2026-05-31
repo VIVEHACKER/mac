@@ -40,6 +40,12 @@ _WEIGHTS: dict[str, list[tuple[str, float]]] = {
     ],
 }
 
+# Metrics that are meaningless for a sector and must be excluded from scoring.
+# Financials (banks/insurers/REITs): free-cash-flow ratios are not comparable.
+SECTOR_INVALID_METRICS: dict[str, frozenset[str]] = {
+    "financials": frozenset({"fcf_margin", "fcf_conversion", "pfcf"}),
+}
+
 
 @dataclass(frozen=True)
 class ArchetypeScore:
@@ -103,9 +109,19 @@ def _flags(metrics: dict[str, float | None]) -> tuple[str, ...]:
 
 def score_archetypes(
     universe: dict[str, tuple[Sequence[FundamentalRecord], float]],
+    sectors: dict[str, str] | None = None,
 ) -> dict[str, dict[str, ArchetypeScore]]:
     symbols = list(universe)
     metrics = {s: compute_metrics(universe[s][0], universe[s][1]) for s in symbols}
+
+    # Sector-aware: null metrics that are meaningless for a symbol's sector
+    # (e.g. FCF ratios for financials) so they don't enter Z-scoring or weighting.
+    if sectors:
+        for s in symbols:
+            invalid = SECTOR_INVALID_METRICS.get(sectors.get(s, ""), frozenset())
+            for m in invalid:
+                if m in metrics[s]:
+                    metrics[s][m] = None
 
     # Cross-sectional Z per metric key.
     keys = {k for m in metrics.values() for k in m}
@@ -154,8 +170,9 @@ class CandidateScore:
 def rank_compounders(
     universe: dict[str, tuple[Sequence[FundamentalRecord], float]],
     top_n: int = 20,
+    sectors: dict[str, str] | None = None,
 ) -> list[CandidateScore]:
-    all_scores = score_archetypes(universe)
+    all_scores = score_archetypes(universe, sectors=sectors)
     candidates: list[CandidateScore] = []
     for symbol, arch_scores in all_scores.items():
         metrics = compute_metrics(universe[symbol][0], universe[symbol][1])
