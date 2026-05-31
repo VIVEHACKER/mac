@@ -206,6 +206,13 @@ def run_factor_rotation_backtest(
         raise ValueError("volume_lookback_short must be >= 1")
     if volume_lookback_long < 1:
         raise ValueError("volume_lookback_long must be >= 1")
+    if volume_lookback_short > volume_lookback_long:
+        raise ValueError(
+            "volume_lookback_short must be <= volume_lookback_long "
+            f"(got short={volume_lookback_short}, long={volume_lookback_long}); "
+            "a larger short window than the long window would index negatively "
+            "and leak future volume data (look-ahead bias)"
+        )
     if not 0.0 <= volume_weight <= 1.0:
         raise ValueError("volume_weight must be >= 0 and <= 1")
     if regime_cash_corr_window < 2:

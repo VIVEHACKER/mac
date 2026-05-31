@@ -109,6 +109,30 @@ def test_volume_spike_score_insufficient_history_returns_zero() -> None:
     assert score == 0.0
 
 
+def test_volume_spike_score_short_greater_than_long_raises() -> None:
+    """volume_lookback_short > volume_lookback_long must raise ValueError (look-ahead guard).
+
+    Without the fix, passing short=252 long=21 to run_factor_rotation_backtest would
+    silently compute a negative slice start that Python wraps to the END of the series,
+    leaking future volume data into the score (look-ahead bias).
+    """
+    import pytest
+
+    with pytest.raises(ValueError, match="volume_lookback_short.*volume_lookback_long"):
+        run_factor_rotation_backtest(
+            {"AAA": _bars_with_volume("AAA", closes=[10] * 30, volumes=[100.0] * 30)},
+            momentum_lookback=5,
+            reversal_lookback=2,
+            volatility_lookback=3,
+            risk_filter_lookback=0,
+            top_n=1,
+            rebalance_days=3,
+            volume_weight=0.5,
+            volume_lookback_short=252,
+            volume_lookback_long=21,
+        )
+
+
 def test_volume_weight_zero_backward_compat() -> None:
     """volume_weight=0 must produce identical result to omitting volume args."""
     bars = _bars_with_volume(
