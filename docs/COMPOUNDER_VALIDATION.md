@@ -175,9 +175,38 @@ control — it may even have been a size/sector tilt). The in-sample +0.04 was p
 trust does not allow an unconfirmed signal to stay weighted in the live funnel. gross_profitability
 remains MEASURED (`compute_metrics`) for diagnostics and sector-nulled for financials, but is NOT
 a scoring weight. The funnel reverts to its prior `profitable_compounder` weights and stays a
-SCREEN. The held-out-DURABLE finding is **VALUE** (qarp +0.191, 3/3, +31% long-only top-decile,
-size-robust) and the durable NEGATIVE is net-margin quality — a future value-led redesign is the
-right direction, but needs more power than 3 overlapping windows before touching `_WEIGHTS`.
+SCREEN. In the held-out 3 windows VALUE (qarp) looked strong (+0.191, 3/3) — but that was only
+3 windows; see the value-factor confirmation below, which tests it properly and finds it is NOT
+uniformly robust either.
+
+## Value-factor confirmation (2026-06-01) — full-period, pinned prices
+
+`scripts/compounder_value_validation.py` tested a PRE-REGISTERED untuned value composite
+(cheap ps + pb) over the FULL 2012-2022 as-of span (11 windows, ~3.7× the held-out power), pinned
+prices, sector-nulled, with size-partial IC + regime thirds + cost haircut. **Value is NOT
+uniformly robust on this universe:**
+
+| metric | value |
+|---|--:|
+| pooled raw IC | +0.113 (8/11 windows +) |
+| sector-neutral IC | +0.116 |
+| **size-partial IC** | **+0.032** (collapses from +0.113 — most of value's IC is a SIZE/small-cap effect) |
+| regime IC 2012-15 / 2016-19 / 2020-23 | +0.159 / **−0.059** / +0.283 |
+
+So value (a) goes NEGATIVE in the 2016-19 growth regime (a value winter), and (b) is largely a
+small-cap effect once size is controlled — and on a survivor universe small-cap returns are
+upward-biased. The held-out 3-window +0.191 was period-specific (2020-2022, a value-favorable
+window). **No value tilt to `_WEIGHTS` is justified.**
+
+### Terminal conclusion of the P5 → gross → value arc
+
+On this mid/small-cap *current-constituent* universe at 3-5y horizons, **no single factor
+(gross-profitability, net-margin quality, or value) is robustly predictive once you control for
+regime, size, and sector.** The one durable result is that **net-margin/NI-ROIC quality
+ANTI-predicts** — but there is no validated replacement, and gutting the quality archetype
+without one would be its own over-fit. Therefore: **the funnel stays an evidence-backed SCREEN
+with its original weights; no confident `_WEIGHTS` tilt is warranted.** This is the validate-
+before-trust process working as intended — every candidate edge was tested to destruction.
 
 ## Action plan (the path to an actual edge)
 
@@ -189,7 +218,7 @@ right direction, but needs more power than 3 overlapping windows before touching
 | 3b | ✅ TESTED / ❌ NOT PASSED (2026-06-01) — held-out-time gate, pinned prices (2020/2021/2022 as-of, 3y fwd): `gross_quality` raw IC −0.014 (1/3), size-partial −0.020, top-decile −3.9%. Blocked the reweight and triggered the 3a revert. The durable held-out signal is VALUE (qarp +0.191, 3/3, +31% top-decile). | Only a properly-powered held-out test earns a confident reweight; gross did not pass. | P0 |
 | 4 | ⛔ BLOCKED on external paid data (2026-06-01) — PIT S&P 400/600 membership history + delisted-name returns require CRSP or a historical-constituents vendor. The local catalog has only a current (2026-05-31) constituent list and 26 delisting rows; free sources (yfinance/Wikipedia) do not give reliable 2012-2025 add/drop events or delisting returns for ~1000 mid/small-caps. The survivorship caveat therefore stands as a documented, unquantified bias (it biases quality IC DOWNWARD — i.e. against, not for, our conclusions). | Acquired compounders exiting the current set biases quality IC downward; biggest single threat — but unfixable without paid data. | P1 (blocked) |
 | 5 | ✅ DONE (2026-06-01) — surfaced `market_cap` in `compute_metrics` (diagnostic only, not a `_WEIGHTS` input); used in 3b's size-partial IC. | Enables testing whether GP/assets is a size tilt (it did not survive — see 3b) + size-neutral validation IC. | P1 |
-| 6 | Price pinning ✅ DONE (`data/price_snapshot.py`, `prices-2026-06-01` sha256 4a9de78e) — used by 3b. Next: a properly-powered value-led held-out study (more windows / pre-2012 if coverage allows) before any `_WEIGHTS` change. | Pinned prices remove the run-to-run IC drift that confounded earlier reads. | P2 |
+| 6 | ✅ DONE — price pinning (`data/price_snapshot.py`, `prices-2026-06-01` sha256 4a9de78e) + the properly-powered value study (`compounder_value_validation.py`, 11 windows): value is NOT uniformly robust (negative 2016-19 regime; size-partial +0.032 collapses from +0.113). **No value tilt justified.** No further `_WEIGHTS` study is queued — see Terminal conclusion above. | Pinned prices removed the IC drift; the value study closed the last candidate tilt. | done |
 
 ## Caveats (always cite when deciding)
 

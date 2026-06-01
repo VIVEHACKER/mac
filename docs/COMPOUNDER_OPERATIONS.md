@@ -116,11 +116,16 @@ modest (z≈1.0 at N≈2–3) → promising, not yet validated.
 weights. A `gross_profitability` 0.15 ADD was tried then **REVERTED**: the held-out-time gate
 (`scripts/compounder_heldout_oos.py`, pinned prices, as-of 2020/2021/2022) did NOT confirm it
 (held-out gross_quality IC −0.014, size-partial −0.020 — did not survive a size control). The
-held-out-durable signal is **VALUE** (qarp +0.191, 3/3, +31% long-only top-decile); net-margin
-quality is durably anti-predictive. A value-led reweight is the documented future direction but
-needs more power before touching `_WEIGHTS`. Full record: the held-out gate + action plan in
-`docs/COMPOUNDER_VALIDATION.md`. Runs: `scripts/compounder_oos_validation.py`,
-`scripts/compounder_heldout_oos.py`.
+value looked strong in those 3 held-out windows but a full-period value confirmation
+(`scripts/compounder_value_validation.py`, 11 windows, pinned prices) found even VALUE is NOT
+uniformly robust — negative in the 2016-19 growth regime and mostly a small-cap/size effect
+after a size control (size-partial IC +0.032 vs raw +0.113). **Terminal conclusion: no single
+factor (gross / net-quality / value) survives regime+size+sector controls on this universe → no
+`_WEIGHTS` tilt is warranted; the funnel stays an evidence-backed SCREEN with original weights.**
+The one durable finding is that net-margin quality anti-predicts, with no validated replacement.
+Full record + action plan: `docs/COMPOUNDER_VALIDATION.md`. Runs:
+`scripts/compounder_oos_validation.py`, `scripts/compounder_heldout_oos.py`, and
+`scripts/compounder_value_validation.py` (the last two use pinned prices).
 
 Re-run (regenerate the snapshot first, then):
 ```bash

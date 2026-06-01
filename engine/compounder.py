@@ -26,8 +26,10 @@ _WEIGHTS: dict[str, list[tuple[str, float]]] = {
     # confirm it (held-out gross_quality IC -0.014, 1/3 windows, size-partial -0.020 — the
     # in-sample +0.04 did not generalize to 2020-2022). Validate-before-trust: don't weight an
     # unconfirmed signal. gross_profitability stays MEASURED (compute_metrics) for diagnostics
-    # only. The held-out-DURABLE signal is VALUE (qarp +0.191, 3/3); a value-led reweight is the
-    # documented next step, gated on more power. See docs/COMPOUNDER_VALIDATION.md.
+    # only. Terminal finding: a full-period value confirmation also failed (value goes negative
+    # in the 2016-19 regime and is mostly a small-cap/size effect after a size control), so NO
+    # single factor (gross / net-quality / value) survives controls on this universe — NO
+    # `_WEIGHTS` tilt is justified; the funnel stays a SCREEN. See docs/COMPOUNDER_VALIDATION.md.
     "profitable_compounder": [
         ("roic", 0.30),
         ("fcf_margin", 0.25),
