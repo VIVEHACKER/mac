@@ -123,9 +123,16 @@ after a size control (size-partial IC +0.032 vs raw +0.113). **Terminal conclusi
 factor (gross / net-quality / value) survives regime+size+sector controls on this universe → no
 `_WEIGHTS` tilt is warranted; the funnel stays an evidence-backed SCREEN with original weights.**
 The one durable finding is that net-margin quality anti-predicts, with no validated replacement.
-Full record + action plan: `docs/COMPOUNDER_VALIDATION.md`. Runs:
-`scripts/compounder_oos_validation.py`, `scripts/compounder_heldout_oos.py`, and
-`scripts/compounder_value_validation.py` (the last two use pinned prices).
+A real long-only backtest (`scripts/compounder_backtest.py`, pinned prices, costs, buy-and-hold)
+confirms it in portfolio terms: the top-30 funnel does not beat an equal-weight of the same
+rank-eligible universe risk-adjusted (Sharpe 0.76 vs 0.86; +0.3%/yr CAGR but higher vol/DD, 7/13
+years = noise) — no reliable selection alpha. Survivorship is audited
+(`scripts/survivorship_audit.py`): the relative-excess verdict is insulated from the shared
+survivor inflation (residual works against the funnel); full removal needs CRSP (delisted prices
+unavailable free — 12/12 probe tickers return 0 bars). Full record + action plan:
+`docs/COMPOUNDER_VALIDATION.md`. Runs: `scripts/compounder_oos_validation.py`,
+`scripts/compounder_heldout_oos.py`, `scripts/compounder_value_validation.py` (held-out/value use
+pinned prices), `scripts/compounder_backtest.py`, `scripts/survivorship_audit.py`.
 
 Re-run (regenerate the snapshot first, then):
 ```bash

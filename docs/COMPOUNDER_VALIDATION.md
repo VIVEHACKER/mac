@@ -208,6 +208,25 @@ without one would be its own over-fit. Therefore: **the funnel stays an evidence
 with its original weights; no confident `_WEIGHTS` tilt is warranted.** This is the validate-
 before-trust process working as intended — every candidate edge was tested to destruction.
 
+## Real long-only backtest (2026-06-02) — portfolio confirmation
+
+`scripts/compounder_backtest.py` builds the ACTUAL portfolio (annual Jun-30 rebalance, hold the
+top-30 `best_score` names equal-weighted, daily NAV via pinned prices, turnover cost), vs an
+equal-weight benchmark of the SAME universe (so the excess isolates selection skill from
+survivor-universe drift). 2012-2025, net of cost:
+
+| | CAGR | Vol | Sharpe | Max DD |
+|---|--:|--:|--:|--:|
+| Funnel top-30 | +17.5% | 25.7% | 0.76 | −44.4% |
+| Equal-weight of rank-eligible universe | +17.2% | 21.1% | **0.86** | −43.0% |
+
+**The funnel does NOT beat naive equal-weight diversification on a risk-adjusted basis**: a tiny
++0.3%/yr CAGR edge (7/13 years — within noise) bought with HIGHER vol (25.7% vs 21.1%), LOWER
+Sharpe (0.76 vs 0.86), and a worse drawdown. (Buy-and-hold NAV, annual rebalance, benchmark =
+the same rank-eligible set; two Codex fixes corrected an earlier daily-rebalanced draft and a
+benchmark-universe mismatch.) This is the portfolio-level confirmation of the IC studies: the
+funnel has no reliable selection edge; its value is purely as a **screen** for human judgment.
+
 ## Action plan (the path to an actual edge)
 
 | # | Action | Why | Priority |
@@ -222,10 +241,16 @@ before-trust process working as intended — every candidate edge was tested to 
 
 ## Caveats (always cite when deciding)
 
-Survivorship (above); effective N ≈ 2–3 (overlapping windows → low power, marginal
-significance); horizon trends are overlap artifacts; no transaction costs/taxes/turnover in the
-main P5 run; PIT index membership not reconstructed; net-margin quality was the wrong proxy for
-academic gross-profitability quality; value self-check only half-passes (pb/ps clearly negative,
-pe/pfcf near-zero). `market_cap` is now surfaced and used in action 3b's size-partial IC, but
-the original OOS table above is still not a fully sector/size-neutral study. Read signs and
-direction, not precise magnitudes.
+Survivorship — now AUDITED in `scripts/survivorship_audit.py` (`out/survivorship-audit.md`):
+forward bias quantified (the 2012 backtest's actual RANK-ELIGIBLE selection set is only ~45% of
+today's universe — 68% have a price but fewer clear the fundamental/coverage gates — rising to
+~92% by 2024); the core "no selection edge" verdict is INSULATED from the shared survivor inflation
+(it's a relative excess between two legs of the same survivor set) — but only CONDITIONAL on the
+survivor universe (the composition of missing delisted names could shift the excess, plausibly
+AGAINST the funnel, so the read is conservative not proven-immune); and the backward bias is un-removable with free
+data (live probe: 12/12 known-delisted tickers return 0 yfinance bars → needs CRSP). Other
+caveats: effective N ≈ 2–3 (overlapping windows → low power); horizon trends are overlap
+artifacts; PIT index membership not reconstructed (paid-data task); net-margin quality was the
+wrong proxy for academic gross-profitability quality; value self-check only half-passes (pb/ps
+clearly negative, pe/pfcf near-zero). `market_cap` is surfaced and used in 3b's size-partial IC,
+but the original OOS table is not a fully sector/size-neutral study. Read signs, not magnitudes.
