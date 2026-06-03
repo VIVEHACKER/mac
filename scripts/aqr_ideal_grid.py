@@ -95,6 +95,13 @@ def parse_args() -> argparse.Namespace:
         default=0.30,
         help="defense constraint: reject configs whose WORST test-window MaxDD exceeds this",
     )
+    p.add_argument(
+        "--fee-bps",
+        type=float,
+        default=0.0,
+        help="one-way trading cost (bps) on rebalance turnover for ALL configs (cost-stress: "
+        "higher-turnover concentrated/levered configs lose more, testing if the edge survives)",
+    )
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
     return p.parse_args()
 
@@ -142,7 +149,7 @@ def main() -> None:
                 f"  [{cfg['name']}] cap bumped {cfg.get('cap', 0.20):.2f}->{feasible_cap:.2f} "
                 f"(feasible floor 1/top_n for top_n={cfg['top_n']})"
             )
-        cfg = {**cfg, "cap": feasible_cap}
+        cfg = {**cfg, "cap": feasible_cap, "fee_bps": args.fee_bps}
         rows = [run_window(ws, we, prices, fund_cache, cfg=cfg) for ws, we in windows]
         rows = [r for r in rows if r]
         if not rows:
@@ -180,9 +187,14 @@ def main() -> None:
         "Research-only. PRE-REGISTERED grid (concentration × modest leverage × trailing-stop "
         "defense) through walk-forward (rolling 3y OOS test windows, 2009-2025) on PINNED prices "
         "+ PINNED fundamentals. Objective: **max average test CAGR s.t. worst test MaxDD ≤ "
-        f"{args.maxdd_cap * 100:.0f}%**. All configs shown; the winner is a CANDIDATE, not a "
-        "validated edge (best-of-N has mild selection bias — needs the adversarial check + paper "
-        "OOS below).",
+        f"{args.maxdd_cap * 100:.0f}%**. "
+        + (
+            f"**Trading cost: {args.fee_bps:g} bps one-way on turnover (all metrics are NET).**"
+            if args.fee_bps > 0
+            else "**No trading cost (gross; pass --fee-bps to cost-stress).**"
+        )
+        + " All configs shown; the winner is a CANDIDATE, not a validated edge (best-of-N has "
+        "mild selection bias — needs the adversarial check + paper OOS below).",
         "",
         "| Config | top_n | pos-cap | lev | trail | avg CAGR | avg excess | Sharpe | worst MDD | win-rate | ≤cap? |",
         "|---|--:|--:|--:|--|--:|--:|--:|--:|--:|:--:|",
@@ -242,8 +254,10 @@ def main() -> None:
         "Caveats: walk-forward windows overlap (low effective N); current-constituent megacap "
         "universe (survivorship — absolute CAGR inflated, excess fairer); leverage modeled as a "
         "flat exposure multiplier (no borrow cost / margin calls / path-dependent liquidation); "
-        "best-of-N selection is mild snooping — the winner must pass an adversarial robustness "
-        "check (is it window-split-lucky? leverage-flattered?) and live paper OOS before capital.",
+        "--fee-bps charges target-weight turnover only (a conservative LOWER bound — omits "
+        "intra-period drift-rebalancing, so true costs are modestly higher); best-of-N selection "
+        "is mild snooping — the winner must pass an adversarial robustness check (window-split / "
+        "leverage / survivorship) and live paper OOS before capital.",
     ]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n".join(md) + "\n", encoding="utf-8")

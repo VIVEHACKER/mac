@@ -236,6 +236,7 @@ DEFAULT_CFG = {
     "trail_dd": -0.10,  # portfolio drawdown that triggers de-risking
     "trail_exposure": 0.5,  # exposure while below the trail trigger
     "base_leverage": 1.0,  # exposure when not in drawdown (>1 = modest leverage)
+    "fee_bps": 0.0,  # per-unit-notional one-way trading cost charged on rebalance turnover (0 = off)
 }
 
 
@@ -248,6 +249,7 @@ def run_window(start, end, prices, fund_cache, cfg=None):
     monthly_rets = []
     spy_rets = []
     equity_series = []
+    prev_weights: dict[str, float] = {}  # for turnover-based trading cost
 
     rebal_dates = []
     cur = pd.Timestamp(start) + pd.offsets.MonthEnd(0)
@@ -306,6 +308,16 @@ def run_window(start, end, prices, fund_cache, cfg=None):
                 continue
             port_ret += w * float(p_end / p_reb - 1.0)
         net_ret = port_ret * exposure
+        # Turnover-based trading cost on LEVERED target weights (w × exposure), charged vs the
+        # prior period's TARGET weights — captures name changes AND exposure (trail) changes.
+        # APPROXIMATION: it omits intra-period drift-rebalancing turnover, so it is a conservative
+        # LOWER BOUND on cost (true turnover is modestly higher). Using prior TARGETS (not drifted
+        # end-of-period holdings) deliberately avoids any forward-price look-ahead in the fee state.
+        lev_weights = {s: w * exposure for s, w in weights.items()}
+        if cfg["fee_bps"] > 0:
+            names = set(lev_weights) | set(prev_weights)
+            turnover = sum(abs(lev_weights.get(s, 0.0) - prev_weights.get(s, 0.0)) for s in names)
+            net_ret -= turnover * (cfg["fee_bps"] / 1e4)
 
         try:
             sp_end, sp_reb = prices.loc[end_ts, BENCHMARK], prices.loc[rebal, BENCHMARK]
@@ -315,6 +327,9 @@ def run_window(start, end, prices, fund_cache, cfg=None):
             continue
         spy_ret = float(sp_end / sp_reb - 1.0)
 
+        # Advance fee state ONLY for an INCLUDED month (after the benchmark check): a skipped
+        # month must not leave prev_weights ahead of the equity/returns the next month trades from.
+        prev_weights = lev_weights
         equity *= 1.0 + net_ret
         spy_eq *= 1.0 + spy_ret
         monthly_rets.append(net_ret)
