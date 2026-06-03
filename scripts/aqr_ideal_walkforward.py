@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from data.catalog import MarketDataCatalog  # noqa: E402
 from data.models import PriceBar  # noqa: E402
+from data.price_snapshot import read_price_snapshot  # noqa: E402
 from strategies.factor_aqr import rank_aqr_factors  # noqa: E402
 
 MEGACAPS = [
@@ -283,16 +284,25 @@ def run_window(start, end, prices, fund_cache):
         port_ret = 0.0
         for sym, w in weights.items():
             try:
-                r = float(prices.loc[end_ts, sym] / prices.loc[rebal, sym] - 1.0)
-            except (KeyError, TypeError):
+                p_end, p_reb = prices.loc[end_ts, sym], prices.loc[rebal, sym]
+            except KeyError:
                 continue
-            port_ret += w * r
+            # A position with a valid entry but a missing FORWARD price (delisting / snapshot gap)
+            # is held FLAT (0 return) at its weight — NOT renormalized onto the survivors, which
+            # would be look-ahead (using future data-availability to reallocate). float(NaN) is
+            # also not caught by except and would poison port_ret, so skip it explicitly (= flat).
+            if pd.isna(p_end) or pd.isna(p_reb) or float(p_reb) == 0.0:
+                continue
+            port_ret += w * float(p_end / p_reb - 1.0)
         net_ret = port_ret * exposure
 
         try:
-            spy_ret = float(prices.loc[end_ts, BENCHMARK] / prices.loc[rebal, BENCHMARK] - 1.0)
+            sp_end, sp_reb = prices.loc[end_ts, BENCHMARK], prices.loc[rebal, BENCHMARK]
         except KeyError:
             continue
+        if pd.isna(sp_end) or pd.isna(sp_reb) or float(sp_reb) == 0.0:
+            continue
+        spy_ret = float(sp_end / sp_reb - 1.0)
 
         equity *= 1.0 + net_ret
         spy_eq *= 1.0 + spy_ret
@@ -342,17 +352,50 @@ def main():
         help="Pin fundamentals to a content-verified snapshot CSV (reproducible, "
         "parity with paper_drill). Omit to read the live catalog.",
     )
+    parser.add_argument(
+        "--prices",
+        type=Path,
+        default=None,
+        help="Pin prices to a content-verified price snapshot CSV (reproducible). Must cover "
+        "MEGACAPS + the SPY benchmark. Omit to download live from yfinance (NOT reproducible).",
+    )
     args = parser.parse_args()
 
-    print("Downloading prices...")
-    raw = yf.download(
-        MEGACAPS + [BENCHMARK],
-        start="2008-01-01",
-        end="2026-05-28",
-        auto_adjust=True,
-        progress=False,
-    )
-    prices = raw["Close"].dropna(how="all")
+    if args.prices:
+        print(f"Loading PINNED prices {args.prices.name}...")
+        prices = read_price_snapshot(args.prices, verify=True)
+        missing = [s for s in [*MEGACAPS, BENCHMARK] if s not in prices.columns]
+        if missing:
+            raise SystemExit(
+                f"pinned price snapshot missing {len(missing)} required symbols "
+                f"(e.g. {missing[:5]}); regenerate it over MEGACAPS + {BENCHMARK}."
+            )
+        # The walk-forward needs effective coverage matching the live download (2008-01..2026-05):
+        # build_pricebars uses a 260-bar (~1y) lookback before the first 2009 rebalance, and the
+        # last 2023-2025 window rebalances through ~Dec 2025 and needs 21 trading days AFTER for
+        # forward returns. Reject a snapshot that can't cover both — otherwise run_window silently
+        # shortens/skips windows while the summary still labels them fixed 3y tests.
+        # Check the BENCHMARK's OWN non-NaN coverage (not the global matrix min/max): excess is
+        # computed vs SPY, so a snapshot where SPY has leading/trailing gaps — even if another
+        # symbol spans the range — would yield NaN SPY/excess and corrupt the model-gate inputs.
+        bench = prices[BENCHMARK].dropna()
+        lo, hi = bench.index.min().date(), bench.index.max().date()
+        if lo > date(2008, 1, 15) or hi < date(2026, 1, 31):
+            raise SystemExit(
+                f"pinned price snapshot {BENCHMARK} coverage {lo}..{hi} cannot cover the "
+                "2009-2025 walk-forward with its ~1y lookback + 21-bar forward (needs "
+                "≤2008-01-15 .. ≥2026-01-31); regenerate over the full 2008-01..2026-05 span."
+            )
+    else:
+        print("Downloading prices (LIVE yfinance — NOT reproducible)...")
+        raw = yf.download(
+            MEGACAPS + [BENCHMARK],
+            start="2008-01-01",
+            end="2026-05-28",
+            auto_adjust=True,
+            progress=False,
+        )
+        prices = raw["Close"].dropna(how="all")
     print(f"{len(prices)} bars")
 
     catalog = MarketDataCatalog()
