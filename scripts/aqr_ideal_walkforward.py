@@ -230,8 +230,19 @@ def lookup_pit(records, as_of_dt):
     return c
 
 
-def run_window(start, end, prices, fund_cache):
-    """Run IDEAL strategy over [start, end] and return metrics."""
+DEFAULT_CFG = {
+    "top_n": 7,
+    "cap": 0.20,
+    "trail_dd": -0.10,  # portfolio drawdown that triggers de-risking
+    "trail_exposure": 0.5,  # exposure while below the trail trigger
+    "base_leverage": 1.0,  # exposure when not in drawdown (>1 = modest leverage)
+}
+
+
+def run_window(start, end, prices, fund_cache, cfg=None):
+    """Run IDEAL strategy over [start, end] and return metrics. cfg knobs (DEFAULT_CFG)
+    parameterize concentration / cap / defense / leverage; defaults reproduce the validated line."""
+    cfg = {**DEFAULT_CFG, **(cfg or {})}
     equity = 10_000.0
     spy_eq = 10_000.0
     monthly_rets = []
@@ -253,7 +264,7 @@ def run_window(start, end, prices, fund_cache):
 
         port_peak = max([equity] + ([equity_series[-1]["peak"]] if equity_series else [10_000.0]))
         port_dd = (equity - port_peak) / max(port_peak, 1e-9)
-        exposure = 0.5 if port_dd < -0.10 else 1.0
+        exposure = cfg["trail_exposure"] if port_dd < cfg["trail_dd"] else cfg["base_leverage"]
 
         bars_by_sym, fund_by_sym = {}, {}
         for sym in MEGACAPS:
@@ -271,8 +282,8 @@ def run_window(start, end, prices, fund_cache):
         scores = rank_aqr_factors(bars_by_sym, fund_by_sym, lookback=126)
         if not scores:
             continue
-        picks = scores[:7]
-        weights = weights_from_picks(picks, prices, rebal, cap=0.20)
+        picks = scores[: cfg["top_n"]]
+        weights = weights_from_picks(picks, prices, rebal, cap=cfg["cap"])
         if not weights:
             continue
 
