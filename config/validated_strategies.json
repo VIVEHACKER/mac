@@ -1,0 +1,17 @@
+{
+  "_note": "Validated anchor strategies for the recommender. Reliability stats are read by valuation/confidence.py. The IDEAL baseline numbers come from out/MASTER-REPORT-2008-2026.md (gate-approved aqr_top7_cap20_trail10). psr/dsr are PROVISIONAL conservative placeholders pending the P3 re-validation harness, which will regenerate this file from engine/significance.py output.",
+  "default": "aqr_top7_cap20_trail10",
+  "strategies": {
+    "aqr_top7_cap20_trail10": {
+      "strategy_id": "aqr_top7_cap20_trail10",
+      "universe": "megacaps-ideal",
+      "top_n": 7,
+      "lookback": 126,
+      "wf_positive_rate": 0.87,
+      "psr": 0.80,
+      "dsr": 0.55,
+      "provisional": true,
+      "source": "out/MASTER-REPORT-2008-2026.md + out/aqr-ideal-grid.md"
+    }
+  }
+}
