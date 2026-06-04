@@ -26,6 +26,8 @@ def fetch_ccxt_bars(
     timeframe: str = "1d",
     exchange_id: str = "binance",
     fetch_ohlcv: Callable[[str, str, int, int], list[list[float]]] | None = None,
+    *,
+    intraday: bool = False,
 ) -> list[PriceBar]:
     source_symbol = normalize_crypto_symbol(symbol)
     since = _to_millis(start)
@@ -53,7 +55,13 @@ def fetch_ccxt_bars(
         if not advanced or len(batch) < 1000:
             break
 
-    bars = _rows_to_bars(rows, symbol=symbol, source_symbol=source_symbol, timeframe=timeframe)
+    bars = _rows_to_bars(
+        rows,
+        symbol=symbol,
+        source_symbol=source_symbol,
+        timeframe=timeframe,
+        intraday=intraday,
+    )
     if not bars:
         raise CcxtDataError(f"{source_symbol}: no OHLCV bars returned from {exchange_id}")
     return bars
@@ -73,18 +81,23 @@ def _rows_to_bars(
     symbol: str,
     source_symbol: str,
     timeframe: str,
+    intraday: bool = False,
 ) -> list[PriceBar]:
     bars: list[PriceBar] = []
     for row in sorted(rows, key=lambda item: item[0]):
         if len(row) < 6:
             continue
         timestamp, open_value, high_value, low_value, close_value, volume_value = row[:6]
+        moment = datetime.fromtimestamp(timestamp / 1000, tz=UTC)
+        # intraday bars keep the full (naive-UTC) datetime so sub-daily bars are distinct;
+        # datetime is a subclass of date, so daily code and the catalog are unaffected.
+        ts_value: date = moment.replace(tzinfo=None) if intraday else moment.date()
         bars.append(
             PriceBar(
                 symbol=normalize_crypto_symbol(symbol),
                 market="crypto",
                 source_symbol=source_symbol,
-                ts=datetime.fromtimestamp(timestamp / 1000, tz=UTC).date(),
+                ts=ts_value,
                 open=float(open_value),
                 high=float(high_value),
                 low=float(low_value),

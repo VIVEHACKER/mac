@@ -182,3 +182,45 @@ class EntryPlanRecord:
     risk_reward: float
     expected_holding_days: int = 180
     source: str = ""
+
+
+@dataclass(frozen=True)
+class OrderBookLevel:
+    """A single price level in an L2 order-book ladder."""
+
+    price: float
+    size: float
+
+
+@dataclass(frozen=True)
+class OrderBookSnapshot:
+    """A point-in-time L2 order-book snapshot (crypto, via ccxt fetch_order_book).
+
+    ``bids`` are sorted by price descending, ``asks`` by price ascending, mirroring
+    the ccxt contract. ``ts`` carries the full timestamp (exchange or local fallback).
+    See docs/CHART_READING.md §10.
+    """
+
+    exchange: str
+    symbol: str
+    ts: datetime
+    bids: tuple[OrderBookLevel, ...]
+    asks: tuple[OrderBookLevel, ...]
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class OpenInterestRecord:
+    """A single open-interest observation (crypto perpetual/futures, via ccxt).
+
+    ``open_interest_amount`` is the contract quantity (preferred for change-rate
+    detection); ``open_interest_value`` is the USD notional (preferred for absolute
+    size). See docs/CHART_READING.md §11 for the Amount-vs-Value distinction.
+    """
+
+    exchange: str
+    symbol: str
+    ts: datetime
+    open_interest_amount: float
+    open_interest_value: float | None = None
+    source: str = ""

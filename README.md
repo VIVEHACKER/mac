@@ -27,6 +27,7 @@
 | [docs/SENTIMENT_FLOW.md](docs/SENTIMENT_FLOW.md) | 자금 흐름 + 감정 (KRX 기관매매 / CFTC COT / GDELT / Reddit) |
 | [docs/DERIVATIVES_DATA.md](docs/DERIVATIVES_DATA.md) | 파생/마이크로구조 (Crypto funding+OI / CBOE VIX·SKEW·Put-Call / Deribit / 옵션 체인) |
 | [docs/VALUATION.md](docs/VALUATION.md) | **적정가·고저평가·진입가** (DCF / Multiples / RIM / 크립토 NVT-MVRV / MoS ladder) |
+| [docs/CHART_READING.md](docs/CHART_READING.md) | **차트 리딩 엔진** — 11개 개념(FVG/OB/매물대/볼륨/호가/OI/와이코프/패턴) 탐지 알고리즘 명세 + 컨플루언스 프레임워크 |
 | [docs/LIVE_OPERATIONS.md](docs/LIVE_OPERATIONS.md) | 실자금 자동운용 전환을 위한 live gate, halt, model promotion, dry-run 운영 런북 |
 | [docs/DEPLOYMENT_READINESS.md](docs/DEPLOYMENT_READINESS.md) | **IDEAL 라인(aqr_top7_cap20_trail10) 배포 준비도** — 통계 유의성(PSR/DSR/부트스트랩), 재현성, 운영자 게이트 |
 | [docs/COMPOUNDER_OPERATIONS.md](docs/COMPOUNDER_OPERATIONS.md) | **컴파운더(텐베거) 워치리스트 운영 런북** — 월간 절차, 도시에 읽는 법, 확신 체크리스트, 한계 |
@@ -202,6 +203,51 @@ KRX flow는 pykrx 투자자별 매매 엔드포인트의 reported value만 main 
 `validate-model`은 walk-forward, fee stress, 파라미터 주변값, 지정 stress window를 한 번에 검증해 live 승격 전에 과최적화와 비용 민감도를 더 보수적으로 본다.
 기존 `trading-copilot` 명령도 그대로 fallback된다.
 Pair/VIX 기능은 Apache-2.0 `je-suis-tm/quant-trading`의 standalone 예제를 참고했지만, 현재 catalog/CLI/테스트 구조에 맞게 새로 구현했다.
+
+## 차트 리딩 엔진 (Chart Reading)
+
+`engine/chart/` 패키지는 stdlib(statistics, math)만으로 구현된 순수 함수 기반 차트 탐지 엔진이다.
+OHLCV 시퀀스를 입력받아 11개 개념을 병렬 탐지하고, 가중 컨플루언스 점수(0–100)와 진입 판정을 반환한다.
+
+| 개념 | 모듈 | 적용 시장 |
+|------|------|----------|
+| 시장구조 (Swing BOS/CHoCH/EQH-EQL) | `structure.py` | 전 시장 |
+| FVG / IFVG | `fvg.py` | 전 시장 |
+| 오더블록 / 브레이커 | `order_block.py` | 전 시장 |
+| 유동성 풀·스윕·OTE·MSS | `liquidity.py` | 전 시장 |
+| 매물대 (POC / Value Area / HVN-LVN) | `volume_profile.py` | 전 시장 |
+| 볼륨 분석 (RVOL / OBV / CMF / 와이코프 볼륨) | `volume.py` | 전 시장 |
+| 와이코프 매집/분산 (Phase A–E) | `wyckoff.py` | 전 시장 |
+| 차트 패턴 (헤숄·삼각형·쐐기·플래그 등) | `patterns.py` | 전 시장 |
+| 캔들 패턴 (단일·복합·삼선) | `candles.py` | 전 시장 |
+| 호가 (L2 OBI / VAMP / 벽) | `orderbook.py` | **크립토 전용** (ccxt) |
+| 미체결약정 / 펀딩 (OI 4사분면·스퀴즈·캐스케이드) | `open_interest.py` | **크립토 전용** (ccxt) |
+
+컨플루언스 집계(`read.py`)는 활성화된 개념의 가중 득표를 합산해 `EntryState`를 결정한다:
+`ENTER_NOW` / `SCALE_IN` / `WAIT_FOR_PULLBACK` / `AVOID`.
+
+**CLI 사용법**
+
+```bash
+# 크립토: 호가(order book) + 미체결약정(open interest) 포함 4h 롱 리딩
+uv run trader chart-read BTC/USDT --market crypto --tf 4h --direction long \
+  --with-orderbook --with-oi --exchange binance
+
+# 미국 주식: OHLCV 전용 탐지기 (호가/OI 없음)
+uv run trader chart-read AAPL --market us --tf 1d --direction long
+
+# 한국 주식
+uv run trader chart-read 005930 --market kospi --tf 1d --direction long
+
+# 데이터 소스 명시 (기본값: auto — catalog 우선, 없으면 live 수집)
+uv run trader chart-read ETH/USDT --market crypto --tf 1h --direction short \
+  --source live --with-orderbook --with-oi --exchange binance
+```
+
+리포트는 한국어로 출력되며 결정(진입/스케일인/대기/회피), 컨플루언스 점수, 개념별 가중 득표,
+진입 가격대, 무효화(인밸리데이션) 레벨, 근거를 포함한다.
+
+알고리즘 명세 전문: [docs/CHART_READING.md](docs/CHART_READING.md)
 
 ```bash
 uv run trader quote MSFT --output out/quote-MSFT.md

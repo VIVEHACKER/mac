@@ -15,6 +15,9 @@ from data.delistings import load_delisting_returns_csv
 from data.fundamentals_csv import load_fundamentals_csv
 from data.ingest.alpaca_live import fetch_alpaca_latest_stock_bars
 from data.ingest.ccxt_crypto import fetch_ccxt_bars, normalize_crypto_symbol
+from data.ingest.crypto_microstructure import fetch_funding_history
+from data.ingest.crypto_open_interest import fetch_open_interest_history
+from data.ingest.crypto_orderbook import fetch_order_book
 from data.ingest.fred_macro import fetch_fred_series
 from data.ingest.krx_flow_csv import KrxFlowCsvError, parse_krx_flow_csv
 from data.ingest.krx_flows import KrxFlowError, fetch_krx_flows, fetch_naver_investor_flows
@@ -24,11 +27,15 @@ from data.ingest.yahoo import YAHOO_ADJUSTED_SOURCE_MARKER, fetch_yahoo_bars
 from data.ingest.yahoo_options import YahooOptionChainError, fetch_yahoo_option_quotes
 from data.ingest.yfinance_fundamentals import fetch_yfinance_fundamentals
 from data.models import (
+    CryptoFundingRecord,
     DelistingReturn,
     FlowRecord,
     FundamentalRecord,
     MacroObservation,
+    OpenInterestRecord,
     OptionSentimentRecord,
+    OrderBookSnapshot,
+    PriceBar,
     UniverseMember,
     ValuationRecord,
 )
@@ -36,6 +43,7 @@ from data.quality import DataQualityIssue, evaluate_catalog_quality, format_qual
 from data.universe import load_universe_members_csv
 from data.universe_audit import format_universe_audit_report, run_universe_audit
 from engine.backtest import format_backtest_report, run_momentum_backtest
+from engine.chart.read import format_chart_read, read_chart
 from engine.compounder import rank_compounders
 from engine.compounder_dossier import build_dossier, format_dossier_markdown
 from engine.factor_portfolio import (
@@ -127,6 +135,7 @@ CORE_COMMANDS = {
     "init",
     "ingest",
     "bars",
+    "chart-read",
     "status",
     "screen",
     "backtest",
@@ -184,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ingest(parsed)
     if parsed.command == "bars":
         return _run_bars(parsed)
+    if parsed.command == "chart-read":
+        return _run_chart_read(parsed)
     if parsed.command == "status":
         return _run_status(parsed.catalog_db)
     if parsed.command == "screen":
@@ -283,6 +294,33 @@ def build_parser() -> argparse.ArgumentParser:
     _add_date_args(bars, required=False)
     bars.add_argument("--limit", type=int, default=10)
     bars.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
+
+    chart_read = sub.add_parser(
+        "chart-read",
+        help="Read the chart (FVG/OB/매물대/볼륨/호가/OI/패턴) and recommend entry timing.",
+    )
+    _add_market_symbol_args(chart_read)
+    chart_read.add_argument(
+        "--tf", default=None, help="Timeframe e.g. 15m, 1h, 4h, 1d. Default: crypto 4h, stocks 1d."
+    )
+    chart_read.add_argument("--direction", default="long", choices=["long", "short"])
+    chart_read.add_argument("--lookback", type=int, default=300, help="Bars to analyze.")
+    chart_read.add_argument("--exchange", default="binance", help="ccxt exchange id (crypto).")
+    chart_read.add_argument(
+        "--source",
+        default="auto",
+        choices=["auto", "catalog", "live"],
+        help="auto: catalog if present, else live fetch.",
+    )
+    chart_read.add_argument(
+        "--with-orderbook", action="store_true", help="Fetch live L2 order book (crypto)."
+    )
+    chart_read.add_argument(
+        "--with-oi", action="store_true", help="Fetch open interest + funding (crypto)."
+    )
+    _add_provider_arg(chart_read)
+    chart_read.add_argument("--output", type=Path)
+    chart_read.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
 
     status = sub.add_parser("status", help="Show stored catalog coverage.")
     status.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
@@ -966,6 +1004,151 @@ def _run_bars(args: argparse.Namespace) -> int:
             f"{bar.low:.2f} | {bar.close:.2f} | {bar.volume:,.0f} |"
         )
     return 0
+
+
+_TF_HOURS = {
+    "1m": 1 / 60,
+    "3m": 3 / 60,
+    "5m": 5 / 60,
+    "15m": 0.25,
+    "30m": 0.5,
+    "1h": 1.0,
+    "2h": 2.0,
+    "4h": 4.0,
+    "6h": 6.0,
+    "8h": 8.0,
+    "12h": 12.0,
+    "1d": 24.0,
+}
+
+
+def _fetch_chart_bars_live(
+    args: argparse.Namespace, lookback: int
+) -> tuple[list[PriceBar], list[PriceBar] | None]:
+    """Live-fetch the analysis (LTF) bars and, for crypto, the daily HTF bias bars."""
+    market = args.market
+    tf = args.tf
+    end = date.today()
+
+    if market == "crypto":
+        span_days = max(2, int((lookback * _TF_HOURS.get(tf, 4.0)) / 24) + 3)
+        start = end - timedelta(days=span_days)
+        ltf = fetch_ccxt_bars(
+            args.symbol, start, end, timeframe=tf, exchange_id=args.exchange, intraday=(tf != "1d")
+        )
+        htf: list[PriceBar] | None = None
+        try:
+            htf = fetch_ccxt_bars(
+                args.symbol,
+                end - timedelta(days=420),
+                end,
+                timeframe="1d",
+                exchange_id=args.exchange,
+            )
+        except Exception as exc:  # noqa: BLE001 - HTF bias is optional
+            print(f"# HTF 일봉 미가용 (편향 생략): {exc}")
+        return ltf, htf
+
+    # Equities: daily bars via provider; the daily series is itself the bias timeframe.
+    start = end - timedelta(days=int(lookback * 1.7) + 10)
+    return _fetch_bars(args.symbol, market, start, end, provider=args.provider), None
+
+
+def _fetch_crypto_microstructure(
+    args: argparse.Namespace, lookback: int
+) -> tuple[
+    OrderBookSnapshot | None,
+    list[OpenInterestRecord] | None,
+    list[CryptoFundingRecord] | None,
+]:
+    """Live-fetch the requested crypto order book + open interest.
+
+    These are always live (the catalog stores no L2 / OI), so they are fetched whenever
+    requested regardless of where the OHLCV bars came from. Each degrades gracefully.
+    """
+    order_book: OrderBookSnapshot | None = None
+    oi_records: list[OpenInterestRecord] | None = None
+    funding_records: list[CryptoFundingRecord] | None = None
+
+    if args.with_orderbook:
+        try:
+            order_book = fetch_order_book(args.symbol, exchange_id=args.exchange)
+        except Exception as exc:  # noqa: BLE001 - order book is optional
+            print(f"# 호가창 미가용: {exc}")
+    if args.with_oi:
+        end = date.today()
+        span_days = max(2, int((lookback * _TF_HOURS.get(args.tf, 4.0)) / 24) + 3)
+        start = end - timedelta(days=span_days)
+        try:
+            oi_records = fetch_open_interest_history(
+                args.symbol, start, end, timeframe=args.tf, exchange_id=args.exchange
+            )
+            funding_records = fetch_funding_history(
+                args.symbol, start, end, exchange_id=args.exchange
+            )
+        except Exception as exc:  # noqa: BLE001 - OI/funding are optional
+            print(f"# 미체결약정/펀딩 미가용: {exc}")
+    return order_book, oi_records, funding_records
+
+
+def _run_chart_read(args: argparse.Namespace) -> int:
+    market = args.market
+    # Default timeframe by market: crypto trades intraday, equities are daily.
+    args.tf = args.tf or ("4h" if market == "crypto" else "1d")
+    tf = args.tf
+    lookback = max(int(args.lookback), 1)
+    catalog = MarketDataCatalog(args.catalog_db)
+    catalog_symbol = (
+        normalize_crypto_symbol(args.symbol)
+        if market == "crypto"
+        else _catalog_symbol(args.symbol, market)
+    )
+
+    ltf: list[PriceBar] = []
+    htf: list[PriceBar] | None = None
+
+    use_live = args.source == "live"
+    if args.source in ("auto", "catalog"):
+        # The catalog is keyed by freq, and its ts column is DATE, so intraday bars are
+        # never persisted there; an intraday request falls through to a live fetch.
+        ltf = catalog.get_bars(catalog_symbol, market=market, freq=tf)
+        if not ltf and args.source == "auto":
+            use_live = True
+    if use_live:
+        ltf, htf = _fetch_chart_bars_live(args, lookback)
+
+    if not ltf or len(ltf) < 20:
+        if tf != "1d" and args.source == "catalog":
+            print(
+                f"장중봉({tf})은 카탈로그에 저장되지 않습니다 — `--source live`(또는 auto)로 "
+                "실시간 페치하세요."
+            )
+        else:
+            print(
+                "차트 읽기에 필요한 봉이 부족합니다 (>=20 필요). "
+                "`trader ingest`로 적재하거나 `--source live`로 실시간 페치하세요."
+            )
+        return 1
+
+    ltf = ltf[-lookback:] if lookback > 0 else ltf
+
+    # Crypto order book / open interest have no catalog copy and are fetched whenever
+    # requested, independent of whether the OHLCV bars came from catalog or live.
+    order_book: OrderBookSnapshot | None = None
+    oi_records: list[OpenInterestRecord] | None = None
+    funding_records: list[CryptoFundingRecord] | None = None
+    if market == "crypto" and (args.with_orderbook or args.with_oi):
+        order_book, oi_records, funding_records = _fetch_crypto_microstructure(args, lookback)
+
+    read = read_chart(
+        ltf,
+        htf_bars=htf,
+        order_book=order_book,
+        oi_records=oi_records,
+        funding_records=funding_records,
+        direction=args.direction,
+    )
+    return _emit(format_chart_read(read), args.output)
 
 
 def _run_status(catalog_db: Path) -> int:
