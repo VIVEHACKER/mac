@@ -18,6 +18,9 @@ class RiskPolicy:
     min_cash_fraction: float = 0.05
     max_limit_deviation: float = 0.03
     max_daily_loss: float = 0.02
+    # Sleeve / trailing kill-switch: a -25% drawdown from the all-time equity peak halts trading.
+    # The daily 2% latch cannot catch a slow multi-day bleed, so this is the second backstop.
+    max_drawdown_from_peak: float = 0.25
     max_orders_per_day: int = 20
     max_daytrade_count: int = 3
 

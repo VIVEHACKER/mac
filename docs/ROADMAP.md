@@ -205,7 +205,7 @@
 
 **작업**:
 - [ ] `engine/paper.py` — Alpaca paper broker 어댑터
-- [ ] `risk/kill_switch.py` — 일일 DD > 2%, 포지션 > 자본 100% 시 정지
+- [~] `risk/kill_switch.py` — 일일 DD > 2%, 포지션 > 자본 100% 시 정지 (+ 피크 대비 -25% 슬리브 latch). 엔진(`process_order_intents`)에 배선 완료 — 이전엔 호출되지 않던 dead 함수. 잔여: live-submit CLI가 reference/peak equity 자동 주입(0.1b)
 - [ ] `dashboard/app.py` v1 — 실시간 PnL, 현재 포지션, 시그널 알림
 - [ ] 시그널 → 주문 실행 latency 측정
 
@@ -213,7 +213,7 @@
 - [ ] 7일 연속 무사고 (체결 실패율 < 1%)
 - [ ] 슬리피지 < 5bp (Alpaca 일봉 실행 기준)
 - [ ] 페이퍼 PnL이 백테스트 예측 ± 10% 이내
-- [ ] kill_switch 한 번 이상 강제 발동 테스트 (가짜 큰 손실 주입)
+- [x] kill_switch 한 번 이상 강제 발동 테스트 (가짜 큰 손실 주입) — `tests/test_risk/test_live_execution.py` 일간/피크 드로다운 주입 → halt latch 발동 검증 (엔진 레벨; 실 브로커 대상은 미실시)
 
 ---
 
