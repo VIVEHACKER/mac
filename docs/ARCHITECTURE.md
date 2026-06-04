@@ -70,6 +70,8 @@ trader/
 │   │   ├── gdelt_news.py    # GDELT 글로벌 뉴스 톤 + 기업 mention
 │   │   ├── reddit_mentions.py # Reddit WSB/stocks 종목 mention
 │   │   ├── crypto_microstructure.py # CCXT funding rate + OI + L/S ratio
+│   │   ├── crypto_orderbook.py  # CCXT fetch_order_book → OrderBookSnapshot (크립토 전용)
+│   │   ├── crypto_open_interest.py # CCXT fetch_open_interest_history + to_perp_symbol (크립토 전용)
 │   │   ├── cboe_options.py  # CBOE VIX, VIX9D/3M/6M, SKEW, Put/Call CSV
 │   │   ├── deribit_options.py # Deribit BTC/ETH 옵션 + DVOL
 │   │   └── option_chain.py  # Yahoo (US) + KRX (KR) 종목별 옵션 체인
@@ -83,6 +85,7 @@ trader/
 │   │   ├── sentiment/       # KRX flows + COT + GDELT + Reddit
 │   │   ├── derivatives/     # Crypto funding/OI/L-S, 옵션 sentiment, 옵션 체인
 │   │   └── catalog.duckdb
+│   ├── models.py            # 공유 데이터 모델: OrderBookLevel, OrderBookSnapshot, OpenInterestRecord
 │   └── catalog.py           # 통합 카탈로그 — `as_of=` 강제로 look-ahead 방지
 ├── valuation/               # 신규: 적정가/평가/진입가 모듈
 │   ├── _base.py             # Valuator 추상 클래스
@@ -134,7 +137,21 @@ trader/
 ├── engine/
 │   ├── backtest.py          # Nautilus 백테스트 러너
 │   ├── paper.py             # Alpaca paper / Binance testnet
-│   └── live.py              # 동일 코드, broker만 교체
+│   ├── live.py              # 동일 코드, broker만 교체
+│   └── chart/               # 차트 리딩 엔진 (순수 stdlib, 시장 무관)
+│       ├── types.py         # 공유 열거형(TrendBias/EntryState/OIQuadrant 등), PriceBar 지오메트리 헬퍼, confluence_score, decide_entry_state, ChartRead/SignalContribution/EntryContext
+│       ├── structure.py     # 스윙 구조 / BOS / CHoCH / EQH-EQL
+│       ├── fvg.py           # Fair Value Gap + IFVG
+│       ├── order_block.py   # 오더블록 + 브레이커
+│       ├── liquidity.py     # 유동성 풀·스윕 / 프리미엄-디스카운트 / OTE / MSS
+│       ├── volume_profile.py # POC / Value Area / HVN-LVN (매물대)
+│       ├── volume.py        # RVOL / OBV / CMF / 클라이맥스 / No-Supply·No-Demand / VDU / 다이버전스
+│       ├── wyckoff.py       # 매집·분산 스키매틱 / Phase A–E / Spring·UTAD
+│       ├── patterns.py      # 더블탑·바텀 / 헤숄 / 삼각형·쐐기·플래그·렉탱글·컵&핸들
+│       ├── candles.py       # 단일·복합·삼선 캔들 패턴
+│       ├── orderbook.py     # L2 OBI / VAMP / 호가벽 — 크립토 전용(ccxt)
+│       ├── open_interest.py # OI 4사분면 / 스퀴즈·캐스케이드 / 펀딩 — 크립토 전용(ccxt)
+│       └── read.py          # 컨플루언스 집계 → EntryState(ENTER_NOW/SCALE_IN/WAIT_FOR_PULLBACK/AVOID) + 진입 가격대·인밸리데이션·근거
 ├── pod/                     # Citadel 스타일 멀티전략
 │   ├── allocator.py         # Vol-target 리스크 예산 분배
 │   └── monitor.py           # Pod별 PnL/DD/Sharpe 추적
@@ -188,3 +205,15 @@ trader/
 5. **Valuation 분리** — fair value 계산은 strategies/와 독립. 입력값(WACC/growth/peer) 모두 기록해 재현성 보장
 6. **Kill switch 기본 활성** — 라이브에선 일일 DD/포지션 한도 강제
 7. **테스트 우선** — strategies/는 모두 fixture 기반 테스트 (TDD)
+8. **차트 엔진 stdlib 전용** — `engine/chart/`는 외부 TA 라이브러리 없이 stdlib(statistics, math)만 사용. 재현성과 백테스트 통합이 목적이므로 pandas/numpy 의존을 배제한다.
+
+## 차트 리딩 엔진 설계 결정
+
+### 시장 범용 vs. 크립토 전용 분리
+OHLCV 기반 탐지기(structure / fvg / order_block / liquidity / volume_profile / volume / wyckoff / patterns / candles)는 미국 주식·한국 주식·크립토 모두에서 동일하게 동작한다. 호가(orderbook.py)와 미체결약정/펀딩(open_interest.py)은 ccxt를 통한 크립토 영구선물 거래소에서만 수집 가능하므로 크립토 전용으로 분리한다. `chart-read` CLI의 `--with-orderbook` / `--with-oi` 플래그는 `--market crypto`일 때만 유효하다.
+
+### PriceBar.ts 인트라데이 설계
+일봉은 `ts: date`(ISO date)로 충분하지만, 4h/1h/15m 등 인트라데이 타임프레임에서는 날짜만으로 봉을 구분할 수 없다. `ccxt_crypto.py`의 `fetch_ccxt_bars(..., intraday=True)`는 CCXT OHLCV 응답의 밀리초 타임스탬프를 `datetime`으로 변환해 `PriceBar.ts`에 저장함으로써 인트라데이 시퀀스의 순서를 보존한다. 일봉 경로는 기존 `date` 타입을 유지해 하위 호환을 깨지 않는다.
+
+### 컨플루언스 집계
+`read.py`는 각 개념 탐지기에서 `SignalContribution(concept, weight, vote, reason)` 리스트를 수집한 뒤 `confluence_score()`로 0–100 정규화 점수를 계산하고 `decide_entry_state()`로 `EntryState`를 결정한다. 개념별 기본 가중치는 `types.py`에 상수로 선언되어 있으며 호출 측에서 override 가능하다.
