@@ -21,6 +21,7 @@ refined by one Halley step).
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 from collections.abc import Sequence
@@ -415,4 +416,154 @@ def block_bootstrap_sharpe(
         n_boot=n_boot,
         block_size=block_size,
         confidence=confidence,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Effective number of trials (cluster-aware)                                   #
+# --------------------------------------------------------------------------- #
+def _pearson_corr(a: Sequence[float], b: Sequence[float]) -> float:
+    n = len(a)
+    if n == 0:
+        return 0.0
+    mean_a = math.fsum(a) / n
+    mean_b = math.fsum(b) / n
+    cov = math.fsum((x - mean_a) * (y - mean_b) for x, y in zip(a, b, strict=True))
+    var_a = math.fsum((x - mean_a) ** 2 for x in a)
+    var_b = math.fsum((y - mean_b) ** 2 for y in b)
+    denom = math.sqrt(var_a * var_b)
+    if denom == 0.0:
+        return 0.0
+    return cov / denom
+
+
+def effective_n_trials(returns_matrix: Sequence[Sequence[float]]) -> float:
+    """Cluster-aware effective number of independent trials.
+
+    Deflated-Sharpe deflation depends on how many *independent* strategy
+    configurations were really tried. Strongly-correlated variants (e.g. many
+    megacap-momentum tweaks) count as far fewer than their nominal number. Using
+    the eigenvalue participation ratio of the trial correlation matrix C:
+
+        effN = (Σλ)² / Σλ²  =  n² / Σ_{i,j} C_ij²
+
+    since trace(C) = n and trace(C²) = Σ C_ij² for a symmetric correlation
+    matrix — so no eigendecomposition is needed. Identical trials → 1; mutually
+    orthogonal trials → n.
+    """
+
+    n = len(returns_matrix)
+    if n <= 1:
+        return float(n)
+    length = len(returns_matrix[0])
+    if any(len(row) != length for row in returns_matrix):
+        raise ValueError("all trials must have equal length")
+
+    sum_sq = 0.0
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                sum_sq += 1.0
+            else:
+                corr = _pearson_corr(returns_matrix[i], returns_matrix[j])
+                sum_sq += corr * corr
+    if sum_sq <= 0.0:
+        return float(n)
+    return (n * n) / sum_sq
+
+
+# --------------------------------------------------------------------------- #
+# Probability of Backtest Overfitting (CSCV)                                   #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class PBOResult:
+    pbo: float
+    n_combinations: int
+    n_configs: int
+    n_splits: int
+    median_logit: float
+
+
+def _contiguous_blocks(length: int, n_splits: int) -> list[list[int]]:
+    base = length // n_splits
+    remainder = length % n_splits
+    blocks: list[list[int]] = []
+    start = 0
+    for block in range(n_splits):
+        size = base + (1 if block < remainder else 0)
+        blocks.append(list(range(start, start + size)))
+        start += size
+    return blocks
+
+
+def _sharpe_on(series: Sequence[float], indices: Sequence[int], ddof: int) -> float:
+    return per_period_sharpe([series[i] for i in indices], ddof=ddof)
+
+
+def cscv_pbo(
+    returns_matrix: Sequence[Sequence[float]],
+    n_splits: int = 14,
+    ddof: int = 1,
+) -> PBOResult:
+    """Probability of Backtest Overfitting via Combinatorially-Symmetric CV.
+
+    Bailey, Borwein, López de Prado & Zhu (2017). Given a matrix of per-period
+    returns for N candidate configurations over a shared timeline, the timeline
+    is split into ``n_splits`` contiguous blocks; for every way to choose half the
+    blocks as in-sample (IS), the IS-best config is found and its out-of-sample
+    (OOS) rank is measured. ``omega`` is its relative OOS rank (rank / (N+1)),
+    ``logit = ln(omega / (1-omega))``, and PBO is the fraction of combinations
+    where the IS-best config lands at or below the OOS median (logit < 0).
+
+    PBO ≈ 0 → the selected edge generalises (low overfit); PBO ≳ 0.5 → the
+    selection is no better than chance (the "best" backtest is overfit). This is
+    the correct tool for best-of-N selection bias and overlapping walk-forward
+    windows, because it works on the config cross-section, not on time order.
+    """
+
+    n_configs = len(returns_matrix)
+    if n_configs < 2:
+        raise ValueError("CSCV needs at least two configs to compare")
+    length = len(returns_matrix[0])
+    if any(len(row) != length for row in returns_matrix):
+        raise ValueError("all configs must have equal length")
+    if n_splits < 2 or n_splits % 2 != 0:
+        raise ValueError("n_splits must be an even integer >= 2")
+    if n_splits > length:
+        raise ValueError("n_splits cannot exceed the number of observations")
+
+    blocks = _contiguous_blocks(length, n_splits)
+    half = n_splits // 2
+
+    logits: list[float] = []
+    overfit = 0
+    total = 0
+    for is_blocks in itertools.combinations(range(n_splits), half):
+        is_set = set(is_blocks)
+        is_idx = [i for block in is_blocks for i in blocks[block]]
+        oos_idx = [i for block in range(n_splits) if block not in is_set for i in blocks[block]]
+
+        is_sharpes = [_sharpe_on(row, is_idx, ddof) for row in returns_matrix]
+        best = max(range(n_configs), key=lambda c: is_sharpes[c])
+        oos_sharpes = [_sharpe_on(row, oos_idx, ddof) for row in returns_matrix]
+
+        beaten = sum(
+            1 for c in range(n_configs) if c != best and oos_sharpes[best] > oos_sharpes[c]
+        )
+        oos_rank = beaten + 1  # 1 = worst, n_configs = best
+        omega = oos_rank / (n_configs + 1)
+        omega = min(max(omega, 1e-9), 1.0 - 1e-9)
+        logit = math.log(omega / (1.0 - omega))
+        logits.append(logit)
+        total += 1
+        if logit < 0.0:
+            overfit += 1
+
+    median_logit = _percentile(sorted(logits), 0.5) if logits else 0.0
+    return PBOResult(
+        pbo=overfit / total if total else 0.0,
+        n_combinations=total,
+        n_configs=n_configs,
+        n_splits=n_splits,
+        median_logit=median_logit,
     )
