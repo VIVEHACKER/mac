@@ -206,6 +206,7 @@
 **작업**:
 - [ ] `engine/paper.py` — Alpaca paper broker 어댑터
 - [x] `risk/kill_switch.py` — 일일 DD > 2%, 포지션 > 자본 100% 시 정지 (+ 피크 대비 -25% 슬리브 latch). 엔진(`process_order_intents`)에 배선 완료(이전엔 호출 안 되던 dead 함수) + **live-submit CLI가 `risk/equity_track.py`(영속 peak/일중 기준 추적)로 reference/peak equity 자동 주입 → production 활성화(0.1b)**. equity≤0이면 fail-closed.
+- [x] `risk/sizing.py` — 생존 사이징 (half-Kelly × vol-target × per-name risk≤2% AUM × 하드캡 8%). 단일 종목 0 손실 ≤8% 펀드 불변식 테스트(45-case sweep). 라이브 경로 배선은 Phase 1 롱슬리브에서(컴파운더/헌트). conc5 모멘텀은 검증된 자체 사이징 유지(전역 정책 캡 미변경).
 - [ ] `dashboard/app.py` v1 — 실시간 PnL, 현재 포지션, 시그널 알림
 - [ ] 시그널 → 주문 실행 latency 측정
 
