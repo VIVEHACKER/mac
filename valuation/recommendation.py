@@ -16,6 +16,10 @@ from valuation.dcf import discounted_cash_flow
 from valuation.entry import average_true_range_pct, make_entry_plan
 from valuation.multiples import fair_value_from_pb, fair_value_from_pe
 
+# A confluence read needs enough history for swing-structure / volume-profile detectors to be
+# meaningful. Below this the chart engine produces noise, so we report no chart opinion at all.
+_MIN_CHART_BARS = 40
+
 
 @dataclass(frozen=True)
 class ValidatedStrategy:
@@ -103,6 +107,59 @@ def load_validated_strategy(
 
 
 @dataclass(frozen=True)
+class ChartSummary:
+    """An advisory, never-binding snapshot of the chart-reading engine's entry timing read.
+
+    This is METADATA ONLY: it never feeds ``_decide_action`` / action / confidence / rank.
+    It answers a different question from the AQR signal ("is *now* a good moment to add?"),
+    so it is surfaced as context for the human, not as a gate on the recommendation.
+    ``confluence`` is the engine's 0–100 score; ``decision`` / ``trend_bias`` are the raw
+    enum values (e.g. ``"SCALE_IN"`` / ``"BULLISH"``); ``note`` is a one-line Korean summary.
+    """
+
+    decision: str
+    confluence: float
+    trend_bias: str
+    direction: str
+    note: str
+
+
+def chart_confirmation(bars: list[PriceBar], direction: str = "long") -> ChartSummary | None:
+    """Run the chart-reading engine over ``bars`` and return an ADVISORY ``ChartSummary``.
+
+    Returns ``None`` (no chart opinion) when there is too little history
+    (``< _MIN_CHART_BARS`` bars) or when the chart engine raises for ANY reason — a chart
+    failure must NEVER be able to break a recommendation, so every exception is swallowed.
+    The result is advisory metadata only and must not influence action/confidence/rank.
+    """
+
+    if len(bars) < _MIN_CHART_BARS:
+        return None
+    try:
+        # Local import keeps the engine.chart dependency optional: the recommender works
+        # (and its default output is byte-identical) even if the chart engine is absent.
+        from engine.chart.read import read_chart
+
+        read = read_chart(bars, direction=direction)
+        decision = read.decision.value
+        confluence = float(read.confluence)
+        trend_bias = read.trend_bias.value
+        note = (
+            f"차트 타이밍: {decision} (컨플루언스 {confluence:.0f}/100, "
+            f"HTF 추세 {trend_bias}) — 참고용, 추천 결정에는 미반영"
+        )
+        return ChartSummary(
+            decision=decision,
+            confluence=confluence,
+            trend_bias=trend_bias,
+            direction=direction,
+            note=note,
+        )
+    except Exception:  # noqa: BLE001 — advisory overlay must never break the recommendation
+        return None
+
+
+@dataclass(frozen=True)
 class AQREvaluation:
     ticker: str
     market: str
@@ -124,6 +181,7 @@ class AQREvaluation:
     confidence: ConfidenceBreakdown
     action: str
     reasons: tuple[str, ...]
+    chart_summary: ChartSummary | None = None
 
 
 def _fair_value(
@@ -212,6 +270,8 @@ def evaluate_ticker(
     peer_pb: list[float] | None = None,
     margin_of_safety: float = 0.25,
     asof_ts: datetime | None = None,
+    bars: list[PriceBar] | None = None,
+    with_chart: bool = False,
 ) -> AQREvaluation:
     """Fuse the validated AQR rank, a fair-value band, and a laddered entry plan.
 
@@ -219,16 +279,29 @@ def evaluate_ticker(
     cross-sectional), so it is identical work to a full-universe scan. Confidence is
     calibrated from the validated strategy's statistics, and names outside the
     validated universe are reported as AVOID with hard-capped confidence.
+
+    When ``with_chart`` is True, an ADVISORY chart-timing read is attached as
+    ``AQREvaluation.chart_summary`` (using ``bars`` if supplied, else the ticker's own
+    series from ``bars_by_symbol``). It is metadata only and NEVER affects action /
+    confidence / rank; ``with_chart=False`` (the default) produces output identical to
+    before, with ``chart_summary=None``.
     """
 
     symbol = ticker.upper()
+    ordered = sorted(bars_by_symbol.get(symbol, []), key=lambda bar: bar.ts)
     ranked = aqr_rank_for(
         symbol, bars_by_symbol, fundamentals_by_symbol, lookback=strategy.lookback
     )
+
+    chart_summary: ChartSummary | None = None
+    if with_chart:
+        chart_bars = bars if bars is not None else ordered
+        chart_summary = chart_confirmation(chart_bars)
+
     return _build_evaluation(
         symbol=symbol,
         ranked=ranked,
-        ordered=sorted(bars_by_symbol.get(symbol, []), key=lambda bar: bar.ts),
+        ordered=ordered,
         fundamentals=fundamentals_by_symbol.get(symbol),
         strategy=strategy,
         peer_pe=peer_pe,
@@ -236,6 +309,7 @@ def evaluate_ticker(
         margin_of_safety=margin_of_safety,
         asof_ts=asof_ts,
         universe_fallback_size=len(bars_by_symbol),
+        chart_summary=chart_summary,
     )
 
 
@@ -251,12 +325,17 @@ def _build_evaluation(
     margin_of_safety: float,
     asof_ts: datetime | None,
     universe_fallback_size: int,
+    chart_summary: ChartSummary | None = None,
 ) -> AQREvaluation:
     """Fuse a precomputed AQR rank, a fair-value band, and a laddered entry plan.
 
     The AQR signal is cross-sectional, so the rank is computed once (per-ticker via
     aqr_rank_for, or once for the whole universe via aqr_ranked) and passed in here.
     Names outside the validated universe are reported AVOID with hard-capped confidence.
+
+    ``chart_summary`` is optional ADVISORY metadata attached verbatim to the result; it
+    is never consulted by ``_decide_action`` or the confidence model, so it cannot change
+    the action / confidence / rank.
     """
 
     # A cross-sectional signal needs something to rank against: a single-name universe
@@ -371,6 +450,7 @@ def _build_evaluation(
         confidence=confidence,
         action=action,
         reasons=tuple(reasons),
+        chart_summary=chart_summary,
     )
 
 
@@ -448,6 +528,14 @@ def format_evaluation(result: AQREvaluation) -> str:
     else:
         lines.append("- entry plan unavailable (insufficient price/fundamental data)")
 
+    # Advisory-only: rendered ONLY when a chart read was attached. Default output (no
+    # chart) is byte-identical to before, so existing reports are unchanged.
+    if result.chart_summary is not None:
+        cs = result.chart_summary
+        lines.append("")
+        lines.append("## 차트 타이밍 (참고용 · advisory)")
+        lines.append(f"- {cs.note} (방향 {cs.direction}; 추천 action/confidence/rank에는 미반영)")
+
     lines.append("")
     lines.append("## Why")
     for reason in result.reasons:
@@ -465,6 +553,7 @@ def scan_universe(
     peer_pb: list[float] | None = None,
     margin_of_safety: float = 0.25,
     asof_ts: datetime | None = None,
+    with_chart: bool = False,
 ) -> list[AQREvaluation]:
     """Rank the WHOLE validated universe once and evaluate every name (best-first).
 
@@ -473,6 +562,9 @@ def scan_universe(
     confidence. This is the honest answer to "evaluate all tickers, not a handful" —
     but it is meaningful ONLY for the validated universe; the strategy has no proven
     edge over names it was never validated on.
+
+    ``with_chart`` (default False) attaches the same ADVISORY chart-timing read per name
+    as ``evaluate_ticker``; it never influences action / confidence / rank or the order.
     """
 
     ranked_list = aqr_ranked(bars_by_symbol, fundamentals_by_symbol, lookback=strategy.lookback)
@@ -481,6 +573,7 @@ def scan_universe(
     for ranked in ranked_list:
         sym = ranked.score.symbol.upper()
         ordered = sorted(bars_by_symbol.get(sym, []), key=lambda bar: bar.ts)
+        chart_summary = chart_confirmation(ordered) if with_chart else None
         results.append(
             _build_evaluation(
                 symbol=sym,
@@ -493,6 +586,7 @@ def scan_universe(
                 margin_of_safety=margin_of_safety,
                 asof_ts=asof_ts,
                 universe_fallback_size=fallback,
+                chart_summary=chart_summary,
             )
         )
     return results
@@ -505,13 +599,24 @@ def format_scan(results: list[AQREvaluation], *, top: int = 20) -> str:
     buys = sum(1 for r in results if r.action == "BUY")
     holds = sum(1 for r in results if r.action == "HOLD")
 
+    # Advisory chart column appears ONLY when at least one row carries a chart read, so
+    # the default (no chart) table is byte-identical to before.
+    show_chart = any(r.chart_summary is not None for r in results)
+
     lines: list[str] = []
     lines.append(f"# Validated universe scan — {len(results)} names ranked (top {top} shown)")
     lines.append("")
     lines.append(f"- universe size: {universe_size} | BUY: {buys} | HOLD: {holds}")
     lines.append("")
-    lines.append("| rank | ticker | action | conf | pct | price | avg entry | stop | target |")
-    lines.append("|--:|:--|:--|:--|--:|--:|--:|--:|--:|")
+    if show_chart:
+        lines.append(
+            "| rank | ticker | action | conf | pct | price | avg entry | stop | target "
+            "| chart(참고용) |"
+        )
+        lines.append("|--:|:--|:--|:--|--:|--:|--:|--:|--:|:--|")
+    else:
+        lines.append("| rank | ticker | action | conf | pct | price | avg entry | stop | target |")
+        lines.append("|--:|:--|:--|:--|--:|--:|--:|--:|--:|")
     for result in results[:top]:
         plan = result.entry_plan
         avg_entry = f"{plan.target_entry:.2f}" if plan else "—"
@@ -519,11 +624,16 @@ def format_scan(results: list[AQREvaluation], *, top: int = 20) -> str:
         target = f"{plan.target_exit:.2f}" if plan else "—"
         price = f"{result.current_price:.2f}" if result.current_price is not None else "—"
         star = "★" if result.in_top_n else ""
-        lines.append(
+        row = (
             f"| {result.rank}{star} | {result.ticker} | {result.action} "
             f"| {result.confidence.band} | {result.percentile:.0f} | {price} "
             f"| {avg_entry} | {stop} | {target} |"
         )
+        if show_chart:
+            cs = result.chart_summary
+            chart_cell = f"{cs.decision} {cs.confluence:.0f}" if cs is not None else "—"
+            row += f" {chart_cell} |"
+        lines.append(row)
     lines.append("")
     lines.append("★ = within the strategy's top-N holdings (the names it would actually buy).")
 
