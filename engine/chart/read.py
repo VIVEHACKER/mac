@@ -97,6 +97,13 @@ _W_WYCKOFF = 0.75
 
 _VOLUME_PROFILE_STALE_SESSIONS = 20
 
+# Mean-reversion location gate (docs/CHART_VALIDATION.md): on mean-reverting assets
+# (crypto 4h) ENTER signals fired in the PREMIUM half of the recent range chase strength
+# that reverts (premium ACT −0.76%/10봉, discount ACT +1.0%/10봉, IC −0.21). When
+# ``mean_reversion=True`` we veto premium-chase longs (and discount-chase shorts).
+_RANGE_LOCATION_N = 50
+_PREMIUM_CHASE_THRESHOLD = 0.6
+
 
 @dataclass
 class _Features:
@@ -151,6 +158,18 @@ def _intended_sign(direction: str) -> int:
 
 def _zone_dir_token(direction: str) -> str:
     return "bullish" if direction == "long" else "bearish"
+
+
+def _range_position(bars: list[PriceBar], n: int = _RANGE_LOCATION_N) -> float:
+    """Where the last close sits in the trailing ``n``-bar high/low range (0=low, 1=high).
+
+    Causal: uses only ``bars`` (up to the decision bar). Premium when high, discount when low.
+    """
+    seg = bars[-n:] if len(bars) >= n else bars
+    hi = max(b.high for b in seg)
+    lo = min(b.low for b in seg)
+    close = bars[-1].close
+    return (close - lo) / (hi - lo) if hi > lo else 0.5
 
 
 def _price_in_zone(price: float, low: float, high: float) -> bool:
@@ -912,6 +931,7 @@ def read_chart(
     oi_records: list[OpenInterestRecord] | None = None,
     funding_records: list[CryptoFundingRecord] | None = None,
     direction: str = "long",
+    mean_reversion: bool = False,
     params: dict[str, object] | None = None,
 ) -> ChartRead:
     """Read a chart and return an entry decision fusing all 11 detectors.
@@ -969,6 +989,20 @@ def read_chart(
     score = confluence_score(signal_map)
 
     vetoed, veto_reason = apply_hard_veto(feat, direction)
+
+    # Mean-reversion location gate: on mean-reverting assets, chasing the premium half of
+    # the range is a validated loser — veto premium-chase longs / discount-chase shorts.
+    range_pos = _range_position(bars)
+    if mean_reversion and not vetoed:
+        if direction == "long" and range_pos > _PREMIUM_CHASE_THRESHOLD:
+            vetoed = True
+            veto_reason = f"평균회귀 모드: 프리미엄 추격(range_pos={range_pos:.2f}) — 되돌림 대기"
+        elif direction == "short" and range_pos < (1.0 - _PREMIUM_CHASE_THRESHOLD):
+            vetoed = True
+            veto_reason = (
+                f"평균회귀 모드: 디스카운트 추격 숏(range_pos={range_pos:.2f}) — 되돌림 대기"
+            )
+
     decision = decide_entry_state(score, veto=vetoed)
 
     context = _build_context(feat, bars, direction)
@@ -994,6 +1028,8 @@ def read_chart(
             "atr14": context.atr14,
             "veto_reason": veto_reason or "",
             "n_active_votes": sum(1 for c in contributions if c.weight > 0),
+            "range_pos": round(range_pos, 3),
+            "mean_reversion": mean_reversion,
         },
         reasons=reasons,
         vetoed=vetoed,

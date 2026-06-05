@@ -304,6 +304,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--tf", default=None, help="Timeframe e.g. 15m, 1h, 4h, 1d. Default: crypto 4h, stocks 1d."
     )
     chart_read.add_argument("--direction", default="long", choices=["long", "short"])
+    chart_read.add_argument(
+        "--mean-reversion",
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="평균회귀 프리미엄-추격 게이트(되돌림만 진입). auto=크립토 on/주식 off. "
+        "근거 docs/CHART_VALIDATION.md.",
+    )
     chart_read.add_argument("--lookback", type=int, default=300, help="Bars to analyze.")
     chart_read.add_argument("--exchange", default="binance", help="ccxt exchange id (crypto).")
     chart_read.add_argument(
@@ -1143,6 +1150,7 @@ def _run_chart_read(args: argparse.Namespace) -> int:
     if market == "crypto" and (args.with_orderbook or args.with_oi):
         order_book, oi_records, funding_records = _fetch_crypto_microstructure(args, lookback)
 
+    mean_reversion = {"on": True, "off": False}.get(args.mean_reversion, market == "crypto")
     read = read_chart(
         ltf,
         htf_bars=htf,
@@ -1150,6 +1158,7 @@ def _run_chart_read(args: argparse.Namespace) -> int:
         oi_records=oi_records,
         funding_records=funding_records,
         direction=args.direction,
+        mean_reversion=mean_reversion,
     )
     return _emit(format_chart_read(read), args.output)
 
