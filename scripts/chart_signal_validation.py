@@ -47,7 +47,9 @@ class Obs:
     fwd: dict[int, float]
 
 
-def walk_forward(symbol: str, bars: list[PriceBar], direction: str = "long") -> list[Obs]:
+def walk_forward(
+    symbol: str, bars: list[PriceBar], direction: str = "long", mean_reversion: bool = False
+) -> list[Obs]:
     out: list[Obs] = []
     max_h = max(HORIZONS)
     for i in range(WINDOW - 1, len(bars) - max_h):
@@ -56,7 +58,7 @@ def walk_forward(symbol: str, bars: list[PriceBar], direction: str = "long") -> 
         if entry <= 0:
             continue
         try:
-            read = read_chart(window, direction=direction)
+            read = read_chart(window, direction=direction, mean_reversion=mean_reversion)
         except Exception:  # noqa: BLE001 - a detector failure should skip the bar, not abort
             continue
         fwd = {h: bars[i + h].close / entry - 1.0 for h in HORIZONS}
@@ -180,7 +182,7 @@ def summarize(obs: list[Obs]) -> str:
         base, lo, hi = block_bootstrap_spread(act_flags, avoid_flags, rets_all)
         sig = (
             "유의(CI가 0 미포함)"
-            if (lo is not None and (lo > 0 or hi < 0))
+            if (lo is not None and hi is not None and (lo > 0 or hi < 0))
             else "불명확(CI가 0 포함)"
         )
         lines.append(
@@ -201,6 +203,9 @@ def main() -> int:
     parser.add_argument("--stocks", default="SPY,AAPL,MSFT,NVDA")
     parser.add_argument("--stock-years", type=int, default=6)
     parser.add_argument("--exchange", default="binance")
+    parser.add_argument(
+        "--mr", action="store_true", help="평균회귀 프리미엄-추격 게이트 ON으로 재검증"
+    )
     args = parser.parse_args()
 
     end = date.today()
@@ -220,7 +225,7 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             sym_lines.append(f"  {sym} ({args.crypto_tf}): FETCH FAIL — {exc}")
             continue
-        obs = walk_forward(sym, bars)
+        obs = walk_forward(sym, bars, mean_reversion=args.mr)
         all_obs.extend(obs)
         sym_lines.append(f"  {sym} ({args.crypto_tf}): {len(bars)} bars → {len(obs)} eval points")
 
@@ -230,7 +235,7 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             sym_lines.append(f"  {sym} (1d): FETCH FAIL — {exc}")
             continue
-        obs = walk_forward(sym, bars)
+        obs = walk_forward(sym, bars, mean_reversion=args.mr)
         all_obs.extend(obs)
         sym_lines.append(f"  {sym} (1d): {len(bars)} bars → {len(obs)} eval points")
 
