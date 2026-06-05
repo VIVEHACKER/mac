@@ -164,6 +164,61 @@ AAPL 적정가: $170 (DCF $175 / Multi $168 / RIM $167, σ=8%)
 목표: $200 (DCF + 15%, 6~12개월)
 ```
 
+## 단일종목 추천기 + 전 유니버스 스캔 — `evaluate_ticker` / `scan_universe` (P1-P2)
+
+티커 검색 → 자동 평가/추천. **핵심 원칙: 추천의 신호는 새 휴리스틱이 아니라 검증된
+IDEAL 라인이 실제로 쓰는 신호(`strategies.factor_aqr.rank_aqr_factors`)를 그대로
+재활용**한다. 이 신호는 본질적으로 전 유니버스 횡단면 Z-score이므로, 단일종목 평가 =
+"전 유니버스를 랭킹한 뒤 그 종목 + 백분위를 잘라내기"와 동일한 연산이다 (몇 개만 보는
+것은 의미 없다는 요구를 구조적으로 강제).
+
+파이프라인 (`valuation/recommendation.py:evaluate_ticker`):
+1. `aqr_rank_for(ticker, universe)` → rank / percentile / in_top_n (검증된 AQR 신호)
+2. `composite_fair_value(DCF, multiples)` → 적정가 + dispersion
+3. `make_entry_plan(...)` → 평균매수단가(target_entry) + 손절 + 익절 + R/R
+4. `valuation/confidence.py:calibrated_confidence(...)` → 0-100 신뢰도
+
+신뢰도 = 신호강도(percentile) × 전략 신뢰도(WF positive rate × PSR × DSR) × 적정가
+신뢰도. **지어내지 않고** 검증 통계로 캘리브레이션한다. 검증 유니버스 밖 종목은
+forward edge가 없으므로 신뢰도를 하드 캡(기본 25)하고 AVOID로 처리.
+
+**액션은 검증된 신호(AQR 랭크)가 결정**한다 — 신뢰도와는 별개 축: `BUY`(in_top_n =
+전략이 실제 보유하는 종목, 신뢰도 medium↑) / `HOLD`(in_top_n인데 신뢰도 low, 또는
+top-N 밖이지만 medium↑) / `AVOID`(그 외 + 유니버스 밖). 신뢰도 band는 "얼마나 확신/사이즈"
+를 나타내지 BUY/HOLD를 뒤집지 않는다(검증된 전략의 결정을 DCF 오버레이가 거부하지 못하게).
+
+### 진입은 항상 변동성 밴드 (모멘텀 전략이므로) — DCF는 맥락일 뿐
+검증된 edge는 **모멘텀**이지 가치회귀가 아니다. 따라서 진입래더는 **항상 현재가 기준
+변동성(ATR) 밴드**(분할 매수 = 눌림 매수)이고, DCF 적정가는 "싸다/비싸다" **맥락**으로만
+표시한다 — 진입/타겟을 몰지 않는다. 이유: 순진한 단일단계 DCF는 고성장 메가캡을 체계적
+과소평가하고(AAPL $88 vs $311), 모멘텀 승자는 보통 적정가 위에서 거래되므로 적정가를
+앵커로 쓰면 익절가가 현재가보다 낮게 나오는 무의미한 출력이 된다(실제로 TGT/HD/PG에서
+발생 → 수정). target_exit = 현재가 +15%(일반 모멘텀 타겟, 적정가 타겟 아님), 실제 청산은
+트레일링 스톱(-10%→0.5x) + 21일 리밸런싱. DCF 신뢰성(시장가 [0.5x,2.0x] 내)은 신뢰도
+*점수*에만 반영(맥락 라벨), 진입래더에는 무영향.
+
+### 전 유니버스 스캔 — `scan_universe` (P2)
+AQR 신호가 횡단면이라 **한 번의 패스로 검증 유니버스(106종) 전체를 랭킹**하고 각 종목에
+진입밴드·신뢰도를 부착해 정렬된 표를 낸다("몇 개만은 의미 없다"의 정직한 답). top-N(★)이
+전략의 실제 매수 후보. **검증 유니버스 밖(소형주 등) 스캔은 안 한다** — P5 forward 검증에서
+펀더멘털 funnel은 forward edge 없음(IC≈0)으로 판명되어, 거기에 자동추천을 붙이면 노이즈
+증폭이기 때문(async/rate-limit 인프라가 불필요한 이유이기도 하다).
+
+### 설정 — `config/validated_strategies.json`
+추천기의 앵커 전략과 신뢰도 통계(wf_positive_rate/psr/dsr)는 이 파일에서 로드한다.
+`aqr_top7_cap20_trail10`(gate-approved IDEAL 베이스라인)이 기본값. psr/dsr는 **잠정
+보수값**이며 P3 재검증 하니스가 `engine/significance.py` 출력으로 갱신할 예정.
+
+### 실행
+```bash
+python -m scripts.evaluate_ticker AAPL          # 단일종목, pinned snapshot 최신일
+python -m scripts.evaluate_ticker NVDA --asof 2026-05-30
+python -m scripts.scan_universe --top 20        # 전 유니버스 랭킹 표
+python -m scripts.scan_universe --output out/universe-scan.md
+```
+검증된 IDEAL 라인과 동일한 pinned 스냅샷(`data/snapshots/prices-ideal-*.csv` +
+`fundamentals-*-gp.csv`)을 읽어 재현 가능.
+
 ## DuckDB 스키마
 
 ```sql

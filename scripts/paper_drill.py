@@ -44,7 +44,11 @@ sys.path.insert(0, str(ROOT))
 from data.catalog import MarketDataCatalog  # noqa: E402
 from data.fundamentals_snapshot import read_fundamentals_snapshot  # noqa: E402
 from data.models import PriceBar  # noqa: E402
-from scripts.aqr_ideal_walkforward import MEGACAPS  # noqa: E402  (validated 106-name universe)
+from engine.paper_oos import PaperOOSEntry, append_entry  # noqa: E402
+from scripts.aqr_ideal_walkforward import (  # noqa: E402  (validated 106-name universe)
+    BENCHMARK,
+    MEGACAPS,
+)
 from strategies.factor_aqr import rank_aqr_factors  # noqa: E402
 
 OUT_DIR = ROOT / "out"
@@ -270,6 +274,13 @@ def main():
         help="strategy-id tag for the rebalance key / live-submit lines. If omitted it is "
         "derived from --top-n (5->top5, 7->top7); required explicitly for any other --top-n.",
     )
+    parser.add_argument(
+        "--no-record-oos",
+        dest="record_oos",
+        action="store_false",
+        help="skip appending this rebalance to the pre-registered forward-OOS ledger "
+        "(recording is on by default — it is how paper trading becomes evidence).",
+    )
     args = parser.parse_args()
     top_n = args.top_n
     if top_n < 1:
@@ -317,7 +328,7 @@ def main():
     print("\nFetching prices...")
     today = pd.Timestamp.now().normalize()
     raw = yf.download(
-        MEGACAPS,
+        [*MEGACAPS, BENCHMARK],  # benchmark fetched too, for the forward-OOS ledger
         start="2023-01-01",
         end=today + pd.Timedelta(days=1),
         auto_adjust=True,
@@ -373,6 +384,31 @@ def main():
     state["last_rebal"] = str(rebal.date())
     state["positions"] = {o["symbol"]: o["qty"] for o in orders}
     save_state(state, state_path)
+
+    # Pre-register this rebalance in the append-only forward-OOS ledger (the record that
+    # turns paper trading into evidence). Idempotent: re-running the same date is refused.
+    if args.record_oos:
+        ledger_path = OUT_DIR / f"paper-oos-ledger-{strategy_id}.jsonl"
+        try:
+            bench_price = float(prices.loc[rebal, BENCHMARK])
+        except KeyError:
+            bench_price = 0.0
+        entry_prices = {
+            o["symbol"]: float(o["price"]) for o in orders if o["price"] and o["price"] > 0
+        }
+        entry = PaperOOSEntry(
+            rebal_date=str(rebal.date()),
+            strategy_id=strategy_id,
+            weights={o["symbol"]: o["weight"] for o in orders},
+            entry_prices=entry_prices,
+            benchmark_symbol=BENCHMARK,
+            benchmark_price=bench_price,
+        )
+        try:
+            append_entry(ledger_path, entry)
+            print(f"Recorded forward-OOS entry -> {ledger_path.name}")
+        except ValueError as exc:
+            print(f"OOS ledger: {exc}")
 
     # Output as command list
     lines = [

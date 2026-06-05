@@ -335,6 +335,26 @@ uv run trader live-drill record --mode shadow --day 2026-05-25
 uv run trader live-drill status --day 2026-05-25
 ```
 
+## Forward-OOS track record (paper as evidence)
+
+`paper_drill.py` is the operational gate (implementation/kill-switch/fills). To make
+paper trading *statistical evidence* about the edge, each rebalance is also appended,
+pre-registered and immutable, to `out/paper-oos-ledger-<strategy_id>.jsonl` (on by
+default; `--no-record-oos` to skip). The ledger refuses to rewrite an existing
+(date, strategy), so history cannot be back-edited.
+
+Monthly, score the accumulated record against realised prices:
+
+```bash
+python -m scripts.paper_oos --strategy-id aqr_top5_cap20_trail10_pit110
+```
+
+It reports the **live cumulative excess vs benchmark**, annualised live excess, and the
+ratio to the backtested +8%/yr. A live excess far below backtest (ratio < 0.5) is
+overfitting revealing itself. Honest caveats baked into the report: < 6 closed periods =
+implementation check only, not alpha proof (MinTRL ~21 months); only closed holding
+periods are scored (no MTM hindsight on the open position).
+
 ## Incident Response
 
 Immediately activate halt on:
