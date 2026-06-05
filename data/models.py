@@ -61,6 +61,27 @@ class InsiderTradeRecord:
 
 
 @dataclass(frozen=True)
+class InstitutionalHoldingRecord:
+    """A single SEC Form 13F-HR holding line (one position held by one institutional manager).
+    Dual-timestamp PIT: ``report_date`` is the quarter-end the position is reported AS OF; ``asof_ts``
+    is the SEC filing acceptance time (when it became public — up to 45 days later). Both gate
+    visibility; the 45-day disclosure lag is the whole point-in-time subtlety of 13F. 13F reports
+    issuers by ``cusip`` (no ticker), so ``symbol`` is resolved from a CUSIP map and may be ""."""
+
+    symbol: str  # resolved ticker, or "" when the CUSIP is unmapped
+    market: str
+    cusip: str  # the 13F issuer key (CUSIP-9/8/6)
+    issuer_name: str
+    manager: str  # the institutional filer, e.g. "BERKSHIRE HATHAWAY INC"
+    report_date: date  # quarter-end the position is as-of (periodOfReport)
+    asof_ts: datetime  # SEC acceptance time (when public)
+    shares: float | None = None  # sshPrnamt when sshPrnamtType == SH (None for bond principal/PRN)
+    value_usd: float | None = None  # market value, units-normalized (pre-2023 filings: x1000)
+    put_call: str = ""  # "Put"/"Call"/"" — option lines are not share ownership
+    source: str = ""
+
+
+@dataclass(frozen=True)
 class FundamentalRecord:
     symbol: str
     market: str
