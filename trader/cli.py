@@ -15,7 +15,7 @@ from data.fundamentals_csv import load_fundamentals_csv
 from data.ingest.alpaca_live import fetch_alpaca_latest_stock_bars
 from data.ingest.ccxt_crypto import fetch_ccxt_bars, normalize_crypto_symbol
 from data.ingest.crypto_microstructure import fetch_funding_history
-from data.ingest.crypto_open_interest import fetch_open_interest_history
+from data.ingest.crypto_open_interest import fetch_open_interest_history, to_perp_symbol
 from data.ingest.crypto_orderbook import fetch_order_book
 from data.ingest.fred_macro import fetch_fred_series
 from data.ingest.krx_flow_csv import KrxFlowCsvError, parse_krx_flow_csv
@@ -1074,13 +1074,16 @@ def _fetch_crypto_microstructure(
     if args.with_oi:
         end = date.today()
         span_days = max(2, int((lookback * _TF_HOURS.get(args.tf, 4.0)) / 24) + 3)
-        start = end - timedelta(days=span_days)
+        # Most venues (Binance) only retain ~30 days of open-interest history; requesting a
+        # startTime older than that is rejected (-1130). Clamp to the retention window.
+        start = end - timedelta(days=min(span_days, 29))
         try:
             oi_records = fetch_open_interest_history(
                 args.symbol, start, end, timeframe=args.tf, exchange_id=args.exchange
             )
+            # Funding exists only for perpetuals — fetch with the swap symbol, not spot.
             funding_records = fetch_funding_history(
-                args.symbol, start, end, exchange_id=args.exchange
+                to_perp_symbol(args.symbol), start, end, exchange_id=args.exchange
             )
         except Exception as exc:  # noqa: BLE001 - OI/funding are optional
             print(f"# 미체결약정/펀딩 미가용: {exc}")
