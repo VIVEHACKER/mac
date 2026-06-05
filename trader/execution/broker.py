@@ -39,6 +39,9 @@ class AccountSnapshot:
     pattern_day_trader: bool = False
     daytrade_count: int = 0
     currency: str = "USD"
+    # Prior trading-day close equity (the authoritative daily-loss kill-switch baseline). Optional:
+    # brokers that do not expose it leave it None and the tracker falls back to local history.
+    last_equity: float | None = None
 
 
 @dataclass(frozen=True)
@@ -70,15 +73,10 @@ class BrokerOrder:
 
 
 class BrokerAdapter(Protocol):
-    def get_account(self) -> AccountSnapshot:
-        ...
+    def get_account(self) -> AccountSnapshot: ...
 
-    def list_positions(self) -> list[PositionSnapshot]:
-        ...
+    def list_positions(self) -> list[PositionSnapshot]: ...
 
-    def submit_order(self, intent: OrderIntent) -> BrokerOrder:
-        ...
+    def submit_order(self, intent: OrderIntent) -> BrokerOrder: ...
 
-    def get_order(self, client_order_id: str) -> BrokerOrder | None:
-        ...
-
+    def get_order(self, client_order_id: str) -> BrokerOrder | None: ...

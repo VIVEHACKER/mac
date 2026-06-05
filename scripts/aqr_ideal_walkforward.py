@@ -1,4 +1,5 @@
-"""Walk-forward validation of IDEAL config (top7_cap20 + port_trail10).
+"""Walk-forward validation of the IDEAL config (parameterized via --top-n/--base-leverage/
+--trail-dd/--trail-exposure/--fee-bps; defaults reproduce the validated top7_cap20 + port_trail10).
 
 Rolling 5y train / 3y test, step 1y, 2013-2026.
 Each test window: report Sharpe, MDD, ann-excess vs SPY.
@@ -170,6 +171,20 @@ def vol_estimate(prices, symbol, end, window=63):
 
 
 def weights_from_picks(picks, prices, rebal, cap=0.20):
+    n = len(picks)
+    if n == 0:
+        return {}
+    total_cap = n * cap
+    if total_cap < 1.0 - 1e-6:
+        raise ValueError(
+            f"infeasible cap: {n} names x cap {cap:.4f} = {total_cap:.4f} < 1.0 (raise cap)."
+        )
+    # Cap binds for every name (e.g. top5: 5 * 0.20 ≈ 1.0) → equal weight is the unique feasible
+    # split and exactly respects the cap. Mirrors paper_drill.weights_from_picks so the model-gate
+    # report validates the SAME portfolio the order generator builds (Codex P1). 1e-6 tol catches
+    # this module's feasibility-padded cap = max(0.20, 1/n + 1e-9).
+    if total_cap <= 1.0 + 1e-6:
+        return {p.symbol: 1.0 / n for p in picks}
     raw = {p.symbol: 1.0 / vol_estimate(prices, p.symbol, rebal) for p in picks}
     for _ in range(10):
         total = sum(raw.values())
@@ -385,7 +400,30 @@ def main():
         help="Pin prices to a content-verified price snapshot CSV (reproducible). Must cover "
         "MEGACAPS + the SPY benchmark. Omit to download live from yfinance (NOT reproducible).",
     )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=DEFAULT_CFG["top_n"],
+        help="number of names held (default 7 = validated baseline)",
+    )
+    parser.add_argument("--base-leverage", type=float, default=DEFAULT_CFG["base_leverage"])
+    parser.add_argument("--trail-dd", type=float, default=DEFAULT_CFG["trail_dd"])
+    parser.add_argument("--trail-exposure", type=float, default=DEFAULT_CFG["trail_exposure"])
+    parser.add_argument("--fee-bps", type=float, default=DEFAULT_CFG["fee_bps"])
     args = parser.parse_args()
+    if args.top_n < 1:
+        raise SystemExit(
+            f"--top-n must be >= 1 (got {args.top_n}); this feeds model-gate evidence, so a "
+            "non-positive value (which would crash on 1/top_n or slice the whole ranking) is rejected."
+        )
+    run_cfg = {
+        "top_n": args.top_n,
+        "cap": max(0.20, 1.0 / args.top_n + 1e-9),  # feasible position cap
+        "base_leverage": args.base_leverage,
+        "trail_dd": args.trail_dd,
+        "trail_exposure": args.trail_exposure,
+        "fee_bps": args.fee_bps,
+    }
 
     if args.prices:
         print(f"Loading PINNED prices {args.prices.name}...")
@@ -441,10 +479,10 @@ def main():
         windows.append((test_start, test_end))
         start_year += 1
 
-    print(f"\nWalk-forward windows: {len(windows)}")
+    print(f"\nWalk-forward windows: {len(windows)}  cfg: {run_cfg}")
     results = []
     for ws, we in windows:
-        r = run_window(ws, we, prices, fund_cache)
+        r = run_window(ws, we, prices, fund_cache, cfg=run_cfg)
         if r:
             results.append(r)
             print(
@@ -462,8 +500,14 @@ def main():
     avg_sharpe = float(df["sharpe"].mean())
 
     summary = [
-        "# IDEAL AQR Walk-Forward (top7_cap20 + port_trail10)\n",
-        "Universe: 50 stocks (mega + faded), 50-stock survivorship-tested",
+        # Self-describing from run_cfg so non-default runs (e.g. --top-n 5) are not mislabeled as
+        # the top7 baseline — the persisted file IS the model-gate evidence (Codex P2).
+        f"# IDEAL AQR Walk-Forward "
+        f"(top{run_cfg['top_n']}_cap{run_cfg['cap'] * 100:.0f} + "
+        f"port_trail{run_cfg['trail_dd'] * 100:.0f}, lev{run_cfg['base_leverage']:g}, "
+        f"fee{run_cfg['fee_bps']:g}bps)\n",
+        f"Universe: {len(MEGACAPS)} stocks (mega + faded), survivorship-tested",
+        f"Config: {run_cfg}",
         f"Test windows: {len(df)} × 3-year rolling, step 1y",
         "",
         "## Aggregate (model-gate inputs)",

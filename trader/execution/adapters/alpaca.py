@@ -32,6 +32,7 @@ class AlpacaBrokerAdapter:
             pattern_day_trader=bool(getattr(account, "pattern_day_trader", False)),
             daytrade_count=int(getattr(account, "daytrade_count", 0) or 0),
             currency=str(getattr(account, "currency", "USD")),
+            last_equity=_optional_float(getattr(account, "last_equity", None)),
         )
 
     def list_positions(self) -> list[PositionSnapshot]:

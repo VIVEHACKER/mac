@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from time import sleep
 
@@ -14,6 +14,7 @@ from .models import (
     EntryPlanRecord,
     FlowRecord,
     FundamentalRecord,
+    InsiderTradeRecord,
     MacroObservation,
     OptionSentimentRecord,
     PriceBar,
@@ -22,6 +23,13 @@ from .models import (
 )
 
 DEFAULT_CATALOG_PATH = Path("data/store/trader.duckdb")
+
+
+def _naive_utc(ts: datetime) -> datetime:
+    """Normalize to naive UTC for the tz-less DuckDB TIMESTAMP columns. A tz-aware value would
+    otherwise be silently shifted to the host's local time on store (Codex P2). A naive value is
+    assumed already-UTC and returned unchanged."""
+    return ts.astimezone(UTC).replace(tzinfo=None) if ts.tzinfo is not None else ts
 
 
 @dataclass(frozen=True)
@@ -133,6 +141,29 @@ class MarketDataCatalog:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS fundamentals_key
                 ON fundamentals_q(symbol, market, period_end, asof_ts)
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS insider_trades (
+                    symbol TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    txn_date DATE NOT NULL,
+                    asof_ts TIMESTAMP NOT NULL,
+                    insider_name TEXT NOT NULL,
+                    insider_role TEXT NOT NULL,
+                    txn_code TEXT NOT NULL,
+                    shares DOUBLE,
+                    price DOUBLE,
+                    value_usd DOUBLE,
+                    source TEXT NOT NULL
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS insider_trades_key
+                ON insider_trades(symbol, market, txn_date, asof_ts, insider_name, txn_code)
                 """
             )
             con.execute(
@@ -707,6 +738,153 @@ class MarketDataCatalog:
                 gross_profit=row[13],
                 cost_of_revenue=row[14],
                 source=row[15],
+            )
+            for row in rows
+        ]
+
+    def put_insider_trades(self, records: list[InsiderTradeRecord]) -> int:
+        if not records:
+            return 0
+        self.initialize()
+        # Aggregate split executions: a single Form 4 can report several transactions by the same
+        # insider on the same day with the same code (different price buckets). They are one
+        # economic buy for signal purposes, and summing them also avoids a unique-key collision
+        # (Codex P2). Key matches the unique index. Timestamps are normalized to naive UTC so the
+        # tz-less DuckDB TIMESTAMP column is not shifted to local time (Codex P2).
+        agg: dict[tuple, dict] = {}
+        for item in records:
+            key = (
+                item.symbol.upper(),
+                item.market.lower(),
+                item.txn_date,
+                _naive_utc(item.asof_ts),
+                item.insider_name,
+                item.txn_code,
+            )
+            b = agg.setdefault(
+                key,
+                {
+                    "shares": 0.0,
+                    "value": 0.0,
+                    "n_sh": 0,
+                    "n_val": 0,
+                    "px": None,
+                    "role": item.insider_role,
+                    "source": item.source,
+                },
+            )
+            if item.shares is not None:
+                b["shares"] += item.shares
+                b["n_sh"] += 1
+            if item.price is not None and b["px"] is None:
+                b["px"] = item.price  # fallback when no weighted avg can be computed (Codex P3)
+            # Derive notional from shares*price when a feed gives unit price but no precomputed
+            # value_usd, so price survives the round-trip (Codex P2).
+            value = item.value_usd
+            if value is None and item.shares is not None and item.price is not None:
+                value = item.shares * item.price
+            if value is not None:
+                b["value"] += value
+                b["n_val"] += 1
+        rows = []
+        for key, b in agg.items():
+            shares = b["shares"] if b["n_sh"] else None
+            value = b["value"] if b["n_val"] else None
+            # `value is not None` (not truthiness) so a legitimate $0 transaction — e.g. a grant on
+            # a non-default code path — keeps price 0.0 instead of becoming indistinguishable from
+            # a missing price (Codex P2). `shares` truthiness keeps it nonzero (no div-by-zero).
+            price = value / shares if value is not None and shares else b["px"]
+            rows.append(
+                (
+                    key[0],
+                    key[1],
+                    key[2],
+                    key[3],
+                    key[4],
+                    b["role"],
+                    key[5],
+                    shares,
+                    price,
+                    value,
+                    b["source"],
+                )
+            )
+        with self._connect() as con:
+            con.executemany(
+                """
+                DELETE FROM insider_trades
+                WHERE symbol = ? AND market = ? AND txn_date = ? AND asof_ts = ?
+                      AND insider_name = ? AND txn_code = ?
+                """,
+                [(r[0], r[1], r[2], r[3], r[4], r[6]) for r in rows],
+            )
+            con.executemany(
+                """
+                INSERT INTO insider_trades (
+                    symbol, market, txn_date, asof_ts, insider_name, insider_role,
+                    txn_code, shares, price, value_usd, source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_insider_trades(
+        self,
+        symbol: str,
+        market: str = "us",
+        as_of: datetime | None = None,
+        limit: int = 0,
+    ) -> list[InsiderTradeRecord]:
+        self.initialize()
+        query = [
+            """
+            SELECT symbol, market, txn_date, asof_ts, insider_name, insider_role,
+                   txn_code, shares, price, value_usd, source
+            FROM insider_trades
+            WHERE symbol = ? AND market = ?
+            """
+        ]
+        params: list[object] = [symbol.upper(), market.lower()]
+        if as_of is not None:
+            # DOUBLE point-in-time guard: neither the trade nor its disclosure may leak forward.
+            # asof_ts <= as_of  (the SEC filing must already be public) AND
+            # txn_date <= as_of  (the trade itself must already have happened).
+            # Normalize to naive UTC to match the stored (naive-UTC) timestamps (Codex P2).
+            as_of_utc = _naive_utc(as_of)
+            query.append("AND asof_ts <= ? AND txn_date <= ?")
+            params.extend([as_of_utc, as_of_utc.date()])
+        # Amendment supersession: a 4/A correction is a NEW row (later asof_ts) for the same
+        # transaction key, so keep only the latest VISIBLE filing per transaction — otherwise a
+        # consumer summing the cluster double-counts the original + its correction (Codex P2).
+        query.append(
+            """
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY symbol, market, txn_date, insider_name, txn_code
+                ORDER BY asof_ts DESC
+            ) = 1
+            """
+        )
+        query.append("ORDER BY asof_ts DESC, txn_date DESC")
+        if limit > 0:
+            query.append("LIMIT ?")
+            params.append(limit)
+        with self._connect() as con:
+            rows = con.execute("\n".join(query), params).fetchall()
+        return [
+            InsiderTradeRecord(
+                symbol=row[0],
+                market=row[1],
+                txn_date=row[2],
+                asof_ts=row[3],
+                insider_name=row[4],
+                insider_role=row[5],
+                txn_code=row[6],
+                shares=row[7],
+                price=row[8],
+                value_usd=row[9],
+                source=row[10],
             )
             for row in rows
         ]

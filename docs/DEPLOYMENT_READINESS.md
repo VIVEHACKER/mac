@@ -88,9 +88,11 @@ is not.
 ## Go / no-go checklist (before any real capital)
 
 1. `python scripts/snapshot_fundamentals.py fundamentals-<date>` — pin data.
-2. `python scripts/aqr_ideal_walkforward.py --snapshot data/snapshots/<name>.csv` —
+   Pass `--top-n <N>` matching the strategy under test in steps 2-3 (5 = conc5,
+   7 = baseline); paper_drill DEFAULTS to top5, so always make N explicit.
+2. `python scripts/aqr_ideal_walkforward.py --top-n <N> --snapshot data/snapshots/<name>.csv` —
    confirm Sharpe ≥ ~1.35 on the **pinned** data (parity).
-3. `python scripts/paper_drill.py --snapshot data/snapshots/<name>.csv` — orders
+3. `python scripts/paper_drill.py --top-n <N> --snapshot data/snapshots/<name>.csv` — orders
    header must read `Fundamentals: snapshot:<name>` (never `LIVE-CATALOG`).
 4. Run the `live-dry-run` block; confirm pre-trade gates pass.
 5. Paper-trade ≥30 days; reconcile fills (`trader live-reconcile`).

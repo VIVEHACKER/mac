@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from risk.halt_state import HaltStateStore
+from risk.kill_switch import check_kill_switch
 from risk.policy import RiskPolicy
 from risk.pretrade import _project_positions, evaluate_pretrade_order
 from trader.execution.broker import (
@@ -32,10 +33,57 @@ def process_order_intents(
     policy: RiskPolicy,
     marks: dict[str, float],
     dry_run: bool = True,
+    reference_equity: float | None = None,
+    peak_equity: float | None = None,
 ) -> list[ExecutionResult]:
     account = broker.get_account()
     positions = broker.list_positions()
     halt = halt_store.current()
+    # Portfolio kill-switch — wired into the live loop (previously a dead, never-called function).
+    # Latch a NEW halt when the account breaches the daily-loss or peak-drawdown latch, but NEVER
+    # overwrite an existing halt (a prior manual/broker halt must survive, so clearing the
+    # kill-switch does not silently resume into an unresolved blocker — Codex P2). Requires the
+    # caller to supply reference (start-of-day) and peak equity; skipped if absent.
+    if reference_equity is not None and not halt.halted:
+        gross_exposure = (
+            sum(abs(p.market_value) for p in positions) / account.equity
+            if account.equity > 0
+            else 0.0
+        )
+        kill = check_kill_switch(
+            start_equity=reference_equity,
+            current_equity=account.equity,
+            gross_exposure=gross_exposure,
+            max_daily_drawdown=policy.max_daily_loss,
+            max_gross_exposure=policy.max_gross_exposure,
+            peak_equity=peak_equity,
+            max_drawdown_from_peak=policy.max_drawdown_from_peak,
+        )
+        if kill.halted:
+            halt = halt_store.activate(
+                "kill-switch: " + "; ".join(kill.reasons), source="kill-switch"
+            )
+    # An active halt (pre-existing OR just-latched) pauses the WHOLE batch, and the intents are NOT
+    # recorded — a halt is a temporary pause, not a per-order rejection, so the same orders stay
+    # retryable on every later cycle until the halt is cleared (Codex P2).
+    if halt.halted:
+        # Keep the established "risk_block" status (the CLI maps it to the gate-failure exit code);
+        # the kill-switch vs manual/broker origin is carried in the reason ("halted: ...").
+        reasons = (f"halted: {halt.reason}",)
+        blocked: list[ExecutionResult] = []
+        for raw in intents:
+            intent = raw.normalized()
+            store.record_event(
+                OrderEvent(
+                    event_type="halt_block",
+                    client_order_id=intent.client_order_id,
+                    ts=datetime.now(UTC),
+                    status="blocked",
+                    message=halt.reason,
+                )
+            )
+            blocked.append(ExecutionResult(intent.client_order_id, "block", "risk_block", reasons))
+        return blocked
     results: list[ExecutionResult] = []
     for raw in intents:
         intent = raw.normalized()

@@ -328,6 +328,198 @@ def test_risk_reducing_sell_not_blocked_by_daily_new_notional_cap() -> None:
     assert not any("daily new notional" in r for r in result.reasons)
 
 
+def test_kill_switch_latches_and_blocks_batch_on_daily_drawdown(tmp_path) -> None:
+    """Portfolio kill-switch (previously a DEAD function) must halt the whole batch when the
+    account has dropped past the daily-loss latch, and persist the halt for later cycles."""
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    # equity 9_600 vs reference 10_000 = -4% daily, past max_daily_loss (2%)
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=9_600, cash=9_600, equity=9_600)
+    )
+
+    results = process_order_intents(
+        [_intent().normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert results[0].status == "risk_block"
+    assert any("daily drawdown" in r for r in results[0].reasons)
+    assert halt.current().halted
+    # not recorded as an intent -> retryable once the halt is cleared
+    assert not store.has_intent(_intent().normalized().client_order_id)
+
+
+def test_kill_switch_latches_on_peak_drawdown_even_when_daily_flat(tmp_path) -> None:
+    """The daily 2% latch cannot catch a slow multi-day bleed; the peak-drawdown latch must."""
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    # daily flat (reference == current) but -26% from the all-time peak (sleeve latch = 25%)
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=7_400, cash=7_400, equity=7_400)
+    )
+
+    results = process_order_intents(
+        [_intent().normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=7_400.0,
+        peak_equity=10_000.0,
+    )
+
+    assert results[0].status == "risk_block"
+    assert any("peak" in r for r in results[0].reasons)
+    assert halt.current().halted
+
+
+def test_kill_switch_allows_orders_when_within_limits(tmp_path) -> None:
+    """The kill-switch must not false-trip on a healthy account."""
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    # -1% daily, -5% from peak -> both within limits
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=9_900, cash=9_900, equity=9_900)
+    )
+
+    results = process_order_intents(
+        [_intent().normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=True,
+        reference_equity=10_000.0,
+        peak_equity=10_400.0,
+    )
+
+    assert results[0].status == "accepted"
+    assert not halt.current().halted
+
+
+def test_kill_switch_latch_blocks_next_batch(tmp_path) -> None:
+    """Once latched, a subsequent batch (even without reference_equity) fails closed via the
+    pre-trade halt check."""
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=9_600, cash=9_600, equity=9_600)
+    )
+
+    process_order_intents(
+        [_intent(rebalance_key="a").normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+    second = process_order_intents(
+        [_intent(rebalance_key="b").normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=True,
+    )
+
+    assert second[0].status == "risk_block"
+    assert any("halted" in r for r in second[0].reasons)
+
+
+def test_kill_switch_does_not_overwrite_existing_halt(tmp_path) -> None:
+    """A drawdown breach must NOT clobber a pre-existing manual/broker halt — otherwise clearing
+    the kill-switch would silently resume into the unresolved original blocker (Codex P2)."""
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    halt.activate("broker position mismatch", source="manual")
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=9_600, cash=9_600, equity=9_600)
+    )
+
+    results = process_order_intents(
+        [_intent().normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,  # would trip the kill-switch on its own
+    )
+
+    assert results[0].status == "risk_block"  # blocked; origin (manual) preserved in halt store
+    assert halt.current().reason == "broker position mismatch"  # original preserved
+    assert halt.current().source == "manual"
+
+
+def test_kill_switch_paused_order_is_retryable_after_clear(tmp_path) -> None:
+    """A kill-switch pause must keep the SAME client_order_id retryable across cycles and after the
+    halt clears — it must never be recorded as an intent (which would make it a duplicate)."""
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    intent = _intent().normalized()
+    drawdown = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=9_600, cash=9_600, equity=9_600)
+    )
+    policy = RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0)
+
+    # cycle 1: kill-switch trips, order blocked + not recorded
+    process_order_intents(
+        [intent],
+        broker=drawdown,
+        store=store,
+        halt_store=halt,
+        policy=policy,
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+    # cycle 2: same id re-emitted while still halted -> still blocked, still not recorded
+    process_order_intents(
+        [intent],
+        broker=drawdown,
+        store=store,
+        halt_store=halt,
+        policy=policy,
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+    assert not store.has_intent(intent.client_order_id)
+
+    # operator clears the halt + equity recovers -> the SAME order is retryable, not "duplicate"
+    halt.clear("recovered", source="manual")
+    healthy = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=10_000, cash=10_000, equity=10_000)
+    )
+    result = process_order_intents(
+        [intent],
+        broker=healthy,
+        store=store,
+        halt_store=halt,
+        policy=policy,
+        marks={"QQQ": 100},
+        dry_run=True,
+        reference_equity=10_000.0,
+        peak_equity=10_000.0,
+    )
+    assert result[0].status == "accepted"
+
+
 def _intent(qty: float = 2, rebalance_key: str = "2026-05-12") -> OrderIntent:
     return OrderIntent(
         strategy="approved-etf",

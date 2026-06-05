@@ -6,6 +6,7 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -79,6 +80,7 @@ from engine.walkforward import (
     format_walk_forward_report,
     run_factor_walk_forward,
 )
+from risk.equity_track import EquityTrackStore
 from risk.halt_state import HaltStateStore
 from risk.kill_switch import check_kill_switch
 from risk.policy import RiskPolicy
@@ -126,6 +128,7 @@ DEFAULT_CATALOG_DB = ROOT / DEFAULT_CATALOG_PATH
 DEFAULT_LIVE_CATALOG_DB = ROOT / "data" / "store" / "live-prices.duckdb"
 DEFAULT_ORDER_LOG = ROOT / "data" / "store" / "live-orders.jsonl"
 DEFAULT_HALT_STATE = ROOT / "data" / "store" / "live-halt.json"
+DEFAULT_EQUITY_STATE = ROOT / "data" / "store" / "live-equity.json"
 DEFAULT_RESEARCH_REGISTRY = ROOT / "data" / "store" / "research-registry.jsonl"
 DEFAULT_DRILL_LOG = ROOT / "data" / "store" / "live-drills.jsonl"
 CORE_COMMANDS = {
@@ -896,6 +899,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live_submit.add_argument("--order-log", type=Path, default=DEFAULT_ORDER_LOG)
     live_submit.add_argument("--halt-state", type=Path, default=DEFAULT_HALT_STATE)
+    live_submit.add_argument("--equity-state", type=Path, default=DEFAULT_EQUITY_STATE)
     live_submit.add_argument("--drill-log", type=Path, default=DEFAULT_DRILL_LOG)
     live_submit.add_argument("--registry", type=Path, default=DEFAULT_RESEARCH_REGISTRY)
     live_submit.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
@@ -2654,6 +2658,34 @@ def _run_live_price_ingest(args: argparse.Namespace) -> int:
     return 0 if stored == len(symbols) else 2
 
 
+# The fund trades US equities, so the daily-loss latch must roll on the US market-session date.
+# Deriving the day from host-local time (e.g. KST) would roll mid-session and reset the baseline,
+# letting pre-midnight losses escape the 2% latch (Codex P1).
+_MARKET_TZ = ZoneInfo("America/New_York")
+
+
+def _live_equity_refs(
+    broker: BrokerAdapter, equity_state: Path, broker_name: str
+) -> tuple[float | None, float | None]:
+    """Update the persistent equity tracker with the broker's current equity and return the
+    (reference, peak) refs that arm the portfolio kill-switch. The day-roll uses the US market
+    session date (not host-local). The state file is keyed by normalized broker + account id so a
+    fake/paper drill or a different account cannot seed the peak/baseline that gates a real account
+    (Codex P2). Returns (None, None) on a non-positive equity so the pre-trade equity check fails
+    the order closed (rather than the kill-switch raising on a zero reference)."""
+    account = broker.get_account()
+    if account.equity <= 0:
+        return None, None
+    key = f"{broker_name.strip().lower()}-{account.account_id}"
+    path = equity_state.with_name(f"{equity_state.stem}-{key}{equity_state.suffix}")
+    refs = EquityTrackStore(path).update(
+        account.equity,
+        today=datetime.now(_MARKET_TZ).date(),
+        prior_close=account.last_equity,
+    )
+    return refs.reference_equity, refs.peak_equity
+
+
 def _run_live_dry_run(args: argparse.Namespace) -> int:
     symbol = _catalog_symbol(args.symbol, args.market)
     intent = OrderIntent(
@@ -2800,6 +2832,7 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         reason="live-submit" if args.submit else "live-shadow",
         asof_ts=datetime.now(UTC),
     ).normalized()
+    reference_equity, peak_equity = _live_equity_refs(broker, args.equity_state, broker_name)
     results = process_order_intents(
         [intent],
         broker=broker,
@@ -2808,6 +2841,8 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         policy=live_risk_policy(policy),
         marks={symbol: args.price},
         dry_run=not args.submit,
+        reference_equity=reference_equity,
+        peak_equity=peak_equity,
     )
     result = results[0]
     lines = [

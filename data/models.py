@@ -42,6 +42,25 @@ class DelistingReturn:
 
 
 @dataclass(frozen=True)
+class InsiderTradeRecord:
+    """A single insider (Form 4) transaction. Dual-timestamp PIT: ``txn_date`` is when the trade
+    happened; ``asof_ts`` is the SEC filing acceptance time (when it became public). Both must gate
+    visibility in backtests, so neither the trade nor its disclosure leaks forward."""
+
+    symbol: str
+    market: str
+    txn_date: date
+    asof_ts: datetime
+    insider_name: str
+    insider_role: str  # e.g. CEO, CFO, Chairman, Director, 10% owner (raw, not deduped in v1)
+    txn_code: str  # Form 4 transaction code: P = open-market buy, S = sale, A = grant, ...
+    shares: float | None = None
+    price: float | None = None
+    value_usd: float | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True)
 class FundamentalRecord:
     symbol: str
     market: str

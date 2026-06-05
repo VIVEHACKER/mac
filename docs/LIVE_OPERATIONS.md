@@ -335,6 +335,26 @@ uv run trader live-drill record --mode shadow --day 2026-05-25
 uv run trader live-drill status --day 2026-05-25
 ```
 
+## Forward-OOS track record (paper as evidence)
+
+`paper_drill.py` is the operational gate (implementation/kill-switch/fills). To make
+paper trading *statistical evidence* about the edge, each rebalance is also appended,
+pre-registered and immutable, to `out/paper-oos-ledger-<strategy_id>.jsonl` (on by
+default; `--no-record-oos` to skip). The ledger refuses to rewrite an existing
+(date, strategy), so history cannot be back-edited.
+
+Monthly, score the accumulated record against realised prices:
+
+```bash
+python -m scripts.paper_oos --strategy-id aqr_top5_cap20_trail10_pit110
+```
+
+It reports the **live cumulative excess vs benchmark**, annualised live excess, and the
+ratio to the backtested +8%/yr. A live excess far below backtest (ratio < 0.5) is
+overfitting revealing itself. Honest caveats baked into the report: < 6 closed periods =
+implementation check only, not alpha proof (MinTRL ~21 months); only closed holding
+periods are scored (no MTM hindsight on the open position).
+
 ## Incident Response
 
 Immediately activate halt on:
@@ -358,10 +378,16 @@ Then:
 
 ---
 
-## IDEAL line monthly operating procedure (aqr_top7_cap20_trail10)
+## IDEAL line monthly operating procedure (top5 conc5 candidate / top7 baseline)
 
-Approved strategy: `aqr_top7_cap20_trail10_pit110`. Universe: 106 PIT names
-(`scripts/aqr_ideal_walkforward.py:MEGACAPS`). Rebalance cadence: 21 trading days.
+Two registered strategies share this universe:
+- `aqr_top7_cap20_trail10_pit110` — the validated **baseline**; keep it LIVE until conc5 clears paper.
+- `aqr_top5_cap20_trail10_pit110` — **conc5**, model-gate APPROVED, in PAPER OOS (3-6 mo) before any
+  live capital. This is `paper_drill.py`'s DEFAULT config.
+
+Universe: 106 PIT names (`scripts/aqr_ideal_walkforward.py:MEGACAPS`). Rebalance cadence: 21 trading
+days. Each strategy keeps its OWN NAV/peak/positions track
+(`out/paper-drill-state-<strategy_id>.json`) — they are never cross-contaminated.
 
 **Reproducibility is mandatory.** A background re-ingest of `fundamentals_q`
 (3,383 → 7,291 records) silently broke the Variant N backtest (CAGR 19.91% →
@@ -374,21 +400,31 @@ orders, so the picks are auditable and replayable.
 # 1. (Once per data refresh) Pin the current fundamentals. Records the sha256.
 .venv/bin/python scripts/snapshot_fundamentals.py fundamentals-$(date +%F)
 
-# 2. Generate the rebalance against the PINNED snapshot (reproducible).
-#    Defaults to data/snapshots/fundamentals-2026-05-29.csv; pass --snapshot to pin another.
-.venv/bin/python scripts/paper_drill.py --snapshot data/snapshots/fundamentals-$(date +%F).csv
+# 2. Generate the rebalance against the PINNED snapshot (reproducible). ALWAYS pass --top-n so the
+#    strategy can never switch silently (paper_drill.py defaults to top5/conc5):
+#    conc5 paper candidate:
+.venv/bin/python scripts/paper_drill.py --top-n 5 \
+    --snapshot data/snapshots/fundamentals-$(date +%F).csv
+#    validated baseline (run until conc5 clears paper OOS):
+.venv/bin/python scripts/paper_drill.py --top-n 7 \
+    --snapshot data/snapshots/fundamentals-$(date +%F).csv
+#    --strategy-id is derived from --top-n (5->top5, 7->top7); a conflicting explicit id is rejected.
 
-#    Output: out/paper-drill-orders.md  (header records the snapshot name + hash provenance)
+#    Output (per strategy, so the two runs don't overwrite each other):
+#      out/paper-drill-orders-aqr_top5_cap20_trail10_pit110.md
+#      out/paper-drill-orders-aqr_top7_cap20_trail10_pit110.md
+#    (each header records the snapshot name + hash provenance)
 ```
 
-The orders file header shows `Fundamentals: snapshot:<name>` — confirm it is a
+Each orders file header shows `Fundamentals: snapshot:<name>` — confirm it is a
 snapshot, NOT `LIVE-CATALOG (NOT reproducible)`. If it shows the live fallback,
 the snapshot path was wrong; do not trade those orders.
 
 ### Mechanical verification (no broker)
 
-Run the `live-dry-run` block printed in `out/paper-drill-orders.md`. These go
-through the full pre-trade risk path (`risk/pretrade.py`) without broker calls.
+Run the `live-dry-run` block printed in the strategy's
+`out/paper-drill-orders-<strategy_id>.md`. These go through the full pre-trade
+risk path (`risk/pretrade.py`) without broker calls.
 
 ### Paper, then live (operator decision — fail closed)
 

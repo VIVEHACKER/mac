@@ -650,6 +650,8 @@ def test_live_submit_can_submit_to_fake_after_all_gates_pass(tmp_path, monkeypat
             str(order_log),
             "--halt-state",
             str(tmp_path / "halt.json"),
+            "--equity-state",
+            str(tmp_path / "equity.json"),
             "--registry",
             str(registry),
             "--catalog-db",
@@ -1554,3 +1556,55 @@ def test_validate_model_record_gate_pit_audit_false_when_skipped(tmp_path, capsy
         f"Expected pit_audit_passed=False when --skip-universe-audit is set, "
         f"got {evidence_payload['pit_audit_passed']!r}"
     )
+
+
+def test_live_equity_refs_tracks_peak_and_fails_closed_on_zero(tmp_path) -> None:
+    """0.1b wiring: the live-submit path derives kill-switch refs from the broker's equity and
+    persists the all-time peak; a non-positive equity returns (None, None) so the pre-trade equity
+    check fails the order closed rather than the kill-switch raising on a zero reference."""
+    from trader.execution.adapters.fake import FakeBrokerAdapter
+    from trader.execution.broker import AccountSnapshot
+
+    path = tmp_path / "equity.json"
+    healthy = FakeBrokerAdapter(
+        account=AccountSnapshot("t", buying_power=12_000, cash=12_000, equity=12_000)
+    )
+    ref, peak = cli._live_equity_refs(healthy, path, "fake")
+    assert ref == 12_000.0
+    assert peak == 12_000.0
+
+    # equity drops same session -> peak persists (same broker+account key), reference unchanged
+    dropped = FakeBrokerAdapter(
+        account=AccountSnapshot("t", buying_power=9_000, cash=9_000, equity=9_000)
+    )
+    ref2, peak2 = cli._live_equity_refs(dropped, path, "fake")
+    assert peak2 == 12_000.0
+    assert ref2 == 12_000.0
+
+    # a DIFFERENT account does not inherit the first account's peak (separate state key)
+    other = FakeBrokerAdapter(
+        account=AccountSnapshot("other", buying_power=5_000, cash=5_000, equity=5_000)
+    )
+    ref3, peak3 = cli._live_equity_refs(other, path, "fake")
+    assert peak3 == 5_000.0
+    assert ref3 == 5_000.0
+
+    # broken/empty account -> fail closed via pre-trade, not a kill-switch crash
+    broke = FakeBrokerAdapter(account=AccountSnapshot("t", buying_power=0, cash=0, equity=0))
+    assert cli._live_equity_refs(broke, path, "fake") == (None, None)
+
+
+def test_live_equity_refs_uses_broker_prior_close_baseline(tmp_path) -> None:
+    """0.1b P1: the live wiring feeds the broker's prior-day close as the daily baseline, so a
+    fresh state on a gap-down open still arms the daily latch."""
+    from trader.execution.adapters.fake import FakeBrokerAdapter
+    from trader.execution.broker import AccountSnapshot
+
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot(
+            "acct", buying_power=9_500, cash=9_500, equity=9_500, last_equity=10_000
+        )
+    )
+    ref, peak = cli._live_equity_refs(broker, tmp_path / "equity.json", "alpaca-paper")
+    assert ref == 10_000.0  # prior close, not the gapped-down current 9_500
+    assert peak == 10_000.0
