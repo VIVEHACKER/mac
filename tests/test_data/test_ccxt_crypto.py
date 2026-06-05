@@ -31,3 +31,27 @@ def test_fetch_ccxt_bars_uses_injected_fetcher() -> None:
     assert bars[0].symbol == "BTC/USDT"
     assert bars[0].market == "crypto"
     assert bars[0].close == 105.0
+
+
+def test_fetch_ccxt_bars_intraday_preserves_datetime() -> None:
+    ts_ms = int(datetime(2026, 5, 7, 4, 0, tzinfo=UTC).timestamp() * 1000)
+
+    def fetcher(symbol: str, timeframe: str, since: int, limit: int) -> list[list[float]]:
+        assert timeframe == "4h"
+        return [[ts_ms, 1.0, 2.0, 0.5, 1.5, 10.0]]
+
+    bars = fetch_ccxt_bars(
+        "btc",
+        start=date(2026, 5, 7),
+        end=date(2026, 5, 7),
+        timeframe="4h",
+        intraday=True,
+        fetch_ohlcv=fetcher,
+    )
+
+    assert len(bars) == 1
+    # intraday bars carry the full datetime in ts (datetime is a subclass of date,
+    # so the daily catalog and existing date-based code remain unaffected)
+    assert isinstance(bars[0].ts, datetime)
+    assert bars[0].ts == datetime(2026, 5, 7, 4, 0)
+    assert bars[0].freq == "4h"
