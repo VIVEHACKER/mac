@@ -15,6 +15,7 @@ from .models import (
     FlowRecord,
     FundamentalRecord,
     InsiderTradeRecord,
+    InstitutionalHoldingRecord,
     MacroObservation,
     OptionSentimentRecord,
     PriceBar,
@@ -164,6 +165,32 @@ class MarketDataCatalog:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS insider_trades_key
                 ON insider_trades(symbol, market, txn_date, asof_ts, insider_name, txn_code)
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS institutional_holdings (
+                    symbol TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    cusip TEXT NOT NULL,
+                    issuer_name TEXT NOT NULL,
+                    manager TEXT NOT NULL,
+                    report_date DATE NOT NULL,
+                    asof_ts TIMESTAMP NOT NULL,
+                    shares DOUBLE,
+                    value_usd DOUBLE,
+                    put_call TEXT NOT NULL,
+                    source TEXT NOT NULL
+                )
+                """
+            )
+            con.execute(
+                # cusip (not symbol) is the issuer key — symbol may be "" for an unmapped CUSIP.
+                # asof_ts is in the key so an original 13F-HR and its 13F-HR/A amendment coexist as
+                # separate rows; get_institutional_holdings keeps only the latest per quarter.
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS institutional_holdings_key
+                ON institutional_holdings(manager, market, cusip, report_date, asof_ts, put_call)
                 """
             )
             con.execute(
@@ -884,6 +911,149 @@ class MarketDataCatalog:
                 shares=row[7],
                 price=row[8],
                 value_usd=row[9],
+                source=row[10],
+            )
+            for row in rows
+        ]
+
+    def put_institutional_holdings(self, records: list[InstitutionalHoldingRecord]) -> int:
+        """Store 13F holdings. Pass ALL sub-rows of a filing in ONE call: a DELETE-then-INSERT on the
+        unique key makes re-ingesting a filing idempotent (it replaces, never accumulates). A
+        position EXITED in an amendment is represented PIT-safely by the ingest emitting a None-shares
+        tombstone row (later asof_ts) — the original is kept so a query between the two filings still
+        sees it; get_institutional_holdings then surfaces the tombstone as the latest snapshot."""
+        if not records:
+            return 0
+        self.initialize()
+        # Aggregate sub-rows that share the unique key: a 13F can split one manager's position for an
+        # issuer across several infoTable rows (otherManager allocations). They are one economic
+        # position, so sum shares and value (and this also avoids a unique-key collision). asof_ts is
+        # normalized to naive UTC so the tz-less DuckDB TIMESTAMP column is not shifted to local time.
+        agg: dict[tuple, dict] = {}
+        for item in records:
+            key = (
+                item.manager,
+                item.market.lower(),
+                item.cusip.replace(" ", "").upper(),
+                item.report_date,
+                _naive_utc(item.asof_ts),
+                item.put_call,
+            )
+            b = agg.setdefault(
+                key,
+                {
+                    "symbol": item.symbol.upper(),
+                    "issuer": item.issuer_name,
+                    "shares": 0.0,
+                    "value": 0.0,
+                    "n_sh": 0,
+                    "n_val": 0,
+                    "source": item.source,
+                },
+            )
+            if item.shares is not None:
+                b["shares"] += item.shares
+                b["n_sh"] += 1
+            if item.value_usd is not None:
+                b["value"] += item.value_usd
+                b["n_val"] += 1
+        rows = [
+            (
+                b["symbol"],
+                key[1],  # market
+                key[2],  # cusip
+                b["issuer"],
+                key[0],  # manager
+                key[3],  # report_date
+                key[4],  # asof_ts
+                b["shares"] if b["n_sh"] else None,
+                b["value"] if b["n_val"] else None,
+                key[5],  # put_call
+                b["source"],
+            )
+            for key, b in agg.items()
+        ]
+        with self._connect() as con:
+            con.executemany(
+                """
+                DELETE FROM institutional_holdings
+                WHERE manager = ? AND market = ? AND cusip = ? AND report_date = ?
+                      AND asof_ts = ? AND put_call = ?
+                """,
+                [(r[4], r[1], r[2], r[5], r[6], r[9]) for r in rows],
+            )
+            con.executemany(
+                """
+                INSERT INTO institutional_holdings (
+                    symbol, market, cusip, issuer_name, manager, report_date, asof_ts,
+                    shares, value_usd, put_call, source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_institutional_holdings(
+        self,
+        symbol: str,
+        market: str = "us",
+        as_of: datetime | None = None,
+        limit: int = 0,
+    ) -> list[InstitutionalHoldingRecord]:
+        """Visible 13F holdings of ``symbol`` (resolved ticker), latest filing per (manager, cusip,
+        quarter). Unmapped CUSIPs (symbol == "") are not reachable by this ticker query — resolution
+        happens at ingest.
+
+        ``as_of=None`` applies NO point-in-time filter (returns the latest stored snapshot per
+        position, matching get_insider_trades). Backtests MUST pass an explicit ``as_of`` — defaulting
+        to wall-clock now() would be wrong for a simulated-past query (it would leak real-present
+        filings into a 2020 sim). An exited position appears as a shares=None tombstone row."""
+        self.initialize()
+        query = [
+            """
+            SELECT symbol, market, cusip, issuer_name, manager, report_date, asof_ts,
+                   shares, value_usd, put_call, source
+            FROM institutional_holdings
+            WHERE symbol = ? AND market = ?
+            """
+        ]
+        params: list[object] = [symbol.upper(), market.lower()]
+        if as_of is not None:
+            # DOUBLE point-in-time guard: the filing must be public (asof_ts <= as_of) AND the
+            # reported quarter must have ended (report_date <= as_of). asof_ts >= report_date always,
+            # so asof_ts is the binding constraint, but both are checked for symmetry with Form 4.
+            as_of_utc = _naive_utc(as_of)
+            query.append("AND asof_ts <= ? AND report_date <= ?")
+            params.extend([as_of_utc, as_of_utc.date()])
+        # Amendment supersession: a 13F-HR/A restatement is a NEW row (later asof_ts) for the same
+        # manager+issuer+quarter, so keep only the latest VISIBLE filing per position.
+        query.append(
+            """
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY manager, cusip, report_date, put_call
+                ORDER BY asof_ts DESC
+            ) = 1
+            """
+        )
+        query.append("ORDER BY report_date DESC, manager, cusip")
+        if limit > 0:
+            query.append("LIMIT ?")
+            params.append(limit)
+        with self._connect() as con:
+            rows = con.execute("\n".join(query), params).fetchall()
+        return [
+            InstitutionalHoldingRecord(
+                symbol=row[0],
+                market=row[1],
+                cusip=row[2],
+                issuer_name=row[3],
+                manager=row[4],
+                report_date=row[5],
+                asof_ts=row[6],
+                shares=row[7],
+                value_usd=row[8],
+                put_call=row[9],
                 source=row[10],
             )
             for row in rows
