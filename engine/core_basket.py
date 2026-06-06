@@ -9,14 +9,23 @@ controls. The one robust finding: net-margin / ROIC quality *reverse*-predicts.
 So this engine (1) EXCLUDES net_margin and roic from ranking, (2) tilts toward
 the directionally-supported-if-modest value (low ps/pb) + Novy-Marx gross
 profitability (GP/assets), and (3) holds theses (winners are not trimmed until
-the hard cap). Survival = diversification (12-15 names) + 8% hard cap + zero
-leverage; diversification substitutes for vol-targeting. This is the boring,
-durable anchor — asymmetric upside is the hunt basket's job, the validated
-momentum edge is the separate IDEAL line. Do not turn this into an alpha claim.
+the hard cap). Survival = breadth (12-15 names) + an 8% per-name hard cap + a
+per-SECTOR count cap (no single sector dominates) + zero leverage. This is the
+boring, durable anchor — asymmetric upside is the hunt basket's job, the
+validated momentum edge is the separate IDEAL line. Do not make it an alpha claim.
+
+RANKING IS PERCENTILE-BASED, NOT Z-SCORE: each factor (cheapness, GP/assets) is
+mapped to its cross-sectional percentile rank in [0,1] before blending. Percentile
+ranks are dispersion-invariant and bounded, so the blend weights (w_value / w_gp)
+genuinely control each factor's influence. (A z-score blend was rejected: GP has a
+fat right tail that, after winsorizing, rails at the clip ceiling and dominates the
+composite regardless of the nominal value weight — i.e. it silently became GP-led,
+not value-led. Percentiles make "value-led" actually true.)
 """
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -24,26 +33,25 @@ from datetime import date
 from data.models import FundamentalRecord
 from engine.compounder import (
     SECTOR_INVALID_METRICS,
-    Z_CLIP,
     _flags,
-    _zscores,
     compute_metrics,
 )
-from engine.significance import normal_cdf
 
 MIN_PRESENT_METRICS: int = 5
 MAX_DEBT_TO_EQUITY: float = 3.0
 MAX_SHARE_GROWTH: float = 0.15
+MIN_HOLDINGS_WARN: int = 3  # below this the "durable anchor" is degenerate -> warn (non-fatal)
+DEFAULT_MAX_PER_SECTOR: int = 4  # <= 4 of 13 ~= 31% per sector, so no sector dominates
 
 
 @dataclass(frozen=True)
 class CoreHolding:
     symbol: str
     weight: float
-    composite: float
-    display_score: float
-    cheapness_z: float | None
-    gp_z: float | None
+    composite: float  # value-led blend in [0,1] (percentile space)
+    display_score: float  # composite * 100, 0-100
+    cheapness_pct: float | None  # cross-sectional percentile rank of cheapness (1.0 = cheapest)
+    gp_pct: float | None  # cross-sectional percentile rank of GP/assets (1.0 = highest)
     sector: str | None
     flags: tuple[str, ...]
     rationale: str
@@ -119,8 +127,31 @@ def _screen(
 
 
 # ------------------------------------------------------------------- rank
-def _clip(z: float) -> float:
-    return max(-Z_CLIP, min(Z_CLIP, z))
+def _percentile_ranks(values: list[float | None]) -> list[float | None]:
+    """Cross-sectional percentile rank in [0,1] (higher value -> higher rank).
+
+    Dispersion-invariant and bounded: unlike z-scores, a fat-tailed factor cannot
+    dominate a blend, so the blend weights control influence directly. Ties share the
+    average rank. None stays None. A lone present value maps to 0.5 (neutral)."""
+    present = [(i, v) for i, v in enumerate(values) if v is not None]
+    n = len(present)
+    out: list[float | None] = [None] * len(values)
+    if n == 0:
+        return out
+    if n == 1:
+        out[present[0][0]] = 0.5
+        return out
+    order = sorted(present, key=lambda iv: iv[1])
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and order[j + 1][1] == order[i][1]:
+            j += 1
+        avg = (i + j) / 2.0  # 0-based average rank (ties share it)
+        for k in range(i, j + 1):
+            out[order[k][0]] = avg / (n - 1)  # normalize to [0,1]
+        i = j + 1
+    return out
 
 
 def _rank_eligible(
@@ -129,7 +160,7 @@ def _rank_eligible(
     w_value: float,
     w_gp: float,
 ) -> list[tuple[str, float, float | None, float | None]]:
-    """Cross-sectional value-led ranking. Returns [(symbol, composite, cheapness_z, gp_z)]
+    """Value-led percentile ranking. Returns [(symbol, composite, cheapness_pct, gp_pct)]
     sorted by (-composite, symbol). net_margin/roic are deliberately not consulted."""
     symbols = list(eligible)
     if not symbols:
@@ -138,30 +169,66 @@ def _rank_eligible(
     def col(key: str) -> list[float | None]:
         return [eligible[s].get(key) for s in symbols]
 
-    z_ps = dict(zip(symbols, _zscores(col("ps")), strict=True))
-    z_pb = dict(zip(symbols, _zscores(col("pb")), strict=True))
-    z_gp = dict(zip(symbols, _zscores(col("gross_profitability")), strict=True))
+    # cheapness: percentile of -ps and -pb (lower multiple = cheaper = higher percentile)
+    neg_ps = [(-v if v is not None else None) for v in col("ps")]
+    neg_pb = [(-v if v is not None else None) for v in col("pb")]
+    p_ps = dict(zip(symbols, _percentile_ranks(neg_ps), strict=True))
+    p_pb = dict(zip(symbols, _percentile_ranks(neg_pb), strict=True))
+    p_gp = dict(zip(symbols, _percentile_ranks(col("gross_profitability")), strict=True))
 
     rows: list[tuple[str, float, float | None, float | None]] = []
     for s in symbols:
-        # cheapness = mean of available negated value Zs (lower multiple = cheaper = higher)
-        chs = [-z for z in (z_ps[s], z_pb[s]) if z is not None]
-        cheapness = _clip(sum(chs) / len(chs)) if chs else None
-        gp = z_gp[s]
-        gp_clipped = _clip(gp) if gp is not None else None
+        chs = [p for p in (p_ps[s], p_pb[s]) if p is not None]
+        cheapness = sum(chs) / len(chs) if chs else None
+        gp = p_gp[s]
 
         contrib, wsum = 0.0, 0.0
         if cheapness is not None:
             contrib += w_value * cheapness
             wsum += abs(w_value)
-        if gp_clipped is not None:
-            contrib += w_gp * gp_clipped
+        if gp is not None:
+            contrib += w_gp * gp
             wsum += abs(w_gp)
-        composite = contrib / wsum if wsum > 0 else 0.0
-        rows.append((s, composite, cheapness, gp_clipped))
+        composite = contrib / wsum if wsum > 0 else 0.5  # neutral midpoint in percentile space
+        rows.append((s, composite, cheapness, gp))
 
     rows.sort(key=lambda r: (-r[1], r[0]))
     return rows
+
+
+def _select_with_sector_cap(
+    ranked: list[tuple[str, float, float | None, float | None]],
+    sectors: dict[str, str] | None,
+    target_n: int,
+    max_per_sector: int | None,
+) -> list[tuple[str, float, float | None, float | None]]:
+    """Take the top target_n by rank, but allow at most max_per_sector names per sector so
+    no single sector dominates the anchor. If the cap starves the basket below target_n,
+    backfill with the highest-ranked overflow names (breadth beats an empty slot)."""
+    if max_per_sector is None or not sectors:
+        return ranked[:target_n]
+    picked: list[tuple[str, float, float | None, float | None]] = []
+    overflow: list[tuple[str, float, float | None, float | None]] = []
+    counts: dict[str, int] = {}
+    for row in ranked:
+        if len(picked) >= target_n:
+            break
+        sec = sectors.get(row[0])
+        if sec is None:  # unknown sector is not capped
+            picked.append(row)
+            continue
+        if counts.get(sec, 0) < max_per_sector:
+            picked.append(row)
+            counts[sec] = counts.get(sec, 0) + 1
+        else:
+            overflow.append(row)
+    if len(picked) < target_n:  # cap starved the basket -> backfill highest-ranked overflow
+        for row in overflow:
+            if len(picked) >= target_n:
+                break
+            picked.append(row)
+    picked.sort(key=lambda r: (-r[1], r[0]))
+    return picked
 
 
 # ----------------------------------------------------------------- weight
@@ -176,12 +243,12 @@ def _equal_weights_capped(symbols: list[str], max_weight: float) -> dict[str, fl
     return dict.fromkeys(symbols, w)
 
 
-def _rationale(cheapness_z: float | None, gp_z: float | None, flags: tuple[str, ...]) -> str:
+def _rationale(cheapness_pct: float | None, gp_pct: float | None, flags: tuple[str, ...]) -> str:
     bits: list[str] = []
-    if cheapness_z is not None:
-        bits.append("저평가" if cheapness_z > 0 else "고평가")
-    if gp_z is not None:
-        bits.append("고GP" if gp_z > 0 else "저GP")
+    if cheapness_pct is not None:
+        bits.append("저평가" if cheapness_pct > 0.5 else "고평가")
+    if gp_pct is not None:
+        bits.append("고GP" if gp_pct > 0.5 else "저GP")
     base = "+".join(bits) if bits else "중립"
     if flags:
         base += f" ⚠{','.join(flags)}"
@@ -194,6 +261,7 @@ def select_core_basket(
     sectors: dict[str, str] | None = None,
     target_n: int = 13,
     max_weight: float = 0.08,
+    max_per_sector: int | None = DEFAULT_MAX_PER_SECTOR,
     w_value: float = 0.6,
     w_gp: float = 0.4,
     as_of: date | None = None,
@@ -202,25 +270,33 @@ def select_core_basket(
         raise ValueError("target_n must be >= 1")
     if not 0.0 < max_weight <= 1.0:
         raise ValueError("max_weight must be in (0, 1]")
+    if max_per_sector is not None and max_per_sector < 1:
+        raise ValueError("max_per_sector must be >= 1 or None")
     eligible, excluded = _screen(universe, sectors)
     ranked = _rank_eligible(eligible, w_value=w_value, w_gp=w_gp)
-    chosen = ranked[:target_n]
+    chosen = _select_with_sector_cap(ranked, sectors, target_n, max_per_sector)
     weights = _equal_weights_capped([r[0] for r in chosen], max_weight)
     holdings = []
-    for symbol, composite, cheapness_z, gp_z in chosen:
+    for symbol, composite, cheapness_pct, gp_pct in chosen:
         flags = _flags(eligible[symbol])
         holdings.append(
             CoreHolding(
                 symbol=symbol,
                 weight=weights[symbol],
                 composite=composite,
-                display_score=normal_cdf(composite) * 100.0,
-                cheapness_z=cheapness_z,
-                gp_z=gp_z,
+                display_score=composite * 100.0,
+                cheapness_pct=cheapness_pct,
+                gp_pct=gp_pct,
                 sector=(sectors or {}).get(symbol),
                 flags=flags,
-                rationale=_rationale(cheapness_z, gp_z, flags),
+                rationale=_rationale(cheapness_pct, gp_pct, flags),
             )
+        )
+    if universe and 0 < len(holdings) < MIN_HOLDINGS_WARN:
+        warnings.warn(
+            f"core basket has only {len(holdings)} holdings (< {MIN_HOLDINGS_WARN}); "
+            "the durable anchor is degenerate — check universe/screen coverage.",
+            stacklevel=2,
         )
     return CoreBasket(
         holdings=tuple(holdings),
@@ -236,7 +312,12 @@ def select_core_basket(
 # -------------------------------------------------------------- rebalance
 def _cap_redistribute(raw: dict[str, float], max_weight: float) -> dict[str, float]:
     """Normalize raw positive weights to sum 1.0 with an iterative hard cap: capped names are
-    fixed at max_weight, the remainder is split proportionally among uncapped names until stable."""
+    fixed at max_weight, the remainder is split proportionally among uncapped names until stable.
+
+    Precondition: raw weights are non-negative (sleeve-relative). Negative weights are a caller
+    bug (this engine is long-only, zero-leverage) and raise rather than silently distort."""
+    if any(w < 0 for w in raw.values()):
+        raise ValueError("raw weights must be non-negative (long-only sleeve)")
     symbols = [s for s, w in raw.items() if w > 0]
     if not symbols:
         return {}
@@ -308,7 +389,7 @@ def rebalance_core_basket(
     holdings: list[CoreHolding] = []
     for symbol in keep:
         w = final.get(symbol, 0.0)
-        src = target_by_symbol.get(symbol)
+        src = target_by_symbol.get(symbol)  # held winners carry prior-period scores (thesis-hold)
         if symbol not in add_syms:
             if symbol in held and held[symbol] > max_weight:
                 actions.append(RebalanceAction(symbol, "trim_to_cap", w, "캡 초과 → 8% 축소"))
@@ -325,12 +406,18 @@ def rebalance_core_basket(
                 weight=w,
                 composite=src.composite if src else 0.0,
                 display_score=src.display_score if src else 0.0,
-                cheapness_z=src.cheapness_z if src else None,
-                gp_z=src.gp_z if src else None,
+                cheapness_pct=src.cheapness_pct if src else None,
+                gp_pct=src.gp_pct if src else None,
                 sector=src.sector if src else None,
                 flags=src.flags if src else (),
                 rationale=src.rationale if src else "보유 유지",
             )
+        )
+    if 0 <= len(holdings) < MIN_HOLDINGS_WARN:
+        warnings.warn(
+            f"rebalanced core basket has only {len(holdings)} holdings (< {MIN_HOLDINGS_WARN}); "
+            "the durable anchor is degenerate — too many theses broke or the target is empty.",
+            stacklevel=2,
         )
     new_basket = CoreBasket(
         holdings=tuple(holdings),
@@ -347,7 +434,7 @@ def rebalance_core_basket(
 # ----------------------------------------------------------------- report
 def format_core_basket(basket: CoreBasket) -> str:
     lines: list[str] = []
-    lines.append("=" * 72)
+    lines.append("=" * 76)
     lines.append("코어 바스켓 (장기 슬리브 ~35% durable anchor)")
     lines.append(
         "정직한 프레이밍: 팩터 알파 주장 없음. 검증 결론상 어떤 단일 팩터도 "
@@ -355,25 +442,23 @@ def format_core_basket(basket: CoreBasket) -> str:
     )
     lines.append(
         "유일 견고 발견 = net-margin/ROIC 역예측(나쁨) → 랭킹에서 제외. "
-        "밸류(저 ps/pb)+GP/assets 틸트, 등가중 8%캡, thesis-hold, 레버리지0."
+        "밸류(저 ps/pb)+GP/assets 백분위 틸트, 등가중 8%캡, 섹터당 상한, thesis-hold, 레버리지0."
     )
-    lines.append("=" * 72)
+    lines.append("=" * 76)
     asof = basket.as_of.isoformat() if basket.as_of else "latest"
     lines.append(
         f"as_of={asof}  universe={basket.universe_size}  "
         f"eligible={basket.eligible_count}  target_n={basket.target_n}  "
         f"cap={basket.max_weight:.0%}  excluded={len(basket.excluded)}"
     )
-    lines.append("-" * 72)
-    lines.append(
-        f"{'SYM':<8}{'W%':>7}{'SCORE':>7}{'CHEAP_Z':>9}{'GP_Z':>7}  {'SECTOR':<12}RATIONALE"
-    )
+    lines.append("-" * 76)
+    lines.append(f"{'SYM':<8}{'W%':>7}{'SCORE':>7}{'CHEAP%':>8}{'GP%':>7}  {'SECTOR':<12}RATIONALE")
     for h in basket.holdings:
-        cz = f"{h.cheapness_z:+.2f}" if h.cheapness_z is not None else "  n/a"
-        gz = f"{h.gp_z:+.2f}" if h.gp_z is not None else "  n/a"
+        cz = f"{h.cheapness_pct:.2f}" if h.cheapness_pct is not None else " n/a"
+        gz = f"{h.gp_pct:.2f}" if h.gp_pct is not None else " n/a"
         sec = (h.sector or "-")[:12]
         lines.append(
             f"{h.symbol:<8}{h.weight * 100:>6.2f}{h.display_score:>7.1f}"
-            f"{cz:>9}{gz:>7}  {sec:<12}{h.rationale}"
+            f"{cz:>8}{gz:>7}  {sec:<12}{h.rationale}"
         )
     return "\n".join(lines)

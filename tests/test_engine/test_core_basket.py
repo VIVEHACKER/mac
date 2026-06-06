@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+import pytest
+
 from data.models import FundamentalRecord
 from engine.core_basket import (
     CoreBasket,
@@ -67,10 +69,10 @@ def test_dataclasses_constructible():
     h = CoreHolding(
         symbol="AAA",
         weight=0.0769,
-        composite=1.2,
-        display_score=88.0,
-        cheapness_z=1.0,
-        gp_z=0.5,
+        composite=0.82,
+        display_score=82.0,
+        cheapness_pct=0.9,
+        gp_pct=0.7,
         sector=None,
         flags=(),
         rationale="저평가+고GP",
@@ -288,3 +290,151 @@ def test_format_contains_honest_header_and_holdings():
     assert "ROIC" in txt or "roic" in txt
     assert basket.holdings[0].symbol in txt
     assert "%" in txt  # weight column rendered as percent
+
+
+# -------------------------------------------- review fix: value actually leads
+def test_value_actually_leads_not_gp_dominated():
+    """The honesty fix: with w_value=0.6 > w_gp=0.4, the CHEAPEST name (top cheapness,
+    bottom GP) must outrank the HIGHEST-GP name (bottom cheapness, top GP). Percentile
+    ranks make the nominal weights real; the old z-score blend let GP's fat tail dominate."""
+    from engine.core_basket import _rank_eligible, _screen
+
+    # price drives ps/pb; gp drives GP/assets. VALUE cheapest+lowest GP, QUAL priciest+highest GP.
+    value = _recs(
+        "VALUE",
+        rev=[100, 100, 100, 100],
+        ni=[5, 5, 5, 5],
+        fcf=[5, 5, 5, 5],
+        gp=[20, 20, 20, 20],
+        assets=100.0,
+        eq=100.0,
+        debt=10.0,
+        sh=10.0,
+        eps=1.0,
+    )
+    mid = _recs(
+        "MID",
+        rev=[100, 100, 100, 100],
+        ni=[5, 5, 5, 5],
+        fcf=[5, 5, 5, 5],
+        gp=[40, 40, 40, 40],
+        assets=100.0,
+        eq=100.0,
+        debt=10.0,
+        sh=10.0,
+        eps=1.0,
+    )
+    qual = _recs(
+        "QUAL",
+        rev=[100, 100, 100, 100],
+        ni=[5, 5, 5, 5],
+        fcf=[5, 5, 5, 5],
+        gp=[60, 60, 60, 60],
+        assets=100.0,
+        eq=100.0,
+        debt=10.0,
+        sh=10.0,
+        eps=1.0,
+    )
+    universe = {"VALUE": (value, 10.0), "MID": (mid, 30.0), "QUAL": (qual, 60.0)}
+    eligible, _ = _screen(universe, sectors=None)
+    ranked = _rank_eligible(eligible, w_value=0.6, w_gp=0.4)
+    order = [r[0] for r in ranked]
+    assert order == ["VALUE", "MID", "QUAL"]  # cheap leads despite QUAL having the highest GP
+
+
+# -------------------------------------------- review fix: sector cap
+def test_sector_cap_prevents_single_sector_dominance():
+    uni = _many(8)
+    sectors = {f"S0{i}": ("consumer" if i < 4 else "tech") for i in range(8)}
+    basket = select_core_basket(uni, sectors=sectors, target_n=4, max_per_sector=2)
+    from collections import Counter
+
+    counts = Counter(h.sector for h in basket.holdings)
+    assert len(basket.holdings) == 4
+    assert all(c <= 2 for c in counts.values())  # no sector exceeds the cap
+
+
+def test_sector_cap_backfills_rather_than_starving():
+    # 5 consumer (ranked high) + 1 tech, target_n=4, cap=2: cap would give 2+1=3 < 4,
+    # so it backfills overflow consumer to reach 4 (breadth beats an empty slot).
+    uni = _many(6)
+    sectors = {f"S0{i}": ("consumer" if i < 5 else "tech") for i in range(6)}
+    basket = select_core_basket(uni, sectors=sectors, target_n=4, max_per_sector=2)
+    assert len(basket.holdings) == 4  # not starved to 3
+
+
+# -------------------------------------------- review fix: edge cases
+def test_select_empty_universe_no_crash():
+    basket = select_core_basket({}, target_n=13)
+    assert basket.holdings == ()
+    assert basket.universe_size == 0
+
+
+def test_select_single_name_warns_degenerate():
+    with pytest.warns(UserWarning, match="degenerate"):
+        basket = select_core_basket(_many(1), target_n=13)
+    assert len(basket.holdings) == 1
+    assert abs(basket.holdings[0].weight - 0.08) < 1e-9  # 1/1 clamped to 8% cap
+
+
+def test_select_target_n_larger_than_eligible():
+    basket = select_core_basket(_many(3), target_n=13)
+    assert len(basket.holdings) == 3
+
+
+def test_rank_ties_are_deterministic():
+    from engine.core_basket import _rank_eligible, _screen
+
+    twin_a = _recs(
+        "AAA",
+        rev=[100, 100, 100, 100],
+        ni=[5, 5, 5, 5],
+        fcf=[5, 5, 5, 5],
+        gp=[40, 40, 40, 40],
+        assets=100.0,
+        eq=100.0,
+        debt=10.0,
+        sh=10.0,
+        eps=1.0,
+    )
+    twin_b = _recs(
+        "BBB",
+        rev=[100, 100, 100, 100],
+        ni=[5, 5, 5, 5],
+        fcf=[5, 5, 5, 5],
+        gp=[40, 40, 40, 40],
+        assets=100.0,
+        eq=100.0,
+        debt=10.0,
+        sh=10.0,
+        eps=1.0,
+    )
+    eligible, _ = _screen({"BBB": (twin_b, 30.0), "AAA": (twin_a, 30.0)}, sectors=None)
+    ranked = _rank_eligible(eligible, w_value=0.6, w_gp=0.4)
+    assert [r[0] for r in ranked] == ["AAA", "BBB"]  # tie broken by symbol
+
+
+def test_rebalance_all_ineligible_empty_target_warns():
+    empty_target = CoreBasket(
+        holdings=(),
+        as_of=None,
+        universe_size=0,
+        eligible_count=0,
+        target_n=13,
+        max_weight=0.08,
+        excluded=(),
+    )
+    with pytest.warns(UserWarning, match="degenerate"):
+        new_basket, actions = rebalance_core_basket(
+            {"X": 0.5, "Y": 0.5}, empty_target, eligible=set(), target_n=13
+        )
+    assert new_basket.holdings == ()
+    assert all(a.action == "drop" for a in actions)
+
+
+def test_cap_redistribute_rejects_negative_weights():
+    from engine.core_basket import _cap_redistribute
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _cap_redistribute({"A": 0.5, "B": -0.1}, max_weight=0.08)

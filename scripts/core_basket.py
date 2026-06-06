@@ -46,15 +46,13 @@ def load_sectors(path: Path) -> dict[str, str]:
     return out
 
 
-def _price_asof(closes, symbol: str, as_of: date | None) -> float | None:
-    """Last close on/before as_of (or the latest close if as_of is None)."""
+def _price_asof(closes, symbol: str, as_of: date) -> float | None:
+    """Last close on/before as_of (PIT). as_of is always concrete (resolved by build_universe)."""
     if symbol not in closes.columns:
         return None
     import pandas as pd
 
-    s = closes[symbol].dropna()
-    if as_of is not None:
-        s = s.loc[: pd.Timestamp(as_of)]
+    s = closes[symbol].dropna().loc[: pd.Timestamp(as_of)]
     if s.empty:
         return None
     val = float(s.iloc[-1])
@@ -68,7 +66,14 @@ def build_universe(
     universe_csv: Path,
     sectors_csv: Path,
     as_of: date | None,
-) -> tuple[dict[str, tuple[Sequence[FundamentalRecord], float]], dict[str, str]]:
+) -> tuple[dict[str, tuple[Sequence[FundamentalRecord], float]], dict[str, str], date]:
+    """Build the PIT universe. Returns (universe, sectors, effective_as_of).
+
+    PIT discipline (one cutoff for BOTH legs): when as_of is None it resolves to the price
+    snapshot's latest date (the data's natural "now") and is applied to fundamentals AND
+    prices alike — never "all fundamentals + latest price", which would mix periods and leak."""
+    import pandas as pd
+
     for label, p in (("snapshot", snapshot), ("prices", prices)):
         if not p.exists():
             raise SystemExit(
@@ -87,20 +92,26 @@ def build_universe(
         recs.sort(key=lambda r: r.asof_ts)
 
     closes = read_price_snapshot(prices, verify=True)
+    closes.index = pd.to_datetime(closes.index)
+    cov_min, cov_max = closes.index.min().date(), closes.index.max().date()
+
+    effective = as_of or cov_max  # default to the snapshot's latest date (reproducible, PIT)
+    if effective < cov_min or effective > cov_max:
+        raise ValueError(
+            f"as_of {effective} is outside the price snapshot coverage {cov_min}..{cov_max}; "
+            "pass --as-of within range or regenerate the price snapshot."
+        )
 
     universe: dict[str, tuple[Sequence[FundamentalRecord], float]] = {}
     for sym in symbols:
-        if as_of is not None:
-            recs = [r for r in funds.get(sym, []) if r.asof_ts.date() <= as_of]
-        else:
-            recs = list(funds.get(sym, []))
+        recs = [r for r in funds.get(sym, []) if r.asof_ts.date() <= effective]
         if len(recs) < 2:
             continue
-        price = _price_asof(closes, sym, as_of)
+        price = _price_asof(closes, sym, effective)
         if price is None:
             continue
         universe[sym] = (recs, price)
-    return universe, sectors
+    return universe, sectors, effective
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -120,7 +131,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     as_of = datetime.fromisoformat(args.as_of).date() if args.as_of else None
-    universe, sectors = build_universe(
+    universe, sectors, effective = build_universe(
         snapshot=args.snapshot,
         prices=args.prices,
         universe_csv=args.universe_csv,
@@ -134,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         max_weight=args.max_weight,
         w_value=args.w_value,
         w_gp=args.w_gp,
-        as_of=as_of,
+        as_of=effective,  # record the resolved PIT date (reproducible), not None
     )
     print(format_core_basket(basket))
     return 0

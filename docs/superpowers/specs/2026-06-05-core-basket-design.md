@@ -36,10 +36,12 @@ the **separate IDEAL line** (`scripts/aqr_ideal_walkforward.py`, not part of thi
    These are weakly positive in-sample; we use them as a *tilt*, not an alpha claim.
 3. **Thesis-hold (승자 안 자름).** Once held, a name that remains eligible is kept even if its rank
    slips; winners are not trimmed until they breach the hard cap. Let compounders run.
-4. **Survival first.** Diversification (12–15 names) + 8% hard cap + zero leverage. Per the project's
-   own finding, *diversification itself substitutes for vol-targeting* (memory: "분산 자체가
-   vol-target 대신 작동"). No per-name stop — the core is a thesis-hold; the cap + breadth is the
-   risk control.
+4. **Survival first.** Breadth (12–15 names) + an **8% per-name hard cap** + a **per-sector count
+   cap** (no single sector dominates) + zero leverage. Per the project's own finding,
+   *diversification itself substitutes for vol-targeting* (memory: "분산 자체가 vol-target 대신
+   작동") — but *name-count* breadth alone is not sector breadth, so the sector cap (§4.3) is what
+   makes the diversification claim honest. No per-name stop — the core is a thesis-hold; the caps +
+   breadth are the risk control.
 
 This honest framing must appear verbatim in the engine docstring and the report header (no
 overclaiming, per project convention).
@@ -111,27 +113,49 @@ to find alpha (the universe has none to find). Excluded names carry a reason str
 
 ### 4.2 RANK (value-led composite, net-margin/ROIC excluded)
 
-For the eligible set, compute **cross-sectional Z within the eligible set** (reuse `_zscores`,
-winsorize at `Z_CLIP`):
-- **cheapness_Z** = mean of available `{ −Z(ps), −Z(pb) }` (negated: lower multiple = cheaper =
-  higher score). Use whichever of ps/pb is present; financials → `pb` only (ps less meaningful).
-- **gp_Z** = `Z(gross_profitability)` (sector-valid only; financials → None via
+For the eligible set, map each factor to its **cross-sectional percentile rank in [0,1]**
+(`_percentile_ranks`, ties share the average rank, a lone present value → 0.5):
+- **cheapness_pct** = mean of available `{ pct(−ps), pct(−pb) }` (negated: lower multiple =
+  cheaper = higher percentile). Financials → `pb` only in practice (ps still allowed if present).
+- **gp_pct** = `pct(gross_profitability)` (sector-valid only; financials → None via
   `SECTOR_INVALID_METRICS`).
 
-**composite** = coverage-renormalized weighted sum (same renorm pattern as compounder):
+**composite** (in [0,1]) = coverage-renormalized weighted mean of the present percentiles:
 ```
-contrib = w_value*cheapness_Z + w_gp*gp_Z   (only over present components)
+contrib = w_value*cheapness_pct + w_gp*gp_pct   (only over present components)
 wsum    = sum of |weight| for present components
-composite = contrib / wsum                  (0 if wsum == 0)
+composite = contrib / wsum                       (0.5 neutral if wsum == 0)
 ```
-Defaults: `w_value = 0.6`, `w_gp = 0.4` (value is the stronger directional signal per memory).
-**`net_margin` and `roic` are never inputs.** A `display_score = normal_cdf(composite) * 100` is
-attached for readability (0–100), parallel to `ArchetypeScore.score`.
+Defaults: `w_value = 0.6`, `w_gp = 0.4`. `display_score = composite * 100` (0–100).
+**`net_margin` and `roic` are never inputs.**
+
+**Why percentiles, not z-scores (adversarial-review fix):** an initial z-score blend was rejected
+because GP/assets has a fat right tail; after winsorizing at `Z_CLIP` it rails at the clip ceiling
+and dominates the composite *regardless of the nominal value weight* — i.e. "value-led" silently
+became GP-led (a smoke run showed 12/13 picks with gp_z railed at +3.0 while cheapness_z was
++0.1..0.2). Percentile ranks are dispersion-invariant and bounded, so the 0.6/0.4 weights genuinely
+control influence and "value-led" is actually true (regression-tested:
+`test_value_actually_leads_not_gp_dominated`).
+
+**Known property — financials rank on cheapness alone (by design, not a bug):** GP/assets is null
+for financials (`SECTOR_INVALID_METRICS`), so a financial's composite is its cheapness percentile
+alone, while a non-financial must win the 0.6/0.4 blend. Cheap-because-leveraged financials
+(mortgage REITs, etc.) therefore surface at the top of a pure value screen. This is *correct* screen
+behavior — the project's terminal doctrine is "funnel = SCREEN, no unvalidated quality tilt"
+(net-margin/ROIC reverse-predict). Suppressing these with a quality floor would re-introduce exactly
+that disproven tilt. The controls are: (i) the **per-sector cap** (§4.3) bounds financials to
+≤`max_per_sector`/`target_n`; (ii) transparent `_flags` (`high-debt`, `margin-declining`) surface
+value-trap risk; (iii) the basket is a screen for human confirmation, not an auto-buy.
 
 ### 4.3 SELECT & WEIGHT
 
 - **Select** top `target_n` (default **13**) by `composite` descending. Deterministic tie-break:
-  `(-composite, symbol)`.
+  `(-composite, symbol)`. Then apply a **per-sector cap** (`max_per_sector`, default **4** ≈ 31% of
+  13): at most `max_per_sector` names per sector, so no single sector dominates the anchor
+  (adversarial-review fix — an uncapped run put 9/13 in one sector, defeating the diversification
+  claim). If the cap starves the basket below `target_n`, backfill the highest-ranked overflow
+  names (breadth beats an empty slot). Names with unknown sector are not capped. With `sectors=None`
+  or `max_per_sector=None` the cap is inactive.
 - **Weight**: equal-weight `1/n`, then apply the **8% hard cap** (`max_weight = 0.08`). Because the
   selector is *equal*-weight, the cap is all-or-none: for **n ≥ 13** the cap never binds
   (1/13 ≈ 7.7% < 8%) → weights are simply `1/n` and **sum to 1.0**; for **n ≤ 12** every name hits
