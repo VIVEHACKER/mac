@@ -1,6 +1,6 @@
 # Compounder Watchlist — Operating Runbook
 
-_Research-only. Not investment advice. Last updated: 2026-05-31._
+_Research-only. Not investment advice. Last updated: 2026-06-06._
 
 The compounder line is a **decision-support funnel** for concentrated, multi-year
 ("ten-bagger") investing. It ranks a universe of stocks under three archetypes and emits
@@ -153,3 +153,97 @@ SNAP=data/snapshots/fundamentals-$(date +%F).csv
 - **Broaden universe** — Russell 2000 / micro-caps (where 10x more often starts).
 - **P4 Korea** — DART OpenAPI for Korean mid/small (the engine is market-agnostic).
 - **Sector-specific metrics** — proper bank/REIT/insurer valuation instead of FCF exclusion only.
+
+---
+
+## 코어 바스켓 (Core Basket) — 장기 앵커 슬리브
+
+The compounder funnel above is a *screen* (candidate generator). The **core basket** turns that
+screen into an actual long sleeve: a diversified, equal-weight portfolio that is the fund's
+**durable anchor (~35% of the 50/50 barbell)**. Engine: `engine/core_basket.py`; driver:
+`scripts/core_basket.py`; tests: `tests/test_engine/test_core_basket.py`.
+
+### Honest framing (read before changing anything)
+
+This basket makes **NO factor-alpha claim**. The terminal validation (`docs/COMPOUNDER_VALIDATION.md`,
+`engine/compounder.py:22-32`) found that in this mid/small-cap survivor universe over 3–5y horizons
+**no single factor robustly predicts forward returns** after regime+size+sector controls — and the one
+robust finding is that **net-margin / ROIC *reverse*-predict** (high-quality-by-those-metrics
+underperforms). So the engine:
+
+1. **EXCLUDES `net_margin` and `roic` from ranking** (they were the reverse-predictors).
+2. Tilts only toward the directionally-supported-if-modest **value** (low `ps`/`pb` cheapness,
+   `w_value=0.6`) + Novy-Marx **gross profitability** `GP/assets` (`w_gp=0.4`).
+3. **Holds theses** — winners are not trimmed until the hard cap.
+
+Survival comes from **breadth (12–15 names) + an 8% per-name hard cap + a per-sector count cap +
+zero leverage**, not from a predictive edge; breadth substitutes for vol-targeting. Asymmetric
+upside is the *hunt* basket's job; the validated 12-1 momentum edge is the separate **IDEAL** line.
+This is the boring, durable anchor — do not turn it into an alpha claim.
+
+### Selection (`select_core_basket`)
+
+- **Screen (eligibility, sector-aware):** drop names with no fundamentals, `<5` present metrics
+  (`MIN_PRESENT_METRICS`), no `ps` *and* no `pb` (value anchor required); non-financials also need
+  `fcf_margin ≥ 0` and `debt/equity ≤ 3.0`; everyone needs `share_growth ≤ 15%` (no serial
+  dilution). Sector-invalid metrics (e.g. FCF/GP for financials) are nulled before screening (same
+  `SECTOR_INVALID_METRICS` as the compounder).
+- **Rank (percentile, NOT z-score):** each factor is mapped to its cross-sectional **percentile
+  rank in `[0,1]`** before blending — dispersion-invariant and bounded, so the blend weights
+  genuinely control influence. `composite = (w_value·cheapness + w_gp·gp_pct) / Σ|w|` where
+  `cheapness` = mean of the percentile ranks of negated `ps`/`pb` (cheaper ⇒ higher percentile) and
+  `gp_pct` = percentile rank of `GP/assets`. Defaults `w_value=0.6`, `w_gp=0.4`. A z-score blend was
+  deliberately **rejected**: GP's fat right tail rails at the clip ceiling and silently makes the
+  composite GP-led rather than value-led; percentiles make "value-led" actually true. `net_margin`
+  and `roic` are never consulted (a test enforces this). Ties share the average rank; a lone present
+  value maps to the 0.5 neutral midpoint.
+- **Sector cap:** at most `max_per_sector=4` names per sector (≈31% of a 13-name basket) so no
+  single sector dominates the anchor; if the cap starves the basket below `target_n`, the highest-
+  ranked overflow names backfill (breadth beats an empty slot). Unknown-sector names are uncapped.
+- **Weight:** equal-weight `1/n` clamped to the **8% hard cap** (`max_weight=0.08`, `target_n=13`).
+  Under equal weighting the cap is all-or-none: with `n ≥ 1/cap` each name gets `1/n` (sums to 1.0);
+  with fewer names each gets the cap and the remainder is sleeve cash. If the basket ends up with
+  `<3` holdings the engine emits a (non-fatal) `MIN_HOLDINGS_WARN` — the anchor is degenerate, check
+  universe/screen coverage.
+- **Output:** `CoreBasket` (holdings + `as_of`, `universe_size`, `eligible_count`, `excluded`
+  reasons). Each `CoreHolding` carries `weight`, `composite` (the `[0,1]` percentile-space blend), a
+  0–100 `display_score` (`= composite·100`, a percentile-space score, **not** a probability),
+  `cheapness_pct`, `gp_pct`, sector, `flags`, and a Korean rationale (저평가/고평가 split at the 0.5
+  percentile midpoint).
+
+### Rebalance (`rebalance_core_basket`) — thesis-hold
+
+Given current `held` weights, the freshly-ranked `target` basket, and the set of still-`eligible`
+symbols:
+
+1. **Keep** held names still in `eligible`; **drop** any that fell out of the screen
+   (`"스크린 탈락 (thesis break)"`) — exit is screen-failure, not a price stop.
+2. **Fill** remaining slots from fresh top-ranked names (`"신규 편입"`).
+3. **Let winners run:** a held name whose grown weight exceeds equal-weight keeps that weight
+   (pre-cap); others reset to equal-weight. `_cap_redistribute` then normalizes to sum 1.0 with an
+   iterative 8% hard cap (`trim_to_cap` → `"캡 초과 → 8% 축소"`).
+
+Emits `RebalanceAction`s (`add` / `hold` / `trim_to_cap` / `drop`) for the audit trail.
+
+### Driver (PIT, snapshot-pinned)
+
+```bash
+cd "/Users/jjuni/재무관리 모델/trader-fund"
+# Omit --as-of to use the snapshot's latest date (reproducible PIT). Do NOT pass $(date +%F):
+# the pinned price snapshot ends a few days back, so a future as_of raises the coverage ValueError.
+.venv/bin/python scripts/core_basket.py
+# defaults: --target-n 13 --max-weight 0.08 --w-value 0.6 --w-gp 0.4
+#           --snapshot data/snapshots/fundamentals-*.csv --prices data/snapshots/prices-*.csv
+# For a historical cut, pass an --as-of WITHIN the price snapshot's coverage, e.g. --as-of 2024-06-28.
+```
+
+Mirrors `scripts/compounder_forward_validation.py`'s snapshot/PIT assembly. **Single cutoff for both
+legs:** `--as-of` resolves to one `effective` date applied to *both* fundamentals (`asof_ts ≤
+effective`) and price (last close on/before `effective`); when omitted it defaults to the price
+snapshot's latest date — never "all fundamentals + latest price", which would mix periods and leak. An
+`as_of` outside the price snapshot's coverage raises `ValueError` rather than silently truncating. A
+name needs `≥2` in-window fundamental records and a positive in-window close to enter the universe.
+Snapshots are content-hash pinned (`verify=True` fails loud on drift); the CSVs are gitignored (only
+manifests tracked), so on a clean checkout regenerate via `scripts/snapshot_fundamentals.py` /
+`scripts/snapshot_prices.py` or pass `--snapshot` / `--prices`. Prints `format_core_basket` — a report
+whose header restates the honest framing so the no-alpha caveat travels with every run.
