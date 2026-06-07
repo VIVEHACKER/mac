@@ -299,3 +299,35 @@ Stage 2 (AQR + PEAD 백테스트) 직후, Stage 3 (페이퍼 트레이딩) 전.
 thesis-hold 리밸런서, 팩터 알파 주장 없음. 전체 선택/랭크/리밸런스/드라이버/검증 상세:
 
 → **`docs/COMPOUNDER_OPERATIONS.md` — "코어 바스켓 (Core Basket)" 섹션** 참조.
+
+---
+
+## 헌트 바스켓 (펀드 비대칭 상방 슬리브 ~15%)
+
+`engine/hunt_basket.py`는 코어 바스켓의 짝 — 비대칭 상방 슬리브(50/50 바벨의 ~15%)를 구성하는
+**순수 후보-발굴 엔진**. 코어가 durable 닻이라면 헌트는 사용자 재량 확신을 시스템 가드로 감싼다.
+
+**정직한 역할**: 알파 = **사용자 재량 확신**(트랙레코드 8/10), 시스템 = ① 신호 이벤트로 후보 surface
+(컨빅션+kill-thesis+플래그) ② 생존 가드 강제(작은 사이징·종목당 캡·분산·레버리지0). **자동매수 아님 —
+최종 픽은 사용자.** validate-before-trust: 6신호 중 가중 자격 통과 신호 0개라 **점수 블렌드 금지.**
+
+**선택 로직** (검증 코드·signals/* import 재사용, 무손상):
+1. **SCREEN** (`_signal_eligible`, 가벼움): insider 매수 이벤트만 게이트. **코어와 반대로** 고부채·
+   희석·적자 종목을 제외 안 함(플래그로만) — 위험은 *사이징으로* 관리(헌트의 핵심 반전).
+2. **RANK** (`_rank_candidates`): insider 컨빅션(달러가중, 유일 suggestive IC) 단독. net_issuance
+   (기각)·foreign_flow(미검증)는 **서술 플래그만, 점수 블렌드 아님**. cheapness 백분위 = 약한 타이브레이커.
+3. **SIZE** (`select_hunt_basket`): 작은 등가중 1/n + 종목당 캡, **Kelly 없음**(가짜 엣지 입력 회피).
+   슬리브-상대 가중 + `sleeve_fraction`로 **펀드-레벨 생존 수치 명시**(단일종목0→펀드 −2.5%, 슬리브
+   전멸→−15%).
+4. **kill-thesis** (`_kill_thesis`): 펀더멘털(신호역전+distress), **가격 손절 없음(0컷)**.
+
+**스모크 검증**(as_of=2023-06-30): 963 유니버스 → 150 signal-eligible → top 6, 각 2.5% 펀드.
+SWX/GME/RCUS 같은 distress+내부자매수 종목이 **유지+플래그+kill-thesis**로 작은 사이즈로 편입(코어면
+제외됐을 것) — 반전 동작 확인. **13 테스트, ruff/mypy 클린.**
+
+**드라이버**: `python -m scripts.hunt_basket [--as-of YYYY-MM-DD] [--target-n 6] [--max-per-name 0.40]
+[--sleeve-fraction 0.15]`. 카탈로그 insider_trades(`get_insider_trades`, PIT) + 핀 펀더/가격에서
+insider/net_issuance 신호 생성 → `select_hunt_basket` → `format_hunt_basket`.
+
+**deferred**: 전진 적중률 원장(사용자 엣지 실측, paper_oos 패턴), thesis-hold 리밸런서,
+foreign_flow IC 하니스, 라이브 주문 배선.
