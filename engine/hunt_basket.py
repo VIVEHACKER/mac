@@ -119,14 +119,17 @@ def _rank_candidates(
     capital_signals: dict[str, StrategySignal | None] | None,  # accepted but NOT used for ranking
 ) -> list[tuple[str, float, float | None]]:
     """Sort by insider_score desc, cheapness pct desc (weak tiebreaker), symbol asc.
-    foreign_flow / capital_signals are accepted for signature parity but never affect the order."""
+    foreign_flow / capital_signals are accepted for signature parity but never affect the order.
+    A name lacking fundamentals (cheapness None) is ranked NEUTRALLY (0.5 midpoint), not penalized
+    to the back — hunt does not silently demote a high-conviction insider buy that has no pinned
+    fundamentals (mirrors core_basket's neutral handling of missing metrics)."""
     cheap = _cheapness_pcts(eligible, universe)
     rows: list[tuple[str, float, float | None]] = []
     for s in eligible:
         sig = insider_signals[s]
         score = sig.score if sig is not None else 0.0
         rows.append((s, score, cheap[s]))
-    rows.sort(key=lambda r: (-r[1], -(r[2] if r[2] is not None else -1.0), r[0]))
+    rows.sort(key=lambda r: (-r[1], -(r[2] if r[2] is not None else 0.5), r[0]))
     return rows
 
 

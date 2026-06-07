@@ -108,8 +108,8 @@ class HuntBasket:
     excluded: tuple[tuple[str, str], ...]   # (symbol, reason) for names without the signal event
 
 def select_hunt_basket(
-    universe: dict[str, tuple[Sequence[FundamentalRecord], float]],
-    insider_signals: dict[str, StrategySignal | None],
+    insider_signals: dict[str, StrategySignal | None],   # the PRIMARY gate -> first positional
+    universe: dict[str, tuple[Sequence[FundamentalRecord], float]],  # optional enrichment
     *,
     foreign_flow: dict[str, StrategySignal | None] | None = None,   # flags only
     capital_signals: dict[str, StrategySignal | None] | None = None, # net_issuance, flags only
@@ -197,10 +197,15 @@ acceptable: the position is small and the exit is thesis-driven.
 Parallel to `scripts/core_basket.py`:
 1. Resolve one PIT `effective` cutoff (explicit `--as-of` or the price snapshot's latest date),
    applied to **both** fundamentals and prices (the core's PIT fix).
-2. Load catalog `get_insider_trades(symbol, as_of=effective_dt)` per universe symbol → call
+2. Load catalog `get_insider_trades(symbol, as_of=cutoff_dt)` per universe symbol → call
    `insider_buying_signal(records, as_of=effective)` → `insider_signals` dict. (insider_trades has
-   23,041 rows loaded.) Likewise `net_issuance_signal` from pinned fundamentals and (if KRX flows
-   present) `foreign_flow_signal` for flags.
+   23,041 rows loaded.) Likewise `net_issuance_signal` from pinned fundamentals for flags. The
+   catalog cutoff datetime uses `23:59:59.999999` (matching the signal funcs' own EOD normalization
+   so the catalog pre-filter is not tighter than the signal's gate). `capital_signals` is populated
+   only for fully-evaluated names (recs **and** price present), kept symmetric with `universe`.
+   **foreign_flow is deferred** here: it is a KRX/Korea-market signal and this universe is US
+   (sp400-600), so there is no foreign-flow data to wire — the engine's `foreign_flow` param stays
+   None until KRX flows are ingested (see §8).
 3. Build `universe = {symbol: (records, price)}` at the cutoff; load `sectors`.
 4. `select_hunt_basket(...)` → `print(format_hunt_basket(basket))`.
 5. CLI flags: `--as-of`, `--target-n`, `--max-per-name`, `--sleeve-fraction`, `--snapshot`,

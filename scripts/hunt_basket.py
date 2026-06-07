@@ -95,7 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     effective = datetime.fromisoformat(args.as_of).date() if args.as_of else cov_max
     if effective < cov_min or effective > cov_max:
         raise SystemExit(f"as_of {effective} outside price coverage {cov_min}..{cov_max}")
-    cutoff_dt = datetime(effective.year, effective.month, effective.day, 23, 59, 59)
+    # EOD cutoff with microseconds to match signals/insider.py + signals/capital.py _as_cutoff
+    # (a bare ...23:59:59 would drop same-day late-evening filings the signal funcs would include).
+    cutoff_dt = datetime(effective.year, effective.month, effective.day, 23, 59, 59, 999999)
 
     catalog = MarketDataCatalog(args.db)
     insider_signals: dict[str, StrategySignal | None] = {}
@@ -105,11 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         trades = catalog.get_insider_trades(sym, market="us", as_of=cutoff_dt, limit=0)
         insider_signals[sym] = insider_buying_signal(trades, as_of=effective)
         recs = [r for r in funds.get(sym, []) if r.asof_ts.date() <= effective]
-        if recs:
+        price = _price_asof(closes, sym, effective) if recs else None
+        if recs and price is not None:
+            # signals + universe stay symmetric: both exist only for fully-evaluated names
+            universe[sym] = (recs, price)
             capital_signals[sym] = net_issuance_signal(recs, as_of=effective)
-            price = _price_asof(closes, sym, effective)
-            if price is not None:
-                universe[sym] = (recs, price)
 
     basket = select_hunt_basket(
         insider_signals,

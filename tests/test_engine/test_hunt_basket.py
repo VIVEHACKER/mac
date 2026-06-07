@@ -260,3 +260,52 @@ def test_capital_dilution_flag_does_not_change_rank():
     basket = select_hunt_basket(insider, universe, target_n=6, capital_signals=capital)
     assert basket.holdings[0].symbol == "H00"
     assert "희석⚠" in basket.holdings[0].signal_flags
+
+
+# ----------------------------------------- review fix: no-fundamentals + n=1
+def test_select_name_with_insider_signal_but_no_fundamentals():
+    # A high-conviction insider buy on a name absent from the universe (no fundamentals) is
+    # still selectable — cheapness None, flags empty, ranked by insider alone, no crash.
+    insider = {"NOFUND": _sig("NOFUND", 5_000_000.0)}
+    basket = select_hunt_basket(insider, {}, target_n=6)
+    assert [h.symbol for h in basket.holdings] == ["NOFUND"]
+    h = basket.holdings[0]
+    assert h.signal_flags == ()
+    assert h.sector is None
+    assert h.kill_thesis  # still has a kill-thesis from the insider entry
+
+
+def test_none_cheapness_ranks_neutrally_not_last():
+    # Two tied insider scores: one with fundamentals (cheapness present), one without (None).
+    # The None name must NOT be penalized to the back — it ranks neutrally, then symbol breaks tie.
+    insider = {"AAA": _sig("AAA", 1_000_000.0), "ZZZ": _sig("ZZZ", 1_000_000.0)}
+    universe = {
+        "ZZZ": (
+            _recs(
+                "ZZZ",
+                rev=[100, 100, 100, 100],
+                ni=[5, 5, 5, 5],
+                fcf=[5, 5, 5, 5],
+                gp=[30, 30, 30, 30],
+                assets=100.0,
+                eq=100.0,
+                debt=10.0,
+                sh=10.0,
+                eps=1.0,
+            ),
+            30.0,
+        ),
+    }
+    basket = select_hunt_basket(insider, universe, target_n=6)
+    # AAA (no fundamentals, cheapness None=0.5 neutral) vs ZZZ (sole name -> cheapness 0.5 too);
+    # both neutral -> symbol asc -> AAA first. None is not pushed to the back.
+    assert [h.symbol for h in basket.holdings] == ["AAA", "ZZZ"]
+
+
+def test_select_single_eligible_name_is_degenerate():
+    insider, universe = _insider_universe(1)
+    with pytest.warns(UserWarning, match="degenerate"):
+        basket = select_hunt_basket(insider, universe, target_n=6, max_per_name=0.40)
+    assert len(basket.holdings) == 1
+    assert abs(basket.holdings[0].weight - 0.40) < 1e-9  # 1/1 clamped to cap
+    assert abs(sum(h.weight for h in basket.holdings) - 0.40) < 1e-6  # < 1.0 sleeve cash
