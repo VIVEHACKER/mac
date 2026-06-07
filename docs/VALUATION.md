@@ -317,8 +317,9 @@ thesis-hold 리밸런서, 팩터 알파 주장 없음. 전체 선택/랭크/리�
 2. **RANK** (`_rank_candidates`): insider 컨빅션(달러가중, 유일 suggestive IC) 단독. net_issuance
    (기각)·foreign_flow(미검증)는 **서술 플래그만, 점수 블렌드 아님**. cheapness 백분위 = 약한 타이브레이커.
 3. **SIZE** (`select_hunt_basket`): 작은 등가중 1/n + 종목당 캡, **Kelly 없음**(가짜 엣지 입력 회피).
-   슬리브-상대 가중 + `sleeve_fraction`로 **펀드-레벨 생존 수치 명시**(단일종목0→펀드 −2.5%, 슬리브
-   전멸→−15%).
+   슬리브-상대 가중 + `sleeve_fraction`로 **펀드-레벨 생존 수치 명시**(기본값 target_n=6·max_per_name=0.40·
+   sleeve_fraction=0.15 기준: 단일종목0→펀드 −2.5%, 슬리브 전멸→−15%; n<target_n이거나 캡 발동 시 더
+   작아짐 — 실제 수치는 `format_hunt_basket`이 매 실행 동적 출력).
 4. **kill-thesis** (`_kill_thesis`): 펀더멘털(신호역전+distress), **가격 손절 없음(0컷)**.
 
 **스모크 검증**(as_of=2023-06-30): 963 유니버스 → 150 signal-eligible → top 6, 각 2.5% 펀드.
