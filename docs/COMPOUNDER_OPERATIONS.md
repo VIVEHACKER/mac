@@ -211,6 +211,13 @@ This is the boring, durable anchor — do not turn it into an alpha claim.
   `cheapness_pct`, `gp_pct`, sector, `flags`, and a Korean rationale (저평가/고평가 split at the 0.5
   percentile midpoint).
 
+**Known property (not a bug):** financials have `GP/assets` nulled (sector-invalid), so they rank on
+**cheapness alone** — cheap-leveraged names (e.g. mortgage REITs) can surface near the top. That is
+correct value-screen behavior: forcing a quality floor here would re-introduce the very `net_margin`/
+`roic` tilt the validation found *reverse*-predicts. It is contained by the per-sector count cap, the
+transparent `flags` (high-debt / margin-declining), and the fact that this is a screen, not auto-trading
+— the human confirms before any buy.
+
 ### Rebalance (`rebalance_core_basket`) — thesis-hold
 
 Given current `held` weights, the freshly-ranked `target` basket, and the set of still-`eligible`

@@ -293,36 +293,9 @@ Stage 2 (AQR + PEAD 백테스트) 직후, Stage 3 (페이퍼 트레이딩) 전.
 
 ## 코어 바스켓 (펀드 장기 슬리브 ~35% durable anchor)
 
-`engine/core_basket.py` — 펀드 50/50 바벨의 장기 슬리브 코어(~35%)를 구성하는 **순수 선택 엔진**.
-검증 코드(`engine.compounder`)의 프리미티브를 import 재사용하며 절대 수정하지 않는다.
+`engine/core_basket.py`는 컴파운더 스크린을 실제 장기 슬리브(50/50 바벨의 ~35% durable anchor)로
+구성하는 **순수 선택 엔진**이다 — 적정가 산출이 아니라 **포트폴리오 구성**이라 정본 문서는 운영
+런북에 있다. 밸류(저 ps/pb) + GP/assets **백분위 틸트**(z-score 아님), 섹터당 상한 + 8% 하드캡,
+thesis-hold 리밸런서, 팩터 알파 주장 없음. 전체 선택/랭크/리밸런스/드라이버/검증 상세:
 
-**정직한 역할**: 팩터 알파 주장 **없음**. 프로젝트 터미널 검증(`docs/COMPOUNDER_VALIDATION.md`)상
-이 중·소형 survivor 유니버스·3–5y 수평선에서 어떤 단일 팩터(gross/net-quality/value)도
-regime+size+sector 통제를 견디며 예측하지 못한다. 유일 견고 발견 = **net-margin/ROIC 역예측(나쁨)**.
-코어 바스켓은 이를 존중해 (1) **net_margin·roic을 랭킹에서 완전 제외**, (2) 방향성만 지지되는
-밸류(저 ps/pb)+GP/assets로 *틸트*(알파 아님), (3) thesis-hold, (4) 생존=분산+캡으로 닻 역할만 한다.
-
-**선택 로직**:
-1. **SCREEN** (`_screen`, 섹터 인지): coverage≥5 지표, 밸류 앵커(ps/pb) 존재, 비-distressed(비금융:
-   fcf_margin<0 OR d/e>3 OR share_growth>15% 제외 / 금융: FCF·부채 필터 skip, pb로 공정 평가).
-2. **RANK** (`_rank_eligible`, **백분위 기반**): cheapness(저 ps/pb)와 GP/assets를 각각 횡단면
-   **백분위 랭크[0,1]**로 변환 후 `0.6·cheapness + 0.4·GP` 블렌드. **z-score 블렌드는 기각** — GP의
-   fat tail이 Z_CLIP 천장에 rail되어 명목 가중과 무관하게 GP-주도가 됨(가치-주도 무효화). 백분위는
-   분산-불변이라 0.6/0.4 가중이 진짜 영향력을 통제한다.
-3. **SELECT+WEIGHT**: top `target_n`(기본 13) → **섹터당 상한**(`max_per_sector` 기본 4, ≈31%, 초과 시
-   백필) → 등가중 1/13≈7.7%, **8% 하드캡**(등가중이라 n≥13 캡 미바인딩, n≤12 전종목 캡→슬리브 현금).
-4. **thesis-hold 리밸런서** (`rebalance_core_basket`): 적격 보유종목 유지(랭크 하락 무관), thesis 깨진
-   종목만 drop, 신규는 빈자리만 add, 승자는 캡 초과 전 안 자름(trim_to_cap).
-
-**알려진 속성(버그 아님)**: 금융주는 GP=None이라 cheapness 단독으로 랭크돼 cheap-leveraged 종목
-(모기지 REIT 등)이 상위에 온다. 이는 순수 밸류 스크린의 정상 동작 — quality 플로어로 누르면 검증상
-역예측인 net-margin/ROIC 틸트를 재도입하는 셈. 통제 = 섹터캡 + 투명 플래그(high-debt/margin-declining)
-+ human-confirmation(스크린이지 자동매수 아님).
-
-**드라이버**: `python -m scripts.core_basket [--as-of YYYY-MM-DD] [--target-n 13] [--max-weight 0.08]
-[--w-value 0.6] [--w-gp 0.4]`. 핀 스냅샷(`fundamentals-2026-06-01-gp2` + `prices-2026-06-01`,
-verify=True fail-loud) + 섹터 CSV에서 PIT 유니버스 조립. `--as-of` 생략 시 가격 스냅샷 최신일로
-resolve(펀더멘털·가격 **동일 컷오프** 적용 — 룩어헤드 없음, 재현 가능).
-
-**검증**: 19 테스트(스크린/백분위 랭크/value-actually-leads/섹터캡/캡재분배/thesis-hold/엣지),
-ruff/mypy 클린. 5렌즈 적대 리뷰(32 서브에이전트)로 z-clip·PIT·섹터집중 결함 수정.
+→ **`docs/COMPOUNDER_OPERATIONS.md` — "코어 바스켓 (Core Basket)" 섹션** 참조.
