@@ -1,0 +1,90 @@
+"""Live-loop dress rehearsal — the full deploy-candidate execution chain composed
+end-to-end against PaperBroker (a BrokerAdapter stand-in for live Alpaca), with NO
+API keys:
+
+    risk-aware sizing  →  RebalancePlan  →  gated process_order_intents()  →  fills
+                       →  reconcile broker positions vs intended end-state
+
+Everything except the literal broker network/fill call is exercised. The kill-switch
+arm of the same path is drilled in test_kill_switch_drill.py.
+"""
+
+from __future__ import annotations
+
+from engine.paper import PaperBroker
+from risk.halt_state import HaltStateStore
+from risk.policy import RiskPolicy
+from trader.execution.order_store import JsonlOrderStore
+from trader.execution.rebalance import plan_rebalance, sized_targets
+from trader.execution.reconciler import reconcile_positions
+from trader.execution.runner import process_order_intents
+
+AUM = 1_000_000.0
+MARKS = {"AAA": 100.0, "BBB": 200.0, "CCC": 50.0}
+VOLS = {"AAA": 0.35, "BBB": 0.35, "CCC": 0.35}
+
+
+def _policy() -> RiskPolicy:
+    return RiskPolicy(
+        max_order_notional=1_000_000,
+        max_daily_new_notional=1_000_000,
+        max_symbol_weight=0.10,
+        max_gross_exposure=2.0,
+        min_cash_fraction=0.0,
+    )
+
+
+def test_full_rebalance_cycle_executes_and_reconciles(tmp_path) -> None:
+    # 1) risk-aware sizing (vol-target / risk-cap / hard-cap — no edge → no Kelly)
+    targets = sized_targets(
+        ["AAA", "BBB", "CCC"], aum=AUM, marks=MARKS, vols=VOLS, max_position_pct=0.08
+    )
+    assert targets, "sizing produced no targets"
+
+    # 2) target → orders (from a flat book)
+    plan = plan_rebalance(
+        strategy="ideal",
+        rebalance_key="2026-06-10",
+        targets=targets,
+        current_qty={},
+        marks=MARKS,
+    )
+
+    # 3) gated execution against the PaperBroker (same runner the live adapter uses)
+    broker = PaperBroker(AUM, marks=MARKS)
+    results = process_order_intents(
+        list(plan.intents),
+        broker=broker,
+        store=JsonlOrderStore(tmp_path / "orders.jsonl"),
+        halt_store=HaltStateStore(tmp_path / "halt.json"),
+        policy=_policy(),
+        marks=MARKS,
+        dry_run=False,
+    )
+    assert results, "no intents executed"
+    assert all(r.status == "filled" for r in results), [r.status for r in results]
+
+    # 4) the broker's book matches the intended end-state exactly — no reconciliation breaks
+    expected = {(t.symbol, t.market): t.target_qty for t in targets}
+    issues = reconcile_positions(expected, broker.list_positions())
+    assert issues == [], [i.message for i in issues]
+
+
+def test_reconcile_detects_position_drift() -> None:
+    broker = PaperBroker(AUM, marks=MARKS)
+    broker.submit_order(
+        plan_rebalance(
+            strategy="ideal",
+            rebalance_key="k",
+            targets=sized_targets(["AAA"], aum=AUM, marks=MARKS, vols=VOLS),
+            current_qty={},
+            marks=MARKS,
+        ).intents[0]
+    )
+    held = {p.symbol: p.qty for p in broker.list_positions()}["AAA"]
+
+    # Intend a different book than the broker holds → reconciliation must flag the gap.
+    expected = {("AAA", "us"): held + 5, ("ZZZ", "us"): 10.0}
+    issues = reconcile_positions(expected, broker.list_positions())
+    flagged = {i.symbol for i in issues}
+    assert flagged == {"AAA", "ZZZ"}
