@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime
 
+from risk.sizing import size_position
 from trader.execution.intents import OrderIntent, RebalancePlan, TargetPosition
 
 
@@ -98,3 +99,55 @@ def plan_rebalance(
         generated_at=generated,
         intents=intents,
     )
+
+
+def sized_targets(
+    symbols: list[str],
+    *,
+    aum: float,
+    marks: dict[str, float],
+    vols: dict[str, float],
+    downside_pct: float = 0.30,
+    edges: dict[str, tuple[float, float]] | None = None,
+    market: str = "us",
+    max_position_pct: float = 0.08,
+    target_vol_annualized: float = 0.35,
+    max_risk_pct_of_aum: float = 0.02,
+    kelly_multiplier: float = 0.5,
+) -> list[TargetPosition]:
+    """Risk-aware target positions, replacing naive equal-weight / full exposure.
+
+    Each name is sized by ``risk.sizing.size_position`` — the smaller of vol-target /
+    risk-cap / hard concentration cap, plus half-Kelly when ``edges[symbol] =
+    (win_probability, upside_pct)`` supplies a real per-name edge. A symbol missing a
+    positive mark or vol is skipped.
+
+    OPT-IN: this differs from the cap-0.20 sizing the deploy candidate was validated
+    under, so the backtest must be re-run with it and pass the gate before it drives
+    live capital (claims are earned via the gate, never asserted).
+    """
+    edge_map = edges or {}
+    targets: list[TargetPosition] = []
+    for symbol in symbols:
+        mark = marks.get(symbol) or marks.get(symbol.upper())
+        vol = vols.get(symbol) or vols.get(symbol.upper())
+        if not mark or mark <= 0 or not vol or vol <= 0:
+            continue
+        win_probability, upside_pct = edge_map.get(symbol, (None, None))
+        result = size_position(
+            aum,
+            mark,
+            asset_vol_annualized=vol,
+            downside_pct=downside_pct,
+            win_probability=win_probability,
+            upside_pct=upside_pct,
+            kelly_multiplier=kelly_multiplier,
+            max_position_pct=max_position_pct,
+            max_risk_pct_of_aum=max_risk_pct_of_aum,
+            target_vol_annualized=target_vol_annualized,
+        )
+        if result.qty > 0:
+            targets.append(
+                TargetPosition(symbol=symbol.upper(), market=market, target_qty=float(result.qty))
+            )
+    return targets

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from risk.slippage import SlippageModel
 from trader.execution.broker import (
     AccountSnapshot,
     BrokerOrder,
@@ -35,7 +36,14 @@ class PaperPosition:
 
 
 class PaperBroker:
-    def __init__(self, initial_cash: float = 10_000.0, *, marks: dict[str, float] | None = None):
+    def __init__(
+        self,
+        initial_cash: float = 10_000.0,
+        *,
+        marks: dict[str, float] | None = None,
+        slippage: SlippageModel | None = None,
+        adv: dict[str, float] | None = None,
+    ):
         if initial_cash <= 0:
             raise ValueError("initial_cash must be positive")
         self.cash = initial_cash
@@ -45,6 +53,11 @@ class PaperBroker:
         # driven through the BrokerAdapter protocol (a market OrderIntent carries no price).
         self._marks: dict[str, float] = {k.upper(): v for k, v in (marks or {}).items()}
         self._orders_by_coid: dict[str, BrokerOrder] = {}
+        # Optional, DEFAULT-OFF slippage model. Off preserves fidelity with the flat-fee
+        # backtest; enabling it (with per-symbol adv = avg daily volume in shares) makes
+        # paper fills size-dependent and requires re-validating the backtest WITH it.
+        self._slippage = slippage
+        self._adv: dict[str, float] = {k.upper(): v for k, v in (adv or {}).items()}
 
     def submit_market_order(
         self,
@@ -132,6 +145,13 @@ class PaperBroker:
             raise BrokerRejectedError(f"paper broker has no positive mark for {order.symbol}")
         if order.qty <= 0:
             raise BrokerRejectedError(f"order qty must be positive (got {order.qty})")
+        if self._slippage is not None:
+            price = self._slippage.fill_price(
+                side=order.side,
+                reference_price=price,
+                qty=order.qty,
+                adv=self._adv.get(order.symbol),
+            )
         paper = self.submit_market_order(
             strategy=order.strategy,
             symbol=order.symbol,

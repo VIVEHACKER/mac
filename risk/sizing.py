@@ -61,26 +61,33 @@ def size_position(
     *,
     asset_vol_annualized: float,
     downside_pct: float,
-    win_probability: float,
-    upside_pct: float,
+    win_probability: float | None = None,
+    upside_pct: float | None = None,
     kelly_multiplier: float = 0.5,
     max_position_pct: float = 0.08,
     max_risk_pct_of_aum: float = 0.02,
     target_vol_annualized: float = 0.35,
 ) -> SizingResult:
-    """Size a long position to the smallest of half-Kelly / vol-target / risk-cap, then the hard
-    concentration cap. ``downside_pct`` is the adverse move used to bound per-name risk (the user
-    does not stop out, so it shrinks higher-risk names; the hard cap is the zero-loss backstop)."""
+    """Size a long position to the smallest of vol-target / risk-cap — plus half-Kelly when an
+    edge estimate (``win_probability`` + ``upside_pct``) is supplied — then the hard concentration
+    cap. ``downside_pct`` is the adverse move used to bound per-name risk (the user does not stop
+    out, so it shrinks higher-risk names; the hard cap is the zero-loss backstop)."""
     if aum <= 0 or price <= 0:
         raise ValueError("aum and price must be positive")
     if downside_pct <= 0:
         raise ValueError("downside_pct must be positive")
 
     candidates = {
-        "kelly": kelly_fraction(win_probability, upside_pct, downside_pct) * kelly_multiplier,
         "vol": vol_target_weight(asset_vol_annualized, target_vol_annualized, max_leverage=1.0),
         "risk_cap": max_risk_pct_of_aum / downside_pct,
     }
+    # Kelly enters only with a real per-name edge estimate. A strategy like AQR momentum
+    # ranks names without a win-probability, so without (win_probability, upside_pct) we
+    # size on vol-target / risk-cap / hard-cap rather than fabricating an edge.
+    if win_probability is not None and upside_pct is not None:
+        candidates["kelly"] = (
+            kelly_fraction(win_probability, upside_pct, downside_pct) * kelly_multiplier
+        )
     binding = min(candidates, key=lambda k: candidates[k])
     target_weight = candidates[binding]
     capped_weight = min(target_weight, max_position_pct)
