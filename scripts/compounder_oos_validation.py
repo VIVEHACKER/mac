@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT))
 from data.fundamentals_snapshot import read_fundamentals_snapshot  # noqa: E402
 from data.models import FundamentalRecord  # noqa: E402
 from data.price_snapshot import read_price_snapshot, write_price_snapshot  # noqa: E402
+from data.reproducibility import assert_pinned  # noqa: E402
 from engine.compounder import SECTOR_INVALID_METRICS, rank_compounders  # noqa: E402
 
 DEFAULT_UNIVERSE = ROOT / "data" / "universes" / "sp400-600-current.csv"
@@ -307,6 +308,7 @@ def main() -> None:
         print(f"Reading pinned prices from {args.price_snapshot}...")
         closes = read_price_snapshot(args.price_snapshot, verify=True)
     else:
+        assert_pinned(False, "prices (--price-snapshot omitted → live yfinance)")
         all_syms = sorted({s for _, syms, _ in sets for s in syms})
         print(f"Downloading prices for {len(all_syms)} symbols ({PRICE_START}..{PRICE_END})...")
         raw = yf.download(

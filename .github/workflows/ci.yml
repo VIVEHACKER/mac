@@ -1,0 +1,49 @@
+name: CI
+
+# Quality gate: lint + types + the deterministic test suite must pass on every
+# push to main and every PR. Previously there was no CI — tests only ran locally,
+# so a red build could be merged unnoticed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies (locked)
+        run: uv sync --frozen
+
+      - name: Ruff (lint)
+        run: uv run ruff check .
+
+      - name: Mypy (types)
+        run: uv run mypy engine strategies signals valuation risk pod data --ignore-missing-imports
+
+      # The suite is enumerated by path on purpose: a bare `pytest` auto-collect
+      # walks vendored/excluded trees and is killed (exit 144) in this env. These
+      # paths are the full deterministic suite; network-dependent cases skip
+      # cleanly when no live API is reachable.
+      - name: Pytest (deterministic suite)
+        run: >
+          uv run pytest -q
+          tests/test_strategies tests/test_engine tests/test_risk
+          tests/test_valuation tests/test_scripts tests/test_data
+          tests/test_trader_cli.py tests/test_trader_cli_chart.py
