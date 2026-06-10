@@ -145,10 +145,13 @@ DCF/Multiples/RIM 통합 fair value로 가능한 전략 (자세히는 `VALUATION
 
 **공통점**: 정보 우위, 인프라 투자, 작은 우위의 레버리지 증폭.
 
-## 연구 원장 — 검증 후 기각 (tested & rejected)
+## 연구 원장 — 후보 라인 검증 기록
 
-검증 게이트를 통과하지 못한 전략 라인의 추적 기록. "안 쓰는 이유"에 증거를 남긴다.
+전략 breadth는 게이트 통과로만 획득된다. 모든 후보의 verdict(기각 포함)를 증거와 함께 추적 기록한다.
+공통 프로토콜: IDEAL과 동일(핀 가격·106 유니버스·15×3y walk-forward·turnover 비용), verdict 바 사전 선언
+(standalone = positive≥60% AND 평균초과>0 / diversifier = IDEAL 상관<0.7 AND 위기월>SPY).
 
-| 라인 | 검증 | 결과 | 기각 사유 | 리포트 |
-|------|------|------|----------|--------|
-| **메가캡 TSMOM** (12-1 절대 모멘텀, 1/N+현금) | 15×3y walk-forward, IDEAL과 동일 프로토콜·핀 데이터 (2026-06-11) | positive 40%, 평균 초과 **−1.95%/yr** | standalone 기각(불 마켓 현금 드래그); diversifier도 기각 — IDEAL과 월수익 상관 **0.76**(≥0.7), 위기월 방어(−2.30 vs SPY −3.60%/mo)로는 상관을 정당화 못함. IDEAL의 trail_dd가 이미 같은 역할 수행 | `scripts/tsmom_megacap_walkforward.py` → `out/tsmom-megacap-walkforward.md` |
+| 라인 | 검증 | 결과 | verdict | 리포트 |
+|------|------|------|---------|--------|
+| **메가캡 TSMOM** (12-1 절대 모멘텀, 1/N+현금) | 2026-06-11 | positive 40%, 평균 초과 **−1.95%/yr** | **기각** — standalone 실패(불 마켓 현금 드래그); diversifier도 실패: IDEAL과 상관 **0.76**(≥0.7), 위기월 방어(−2.30 vs SPY −3.60%/mo)로 정당화 불가. trail_dd가 이미 같은 역할 | `scripts/tsmom_megacap_walkforward.py` → `out/tsmom-megacap-walkforward.md` |
+| **메가캡 저변동성** (63d vol 랭크, top20 EW) | 2026-06-11 | positive 66.7%, 평균 초과 **−0.17%/yr**, Sharpe 1.29 | **standalone 기각**(평균 초과 음수 — 2023-25 AI 랠리 창 −12.45%가 결정적) / **DIVERSIFIER 후보 유지**: IDEAL과 상관 **0.53**, 위기월 −1.75 vs SPY −3.60%/mo. 슬리브로만 검토 — 결합 포트폴리오가 게이트 재통과 전 자금배분 금지 | `scripts/lowvol_megacap_walkforward.py` → `out/lowvol-megacap-walkforward.md` |
