@@ -112,7 +112,8 @@ trader/
 │   ├── iv_crush.py          # 어닝 임박 IV 급등 → 발표 후 매도
 │   ├── value_long.py        # valuation rating ≥ +2 종목 매수 (Buffett-style)
 │   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 + 매크로 + valuation 결합
-├── signals/                 # 미시·거시·sentiment 기반 알파/시그널
+├── signals/                 # 🔲 설계 트리(21) — 현재 foreign_flow.py만 구현, 나머지는 빌드 백로그
+│                            #    (신규 신호는 검증 게이트 통과 전 자금배분 금지 — advisory only)
 │   ├── activist_13f.py      # 13F 신규/증가 — Pershing/Tiger 미러
 │   ├── insider.py           # Form 4 + DART 임원보고 — 클러스터 매수
 │   ├── revisions.py         # 애널리스트 컨센서스 상향
@@ -135,9 +136,9 @@ trader/
 │   ├── put_call_extreme.py  # Put/Call > 1.2 극단 비관 → contrarian
 │   └── btc_vol.py           # Deribit DVOL 극단 → BTC 변동성 평균회귀
 ├── engine/
-│   ├── backtest.py          # Nautilus 백테스트 러너
-│   ├── paper.py             # Alpaca paper / Binance testnet
-│   ├── live.py              # 동일 코드, broker만 교체
+│   ├── backtest.py          # 🔲 현재 stdlib 벡터 루프 (Nautilus 미연결 — #4에서 통합)
+│   ├── paper.py             # ✅ Alpaca paper / Binance testnet
+│   ├── live.py              # ⚠️ broker 교체식 — paper와 공통 Strategy 인터페이스 미완 (#4)
 │   └── chart/               # 차트 리딩 엔진 (순수 stdlib, 시장 무관)
 │       ├── types.py         # 공유 열거형(TrendBias/EntryState/OIQuadrant 등), PriceBar 지오메트리 헬퍼, confluence_score, decide_entry_state, ChartRead/SignalContribution/EntryContext
 │       ├── structure.py     # 스윙 구조 / BOS / CHoCH / EQH-EQL
@@ -155,14 +156,20 @@ trader/
 ├── pod/                     # Citadel 스타일 멀티전략
 │   ├── allocator.py         # Vol-target 리스크 예산 분배
 │   └── monitor.py           # Pod별 PnL/DD/Sharpe 추적
-├── risk/
-│   ├── kill_switch.py       # 일일 DD > X% 자동 정지
-│   ├── exposure.py          # 시장/섹터/팩터 노출 모니터
-│   ├── slippage.py          # 슬리피지 모델
-│   ├── short_interest.py    # 공매도 잔고 급증 모니터
-│   ├── option_skew.py       # 옵션 IV skew 하방 신호
-│   ├── fx_exposure.py       # DXY/원달러 환율 노출 (한국 수출주)
-│   └── tail_risk.py         # CBOE SKEW > 140 꼬리위험 모니터
+├── risk/                    # 구현(✅)은 원 설계와 다름 — 라이브-운영 중심으로 진화
+│   ├── kill_switch.py       # ✅ 일일/피크 DD + gross exposure 자동 정지
+│   ├── pretrade.py          # ✅ 프리트레이드 게이트 (halt/notional/weight/buying-power/short/PDT)
+│   ├── halt_state.py        # ✅ 영구 halt latch (JSON)
+│   ├── equity_track.py      # ✅ 에쿼티/피크 추적
+│   ├── policy.py            # ✅ default-live-v1 리스크 파라미터
+│   ├── shortability.py      # ✅ 공매도 가능 여부
+│   ├── sizing.py            # ✅ half-Kelly + vol-target + risk-cap + 농도캡
+│   ├── exposure.py          # ✅ gross/net/단일종목/섹터 노출 모니터 + 한도 체크
+│   ├── slippage.py          # ✅ half-spread+√참여율 임팩트 (옵트인, 기본 OFF)
+│   ├── short_interest.py    # 🔲 설계 — 공매도 잔고 급증 모니터 (미구현)
+│   ├── option_skew.py       # 🔲 설계 — 옵션 IV skew 하방 신호 (미구현)
+│   ├── fx_exposure.py       # 🔲 설계 — DXY/원달러 환율 노출 (미구현)
+│   └── tail_risk.py         # 🔲 설계 — CBOE SKEW > 140 꼬리위험 (미구현)
 ├── dashboard/
 │   └── app.py               # Streamlit 단일 진입점
 ├── infra/

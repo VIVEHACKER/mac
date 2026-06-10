@@ -1608,3 +1608,58 @@ def test_live_equity_refs_uses_broker_prior_close_baseline(tmp_path) -> None:
     ref, peak = cli._live_equity_refs(broker, tmp_path / "equity.json", "alpaca-paper")
     assert ref == 10_000.0  # prior close, not the gapped-down current 9_500
     assert peak == 10_000.0
+
+
+def _yahoo_bar(symbol: str, close: float) -> PriceBar:
+    return PriceBar(
+        symbol=symbol,
+        market="us",
+        source_symbol=symbol,
+        ts=date(2026, 6, 9),
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=1_000.0,
+        freq="1d",
+        source="yahoo:chart adjusted=true",
+    )
+
+
+def test_live_price_ingest_yahoo_fallback_is_keyless(tmp_path, capsys, monkeypatch) -> None:
+    # --source yahoo must work with NO Alpaca keys: it fills the live catalog with the
+    # latest EOD close per symbol (paper-loop marks while broker keys are unavailable).
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setattr(
+        cli, "fetch_yahoo_bars", lambda symbol, market, start, end: [_yahoo_bar(symbol, 101.5)]
+    )
+
+    db = tmp_path / "live.duckdb"
+    result = cli.main(["live-price-ingest", "QQQ,SPY", "--source", "yahoo", "--catalog-db", str(db)])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "yahoo" in captured.out
+    stored = MarketDataCatalog(db).get_bars(symbol="QQQ", market="us", freq="1d")
+    assert [bar.close for bar in stored] == [101.5]
+
+
+def test_live_price_ingest_yahoo_partial_failure_exits_nonzero(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    from data.ingest.yahoo import YahooDataError
+
+    def fetch(symbol, market, start, end):
+        if symbol == "BAD":
+            raise YahooDataError("no result")
+        return [_yahoo_bar(symbol, 99.0)]
+
+    monkeypatch.setattr(cli, "fetch_yahoo_bars", fetch)
+    result = cli.main(
+        ["live-price-ingest", "QQQ,BAD", "--source", "yahoo", "--catalog-db", str(tmp_path / "l.duckdb")]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2  # one symbol failed -> non-zero, failure visible
+    assert "BAD" in captured.out

@@ -144,3 +144,11 @@ DCF/Multiples/RIM 통합 fair value로 가능한 전략 (자세히는 `VALUATION
 | 마켓메이커 | 마이크로초 | 주문흐름 + 인프라 + ETF 차익 |
 
 **공통점**: 정보 우위, 인프라 투자, 작은 우위의 레버리지 증폭.
+
+## 연구 원장 — 검증 후 기각 (tested & rejected)
+
+검증 게이트를 통과하지 못한 전략 라인의 추적 기록. "안 쓰는 이유"에 증거를 남긴다.
+
+| 라인 | 검증 | 결과 | 기각 사유 | 리포트 |
+|------|------|------|----------|--------|
+| **메가캡 TSMOM** (12-1 절대 모멘텀, 1/N+현금) | 15×3y walk-forward, IDEAL과 동일 프로토콜·핀 데이터 (2026-06-11) | positive 40%, 평균 초과 **−1.95%/yr** | standalone 기각(불 마켓 현금 드래그); diversifier도 기각 — IDEAL과 월수익 상관 **0.76**(≥0.7), 위기월 방어(−2.30 vs SPY −3.60%/mo)로는 상관을 정당화 못함. IDEAL의 trail_dd가 이미 같은 역할 수행 | `scripts/tsmom_megacap_walkforward.py` → `out/tsmom-megacap-walkforward.md` |

@@ -35,8 +35,7 @@ financial-services/
 
 # uv
 .python-version
-# 선택: 락파일 공유하려면 이 ignore를 제거
-uv.lock
+# uv.lock is tracked for reproducible CI installs (`uv sync --frozen`)
 
 # IDE
 .vscode/

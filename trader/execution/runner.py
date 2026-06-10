@@ -36,6 +36,16 @@ def process_order_intents(
     reference_equity: float | None = None,
     peak_equity: float | None = None,
 ) -> list[ExecutionResult]:
+    # Fail-closed arming check (adversarial-review finding): reference_equity=None used to
+    # silently skip the whole kill-switch block — a future live/paper entry point that forgot
+    # the kwarg would run unprotected with every test green. Real submissions must be armed;
+    # "kill_switch 항상 켬" is a project invariant, so refuse loudly instead of skipping.
+    if not dry_run and reference_equity is None:
+        raise ValueError(
+            "dry_run=False requires reference_equity (start-of-day equity) to arm the "
+            "kill-switch; refusing to submit unarmed. Pass it (and peak_equity for the "
+            "peak-drawdown backstop), or use dry_run=True."
+        )
     account = broker.get_account()
     positions = broker.list_positions()
     halt = halt_store.current()

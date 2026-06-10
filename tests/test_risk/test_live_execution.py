@@ -150,6 +150,7 @@ def test_fake_broker_timeout_latches_halt(tmp_path) -> None:
         policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
         marks={"QQQ": 100},
         dry_run=False,
+        reference_equity=10_000.0,
     )
 
     assert result[0].status == "uncertain"

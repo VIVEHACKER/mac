@@ -51,7 +51,19 @@ is not.
 
 - Full-sample monthly Sharpe **1.40**, annualized return ~24%, MDD 18.5%.
 - PSR(SR>0) **100%**; bootstrap 95% CI **[0.92, 1.92]**, recentered null p < 1e-4.
-- Walk-forward 15 windows: 93.3% positive, +7.67%/yr avg excess.
+- Walk-forward 15 windows: **86.7% positive (13/15), +8.15%/yr avg excess**, avg
+  Sharpe 1.41, worst-window MDD 19.19% — reproducible from the pinned snapshots
+  `prices-ideal-2026-06-01` (sha `cff8205…`) + `fundamentals-2026-06-01-gp2`:
+  `TRADER_REQUIRE_PINNED=1 uv run python scripts/aqr_ideal_walkforward.py --prices
+  data/snapshots/prices-ideal-2026-06-01.csv --snapshot
+  data/snapshots/fundamentals-2026-06-01-gp2.csv` (= `out/aqr-ideal-walkforward.md`).
+  Supersedes the earlier "93.3% / +7.67%" figure, which traced to a registry record
+  with an empty `command` field and was not reproducible.
+- **After-cost (fee-stressed, same pinned inputs)**: 5 bps one-way → **+7.87%/yr**
+  (86.7% positive, Sharpe 1.39); 10 bps one-way → **+7.40%/yr** (86.7% positive,
+  Sharpe 1.37). Decay ≈ 0.075 pp per bps; the positive-rate is unchanged, so the
+  edge is not a costs artifact. Reports: `out/aqr-ideal-walkforward-fee{5,10}.md`
+  (same `TRADER_REQUIRE_PINNED=1` command with `--fee-bps 5|10`).
 - Deflated Sharpe stays ~99.7% under the sampling-variance V even at N=104
   trials; the regime-proxy V collapses it, but that V is a pessimistic upper
   bound (see report §1/§3). The **bootstrap** is the most assumption-light signal.

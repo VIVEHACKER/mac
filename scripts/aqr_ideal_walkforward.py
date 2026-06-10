@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 from data.catalog import MarketDataCatalog  # noqa: E402
 from data.models import PriceBar  # noqa: E402
 from data.price_snapshot import read_price_snapshot  # noqa: E402
+from data.reproducibility import assert_pinned  # noqa: E402
 from strategies.factor_aqr import rank_aqr_factors  # noqa: E402
 
 MEGACAPS = [
@@ -451,6 +452,7 @@ def main():
                 "≤2008-01-15 .. ≥2026-01-31); regenerate over the full 2008-01..2026-05 span."
             )
     else:
+        assert_pinned(False, "prices (--prices omitted → live yfinance)")
         print("Downloading prices (LIVE yfinance — NOT reproducible)...")
         raw = yf.download(
             MEGACAPS + [BENCHMARK],
@@ -463,6 +465,7 @@ def main():
     print(f"{len(prices)} bars")
 
     catalog = MarketDataCatalog()
+    assert_pinned(args.snapshot is not None, "fundamentals (--snapshot omitted → live catalog)")
     print("Prefetching fundamentals...")
     fund_cache = prefetch(catalog, snapshot_path=args.snapshot)
     src = f"snapshot:{args.snapshot.name}" if args.snapshot else "LIVE-CATALOG (not reproducible)"

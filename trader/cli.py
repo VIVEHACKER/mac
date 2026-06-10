@@ -23,7 +23,7 @@ from data.ingest.krx_flow_csv import KrxFlowCsvError, parse_krx_flow_csv
 from data.ingest.krx_flows import KrxFlowError, fetch_krx_flows, fetch_naver_investor_flows
 from data.ingest.option_sentiment import vix_from_macro
 from data.ingest.pykrx_kr import fetch_pykrx_bars, normalize_kr_symbol
-from data.ingest.yahoo import YAHOO_ADJUSTED_SOURCE_MARKER, fetch_yahoo_bars
+from data.ingest.yahoo import YAHOO_ADJUSTED_SOURCE_MARKER, YahooDataError, fetch_yahoo_bars
 from data.ingest.yahoo_options import YahooOptionChainError, fetch_yahoo_option_quotes
 from data.ingest.yfinance_fundamentals import fetch_yfinance_fundamentals
 from data.models import (
@@ -822,10 +822,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     live_price_ingest = sub.add_parser(
         "live-price-ingest",
-        help="Fetch broker-grade latest US stock bars from Alpaca into the catalog.",
+        help="Fetch latest US stock bars into the catalog (Alpaca broker-grade, or keyless "
+        "Yahoo EOD fallback for paper marks).",
     )
     live_price_ingest.add_argument("symbols")
     live_price_ingest.add_argument("--feed", default="iex")
+    live_price_ingest.add_argument(
+        "--source",
+        default="alpaca",
+        choices=["alpaca", "yahoo"],
+        help="alpaca = broker-grade latest bars (needs API keys); yahoo = keyless EOD "
+        "daily bars — good enough for paper-loop marks, NOT execution-grade.",
+    )
     live_price_ingest.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
 
     live_dry_run = sub.add_parser(
@@ -2629,18 +2637,39 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
 
 
 def _run_live_price_ingest(args: argparse.Namespace) -> int:
-    api_key = os.getenv("ALPACA_API_KEY", "").strip()
-    secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
-    if not api_key or not secret_key:
-        print("ALPACA_API_KEY and ALPACA_SECRET_KEY are required for live-price-ingest")
-        return 2
     symbols = _parse_symbols(args.symbols)
-    bars = fetch_alpaca_latest_stock_bars(
-        symbols,
-        api_key=api_key,
-        secret_key=secret_key,
-        feed=args.feed,
-    )
+    if args.source == "yahoo":
+        # Keyless EOD fallback: latest daily close per symbol from Yahoo. Good enough for
+        # paper-loop marks / equity tracking; NOT execution-grade (use Alpaca for live).
+        today = datetime.now(UTC).date()
+        bars = []
+        for symbol in symbols:
+            try:
+                history = fetch_yahoo_bars(
+                    symbol, "us", today - timedelta(days=10), today + timedelta(days=1)
+                )
+            except YahooDataError as exc:
+                print(f"{symbol}: yahoo fetch failed — {exc}")
+                continue
+            if history:
+                bars.append(history[-1])  # latest completed daily bar
+            else:
+                print(f"{symbol}: yahoo returned no daily bars")
+    else:
+        api_key = os.getenv("ALPACA_API_KEY", "").strip()
+        secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
+        if not api_key or not secret_key:
+            print(
+                "ALPACA_API_KEY and ALPACA_SECRET_KEY are required for live-price-ingest "
+                "(or use --source yahoo for the keyless EOD fallback)"
+            )
+            return 2
+        bars = fetch_alpaca_latest_stock_bars(
+            symbols,
+            api_key=api_key,
+            secret_key=secret_key,
+            feed=args.feed,
+        )
     stored = MarketDataCatalog(args.catalog_db).put_bars(bars)
     lines = [
         "# Live Price Ingest",
@@ -2648,7 +2677,7 @@ def _run_live_price_ingest(args: argparse.Namespace) -> int:
         "| Field | Value |",
         "|---|---:|",
         f"| Symbols | {', '.join(symbols)} |",
-        f"| Feed | {args.feed} |",
+        f"| Source | {args.source} ({args.feed if args.source == 'alpaca' else 'EOD daily'}) |",
         f"| Stored Bars | {stored} |",
     ]
     if bars:
