@@ -74,6 +74,8 @@ def test_paper_and_fake_broker_share_the_same_runner(tmp_path) -> None:
             policy=_permissive_policy(),
             marks=marks,
             dry_run=False,
+            reference_equity=100_000.0,
+            peak_equity=100_000.0,
         )
 
     paper_results = run(paper, "paper")
