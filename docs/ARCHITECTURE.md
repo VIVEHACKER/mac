@@ -164,8 +164,8 @@ trader/
 │   ├── policy.py            # ✅ default-live-v1 리스크 파라미터
 │   ├── shortability.py      # ✅ 공매도 가능 여부
 │   ├── sizing.py            # ✅ half-Kelly + vol-target + risk-cap + 농도캡
-│   ├── exposure.py          # 🔲 설계 — 시장/섹터/팩터 노출 모니터 (미구현)
-│   ├── slippage.py          # 🔲 설계 — 슬리피지 모델 (미구현; 실자금 라이브 전 필요)
+│   ├── exposure.py          # ✅ gross/net/단일종목/섹터 노출 모니터 + 한도 체크
+│   ├── slippage.py          # ✅ half-spread+√참여율 임팩트 (옵트인, 기본 OFF)
 │   ├── short_interest.py    # 🔲 설계 — 공매도 잔고 급증 모니터 (미구현)
 │   ├── option_skew.py       # 🔲 설계 — 옵션 IV skew 하방 신호 (미구현)
 │   ├── fx_exposure.py       # 🔲 설계 — DXY/원달러 환율 노출 (미구현)
