@@ -53,6 +53,22 @@ def test_plan_drops_dust_below_min_notional() -> None:
     assert plan.intents == ()
 
 
+def test_exit_preserves_the_holding_market() -> None:
+    # Latent finding: exits used to hardcode market="us", so a crypto holding would be
+    # "sold" as ("BTC", "us") — a naked short to the pretrade gate, while the real
+    # position stranded. Exits must fire in the market the position is held in.
+    plan = plan_rebalance(
+        strategy="ideal",
+        rebalance_key="k",
+        targets=[TargetPosition("AAA", "us", 10.0)],
+        current_qty={"BTC": 2.0},
+        marks={"AAA": 100.0, "BTC": 50_000.0},
+        current_markets={"BTC": "crypto"},
+    )
+    exits = [i for i in plan.intents if i.side == "sell"]
+    assert [(i.symbol, i.market) for i in exits] == [("BTC", "crypto")]
+
+
 def test_plan_intents_are_normalized_with_stable_ids() -> None:
     plan = plan_rebalance(
         strategy="ideal",

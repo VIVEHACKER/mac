@@ -52,19 +52,24 @@ def plan_rebalance(
     targets: list[TargetPosition],
     current_qty: dict[str, float],
     marks: dict[str, float],
+    current_markets: dict[str, str] | None = None,
     generated_at: datetime | None = None,
     min_notional: float = 0.0,
 ) -> RebalancePlan:
     """Build a ``RebalancePlan``: per-symbol (target − current) → buy/sell intents.
 
-    Symbols currently held but absent from ``targets`` are fully exited. Dust trades
-    whose notional is below ``min_notional`` are dropped. Sells are emitted before
-    buys so the runner's cumulative cash projection frees buying power before it is
-    consumed.
+    Symbols currently held but absent from ``targets`` are fully exited — in the market
+    they are actually held in (``current_markets[symbol]``, default ``"us"``). Without
+    that, a non-US holding would be exited as a US intent, which the pretrade gate sees
+    as a naked short on a book that holds nothing in ``("SYM", "us")`` (adversarial-review
+    latent finding; fixed before any live wiring depends on it). Dust trades whose
+    notional is below ``min_notional`` are dropped. Sells are emitted before buys so the
+    runner's cumulative cash projection frees buying power before it is consumed.
     """
     generated = generated_at or datetime.now(UTC)
     target_by_symbol = {t.symbol.upper(): t for t in targets}
     held = {symbol.upper(): qty for symbol, qty in current_qty.items()}
+    held_markets = {s.upper(): m.lower() for s, m in (current_markets or {}).items()}
     marks_u = {symbol.upper(): price for symbol, price in marks.items()}
 
     buys: list[OrderIntent] = []
@@ -82,7 +87,7 @@ def plan_rebalance(
         intent = OrderIntent(
             strategy=strategy,
             symbol=symbol,
-            market=target.market if target else "us",
+            market=target.market if target else held_markets.get(symbol, "us"),
             side=side,
             qty=abs(delta),
             order_type="market",
