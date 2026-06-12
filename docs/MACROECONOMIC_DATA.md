@@ -205,3 +205,37 @@ rows = data["StatisticSearch"]["row"]
 - **분기 GDP 잠정값으로 즉시 거래** — 보통 1개월 lag + 두 번 더 revision
 - **다른 나라 매크로를 즉시 적용** — 시간대/통화/구조 차이. 정규화 후 비교
 - **명목 금리만 보고 실질 평가** — 인플레 빼서 실질금리(real rate) 사용
+
+## CPI/PPI 예측기 (forecaster)
+
+거시 데이터를 **소비**(regime/배분)하는 데서 한 걸음 더 나아가, 다음 발표분 CPI/PPI를
+**예측**하는 모듈. `trading_copilot/macro_forecast.py` (provider-agnostic).
+
+### 방법론 (클리블랜드 연준 nowcast 철학)
+- **MoM(SA) 레벨에서 예측 후 YoY 재구성** — 베이스 효과 반영
+- **앙상블**: `random_walk` + `mean6` + `ewma` + `ar3` + `seasonal` + (옵션)`energy_bridge`(오일/가솔린 OLS) + `energy_core_bridge`
+- **에너지 브리지**: 대상월 에너지(이미 발표됨)를 회귀에 사용 → 헤드라인은 *nowcast* 성격(순수 미래예측 아님, `notes`에 공시)
+- **정직한 OOS 가중**: 확장윈도우(각 시점 *과거* 오차로만 inverse-MSE 가중) — look-forward 편향 제거
+- **예측구간**: 80% = 경험적 분위, 95% = 가우시안 ±1.96σ(n~48에서 극단분위 불안정 회피)
+
+### 데이터 소스
+- **미국**: FRED — `CPIAUCSL`(SA)/`CPILFESL`(코어 SA)/`PPIFIS`(PPI), YoY 검증용 NSA(`CPIAUCNS`/`CPILFENS`/`WPSFD49207`), 에너지 `DCOILWTICO`. FRED CSV가 IP throttle될 때 **BLS 공개 API**(`WPSFD4` 등, 다른 호스트)로 우회 가능
+- **한국**: 한국은행 **ECOS** (`trading_copilot/ecos.py`) — CPI `901Y009/0`, PPI `404Y014/*AA`. `ECOS_API_KEY` 미설정 시 `sample` 키로 폴백하는데, sample은 10건/호출 캡이 있어 **10개월 윈도우 자동 스티칭**(2015+, ~14회 호출)으로 전체 이력을 복원함 — 키 없이도 완전 동작. 무료 키(https://ecos.bok.or.kr/api/)를 넣으면 1회 호출로 처리. 한국 지수는 NSA라 seasonal·YoY가 핵심
+
+### 검증 (2026-04 기준)
+- 최신 실측 YoY를 독립 재계산: 미국 헤드라인 +3.81% / 코어 +2.75% / PPI +5.99% → BLS 공식치(3.8/2.8/6.0)와 일치
+- walk-forward 48개월 OOS 스킬(정직 앙상블, vs random-walk): 헤드라인 CPI **+21.8%** / 코어 **+8.6%** / PPI **+16.8%**
+- 클리블랜드 연준 nowcast와 수렴(헤드라인 모델 +0.42% vs Fed +0.46%)
+
+### CLI
+```
+trading-copilot forecast --region us        # 미국 CPI/PPI 다음 발표분 예측
+trading-copilot forecast --region kr        # 한국 (ECOS, 키 필요)
+trading-copilot forecast-record --region us # 예측을 forward-OOS 원장에 기록
+trading-copilot forecast-score              # 발표 후 실측 대비 채점
+trading-copilot forecast-ledger             # 원장 요약 + 적중률
+```
+
+### Forward-OOS 원장 (`forecast_ledger.py`)
+발표 *전* 예측을 pending으로 기록 → 발표 *후* 실측 대비 채점 → 살아있는 track record.
+저장: `out/forecast_ledger.jsonl` (append-only). AQR forward-OOS 페이퍼 원장과 동일한 규율.

@@ -44,6 +44,13 @@ from .macro import (
     build_macro_dashboard,
     format_macro_report,
 )
+from .macro_forecast import (
+    KR_SPECS,
+    US_SPECS,
+    forecast_dashboard,
+    format_forecast_report,
+)
+from . import forecast_ledger
 from .ml_recommendations import (
     build_ml_recommendation,
     format_ml_recommendation_report,
@@ -418,6 +425,45 @@ class TradingWorkflows:
         return format_macro_report(
             build_macro_dashboard(self.macro, price_provider=self.industry_history)
         )
+
+    def _forecast(self, region: str):
+        region = region.lower()
+        if region == "us":
+            return forecast_dashboard(self.macro, US_SPECS, energy_provider=self.macro)
+        if region in ("kr", "korea"):
+            from .ecos import EcosProvider
+
+            return forecast_dashboard(EcosProvider(), KR_SPECS)
+        raise ValueError(f"unknown region {region!r} (use 'us' or 'kr')")
+
+    def forecast_report(self, region: str = "us") -> str:
+        title = "US" if region.lower() == "us" else "Korea"
+        return format_forecast_report(
+            self._forecast(region), f"{title} CPI/PPI Forecast (next release)"
+        )
+
+    def forecast_record_report(
+        self, region: str, recorded_at: date, path: str = forecast_ledger.DEFAULT_LEDGER
+    ) -> str:
+        forecasts = self._forecast(region)
+        forecast_ledger.record_forecasts(
+            forecasts, region=region.lower(), recorded_at=recorded_at, path=path
+        )
+        return forecast_ledger.ledger_summary(path)
+
+    def forecast_score_report(
+        self, scored_at: date, path: str = forecast_ledger.DEFAULT_LEDGER
+    ) -> str:
+        providers: dict[str, MacroDataProvider] = {"us": self.macro}
+        try:
+            from .ecos import EcosProvider
+
+            providers["kr"] = EcosProvider()
+        except Exception:  # noqa: BLE001
+            pass
+        scored = forecast_ledger.score_pending(providers, scored_at=scored_at, path=path)
+        header = f"Scored {len(scored)} newly-released forecast(s).\n\n"
+        return header + forecast_ledger.ledger_summary(path)
 
     def economic_calendar_report(
         self,

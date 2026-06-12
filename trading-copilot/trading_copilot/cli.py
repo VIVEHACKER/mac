@@ -36,9 +36,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "thesis":
         if args.thesis_command == "set":
-            store.upsert_thesis(
-                args.ticker, args.direction, args.statement, args.invalidation
-            )
+            store.upsert_thesis(args.ticker, args.direction, args.statement, args.invalidation)
             print(f"Saved thesis: {args.ticker.upper()}")
             return 0
         if args.thesis_command == "review":
@@ -46,9 +44,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "morning":
         return emit(
-            workflows.morning_brief(
-                args.tickers, include_market_data=args.with_market_data
-            ),
+            workflows.morning_brief(args.tickers, include_market_data=args.with_market_data),
             args.output,
         )
 
@@ -89,21 +85,45 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "macro":
         return emit(workflows.macro_report(), args.output)
 
+    if args.command == "forecast":
+        return emit(workflows.forecast_report(args.region), args.output)
+
+    if args.command == "forecast-record":
+        from datetime import date as _date
+
+        return emit(
+            workflows.forecast_record_report(args.region, _date.today(), path=args.ledger),
+            args.output,
+        )
+
+    if args.command == "forecast-score":
+        from datetime import date as _date
+
+        return emit(workflows.forecast_score_report(_date.today(), path=args.ledger), args.output)
+
+    if args.command == "forecast-ledger":
+        from . import forecast_ledger as _fl
+
+        return emit(_fl.ledger_summary(args.ledger), args.output)
+
     if args.command == "regime":
         return emit(workflows.regime_report(), args.output)
 
     if args.command == "backtest":
         from datetime import date as _date
+
         start = _date.fromisoformat(args.start)
         end = _date.fromisoformat(args.end)
         report = workflows.backtest_regime_report(
-            start, end,
+            start,
+            end,
             holding_days=args.holding_days,
             long_history=args.long_history,
         )
         if args.csv_output:
             csv_text = workflows.backtest_regime_csv(
-                start, end,
+                start,
+                end,
                 holding_days=args.holding_days,
                 long_history=args.long_history,
             )
@@ -216,9 +236,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "portfolio-100":
         single_stock_pool = tuple(
-            item.strip().upper()
-            for item in args.single_stock_pool.split(",")
-            if item.strip()
+            item.strip().upper() for item in args.single_stock_pool.split(",") if item.strip()
         )
         report = workflows.aggressive_portfolio_report(
             target_annual_return=args.target_annual_return,
@@ -371,10 +389,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     macro.add_argument("--output", type=Path)
 
+    forecast = sub.add_parser(
+        "forecast",
+        help="Forecast the next CPI/PPI release (ensemble + energy bridge + walk-forward skill).",
+    )
+    forecast.add_argument("--region", default="us", choices=["us", "kr"])
+    forecast.add_argument("--output", type=Path)
+
+    forecast_record = sub.add_parser(
+        "forecast-record",
+        help="Forecast the next CPI/PPI release and append it to the forward-OOS ledger.",
+    )
+    forecast_record.add_argument("--region", default="us", choices=["us", "kr"])
+    forecast_record.add_argument("--ledger", default="out/forecast_ledger.jsonl")
+    forecast_record.add_argument("--output", type=Path)
+
+    forecast_score = sub.add_parser(
+        "forecast-score",
+        help="Score pending ledger forecasts against released actuals.",
+    )
+    forecast_score.add_argument("--ledger", default="out/forecast_ledger.jsonl")
+    forecast_score.add_argument("--output", type=Path)
+
+    forecast_ledger_cmd = sub.add_parser(
+        "forecast-ledger",
+        help="Summarise the CPI/PPI forecast forward-OOS ledger and its hit rate.",
+    )
+    forecast_ledger_cmd.add_argument("--ledger", default="out/forecast_ledger.jsonl")
+    forecast_ledger_cmd.add_argument("--output", type=Path)
+
     regime = sub.add_parser(
         "regime",
         help="Classify current macro regime (panic, inflation_shock, deflation_risk, easy_money, "
-             "stagflation, recession, disinflation_expansion, transition) and propose a portfolio template.",
+        "stagflation, recession, disinflation_expansion, transition) and propose a portfolio template.",
     )
     regime.add_argument("--output", type=Path)
 
@@ -385,14 +432,16 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--start", required=True, help="Start date (YYYY-MM-DD).")
     backtest.add_argument("--end", required=True, help="End date (YYYY-MM-DD).")
     backtest.add_argument(
-        "--holding-days", type=int, default=21,
+        "--holding-days",
+        type=int,
+        default=21,
         help="Forward holding window in trading days. Default 21 (~1 month).",
     )
     backtest.add_argument(
         "--long-history",
         action="store_true",
         help="Use Yahoo period1/period2 endpoint to fetch daily bars from any historical "
-             "date. Required for backtests beyond ~5 years (e.g. 2008 crisis, 2020 COVID).",
+        "date. Required for backtests beyond ~5 years (e.g. 2008 crisis, 2020 COVID).",
     )
     backtest.add_argument("--csv-output", type=Path)
     backtest.add_argument("--output", type=Path)
@@ -578,35 +627,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     playbook.add_argument("ticker")
     playbook.add_argument(
-        "--aum", type=float,
-        help="Total AUM for position sizing. Omit to skip the sizing block."
+        "--aum", type=float, help="Total AUM for position sizing. Omit to skip the sizing block."
     )
     playbook.add_argument(
-        "--target-vol", type=float, default=0.35,
+        "--target-vol",
+        type=float,
+        default=0.35,
         help="Target portfolio annualized volatility (e.g. 0.35 = 35%%). Default 0.35.",
     )
     playbook.add_argument(
-        "--kelly-multiplier", type=float, default=0.5,
+        "--kelly-multiplier",
+        type=float,
+        default=0.5,
         help="Fraction of full Kelly to apply (0.5 = half Kelly, safer). Default 0.5.",
     )
     playbook.add_argument(
-        "--max-position", type=float, default=0.25,
+        "--max-position",
+        type=float,
+        default=0.25,
         help="Hard cap on single-name weight (e.g. 0.25 = 25%%). Default 0.25.",
     )
     playbook.add_argument(
-        "--max-risk", type=float, default=0.02,
+        "--max-risk",
+        type=float,
+        default=0.02,
         help="Hard cap on portfolio loss if stopped out (e.g. 0.02 = 2%%). Default 0.02.",
     )
     playbook.add_argument(
-        "--win-probability", type=float, default=0.55,
+        "--win-probability",
+        type=float,
+        default=0.55,
         help="Subjective probability of thesis winning. Default 0.55.",
     )
     playbook.add_argument(
-        "--upside", type=float, default=0.5,
+        "--upside",
+        type=float,
+        default=0.5,
         help="Expected upside if thesis works (fraction, e.g. 0.5 = +50%%). Default 0.5.",
     )
     playbook.add_argument(
-        "--downside", type=float, default=0.2,
+        "--downside",
+        type=float,
+        default=0.2,
         help="Stop-loss fraction (e.g. 0.2 = -20%%). Default 0.2.",
     )
     playbook.add_argument(
