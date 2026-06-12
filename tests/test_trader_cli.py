@@ -1663,3 +1663,30 @@ def test_live_price_ingest_yahoo_partial_failure_exits_nonzero(
     captured = capsys.readouterr()
     assert result == 2  # one symbol failed -> non-zero, failure visible
     assert "BAD" in captured.out
+
+
+def test_live_dry_run_submit_fake_is_armed_not_crashed(tmp_path, capsys) -> None:
+    # --submit-fake flips dry_run=False; the runner's fail-closed arming guard must be
+    # satisfied by the drill's synthetic equity — not crash with ValueError (Codex P2).
+    result = cli.main(
+        [
+            "live-dry-run",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--submit-fake",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Live Order Gate" in captured.out
+    assert "filled" in captured.out  # fake broker filled the armed submission

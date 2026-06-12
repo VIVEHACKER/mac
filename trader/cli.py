@@ -2762,6 +2762,11 @@ def _run_live_dry_run(args: argparse.Namespace) -> int:
         policy=policy,
         marks={symbol: args.price},
         dry_run=not args.submit_fake,
+        # --submit-fake flips dry_run off, and the runner fail-closes any real submission
+        # without an armed kill-switch — arm it with the drill's synthetic account equity
+        # (Codex P2: this path used to crash with ValueError instead of printing the gate).
+        reference_equity=args.equity,
+        peak_equity=args.equity,
     )
     result = results[0]
     lines = [
