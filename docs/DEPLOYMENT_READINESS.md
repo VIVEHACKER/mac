@@ -16,9 +16,9 @@ broker keys, live kill-switch test) that code cannot satisfy.
 | Fundamental-coverage robustness | ✅ robust — no directional decay to 25% coverage |
 | Reproducibility (fundamentals) | ✅ pinned via content-hashed snapshot |
 | Backtest↔order-gen parity | ✅ both can pin the same snapshot |
-| Pre-trade risk path / kill switch | ✅ code present; ⚠️ untested under a live broker |
-| Paper-trading OOS | ❌ zero days completed |
-| Live env + broker keys | ❌ operator action required |
+| Pre-trade risk path / kill switch | ✅ drilled end-to-end vs BrokerAdapter stand-in (CI-enforced); fail-closed arming guard; ⚠️ real-Alpaca drill pending keys |
+| Paper-trading OOS | 🔄 accruing — 2 tracks (IDEAL T0 06-05, combined-80/20 T0 06-10) on automated daily cadence crons; first closed period ~07-06 |
+| Live env + broker keys | ❌ keys pending; ✅ live-prices DB populated (keyless yahoo EOD fallback) |
 | Independent (Codex) code review | ⚠️ blocked by usage limit (resets 2026-05-31) |
 
 ## What this means
@@ -85,17 +85,21 @@ is not.
 
 ## Remaining gaps to real money (ranked)
 
-| # | Gap | Owner | Severity |
-|---|---|---|---|
-| 1 | Zero paper-trading OOS — run ≥30 (ideally 90–180) paper days first | operator | blocker |
-| 2 | Live kill-switch / halt latch never exercised against a real broker | operator + code | blocker |
-| 3 | Broker (Alpaca) keys not provisioned/verified; live-prices DB not populated | operator | blocker |
-| 4 | Independent Codex review incomplete (usage limit → 2026-05-31) | operator | blocker |
-| 5 | Fundamentals refresh + re-snapshot is manual & unscheduled (stale-data risk) | code/ops | high |
-| 6 | 21-trading-day rebalance cadence not calendar-gated in code | code | high |
-| 7 | Kelly sizing not applied (defaults to full exposure); cap ≤0.10–0.25 | operator/code | high |
-| 8 | Single-strategy concentration; no portfolio-level diversification/hedge | operator | high |
-| 9 | Price leg not pinned (see caveat); tax/fee drag unmodeled | code | medium |
+(status refreshed 2026-06-12 — the integrity/breadth program closed several of the
+original gaps; closures cite their evidence)
+
+| # | Gap | Owner | Severity | Status |
+|---|---|---|---|---|
+| 1 | Paper-trading OOS ≥30 (ideally 90–180) days | operator | **blocker** | 🔄 accruing — 2 automated tracks (IDEAL + combined-80/20), first closed period ~07-06; `paper_oos score` pipeline drilled on both |
+| 2 | Kill-switch / halt latch vs a real broker | operator + code | **blocker** | ◐ logic drilled end-to-end vs BrokerAdapter stand-in (CI: test_kill_switch_drill) + fail-closed arming guard; remaining: adapter-level drill vs real Alpaca (needs keys) |
+| 3 | Broker (Alpaca) keys; live-prices DB | operator | **blocker** | ◐ keys pending; DB populated via keyless `live-price-ingest --source yahoo` |
+| 4 | Independent Codex review | operator | — | ✅ closed 2026-06-12 — full-program review (af74961→main); both findings (P1 untracked forecast modules, P2 submit-fake arming crash) fixed |
+| 5 | Fundamentals refresh + re-snapshot manual/unscheduled | code/ops | high | ❌ open |
+| 6 | 21-trading-day cadence not calendar-gated in code | code | — | ✅ closed — cadence gates wired to daily crons (paper_drill_cadence 13:15, paper_drill_combined 13:20) |
+| 7 | Risk-aware sizing not applied (full exposure default) | operator/code | high | ◐ infrastructure built (`sized_targets`: vol-target/risk-cap/hard-cap; Kelly only with a real edge estimate) — opt-in, NOT adopted into the deploy candidate (fidelity: re-validate first) |
+| 8 | Single-strategy concentration | operator | high | ◐ combined IDEAL80/lowvol20 passed all backtest gates (3 bars, fee stress, family PBO 0.330) and is accruing its own paper track; not adopted for capital |
+| 9 | Price leg not pinned; fee drag unmodeled | code | — | ✅ closed — canonical pinned price snapshot + `TRADER_REQUIRE_PINNED` fail-closed gate; after-cost validated at 5/10 bps (+7.87%/+7.40%) |
+| 10 | Portfolio-level exposure monitoring | code | — | ✅ closed — `trader paper-exposure` (gross/net/single-name vs limits, fail-closed on stale marks) over `risk/exposure.py` |
 
 ## Go / no-go checklist (before any real capital)
 

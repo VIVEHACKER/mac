@@ -1690,3 +1690,65 @@ def test_live_dry_run_submit_fake_is_armed_not_crashed(tmp_path, capsys) -> None
     assert result == 0
     assert "Live Order Gate" in captured.out
     assert "filled" in captured.out  # fake broker filled the armed submission
+
+
+def _paper_state(out_dir: Path, strategy_id: str, positions: dict, nav: float = 100_000.0) -> None:
+    import json
+
+    (out_dir / f"paper-drill-state-{strategy_id}.json").write_text(
+        json.dumps(
+            {
+                "nav": nav,
+                "peak": nav,
+                "last_rebal": "2026-06-10",
+                "positions": positions,
+                "strategy_id": strategy_id,
+            }
+        )
+    )
+
+
+def test_paper_exposure_reports_and_passes(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr("scripts.paper_drill.OUT_DIR", tmp_path)  # isolate state files
+    sid = "exposure-test"
+    _paper_state(tmp_path, sid, {"AAA": 100, "BBB": 50})
+    db = tmp_path / "cat.duckdb"
+    MarketDataCatalog(db).put_bars(
+        [_yahoo_bar("AAA", 100.0), _yahoo_bar("BBB", 200.0)]
+    )
+    # _yahoo_bar stamps 2026-06-09; allow that age so the marks count as fresh.
+    result = cli.main(
+        ["paper-exposure", "--strategy-id", sid, "--catalog-db", str(db), "--max-mark-age-days", "9999"]
+    )
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Limits: PASS" in captured.out
+    assert "AAA" in captured.out and "20.00%" in captured.out  # 50*200/100k
+
+
+def test_paper_exposure_fails_closed_on_missing_mark(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr("scripts.paper_drill.OUT_DIR", tmp_path)
+    sid = "exposure-missing"
+    _paper_state(tmp_path, sid, {"AAA": 100, "ZZZ": 10})
+    db = tmp_path / "cat.duckdb"
+    MarketDataCatalog(db).put_bars([_yahoo_bar("AAA", 100.0)])
+    result = cli.main(
+        ["paper-exposure", "--strategy-id", sid, "--catalog-db", str(db), "--max-mark-age-days", "9999"]
+    )
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "FAIL-CLOSED" in captured.out and "ZZZ" in captured.out
+
+
+def test_paper_exposure_flags_breach(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr("scripts.paper_drill.OUT_DIR", tmp_path)
+    sid = "exposure-breach"
+    _paper_state(tmp_path, sid, {"AAA": 400}, nav=100_000.0)  # 40% single name
+    db = tmp_path / "cat.duckdb"
+    MarketDataCatalog(db).put_bars([_yahoo_bar("AAA", 100.0)])
+    result = cli.main(
+        ["paper-exposure", "--strategy-id", sid, "--catalog-db", str(db), "--max-mark-age-days", "9999"]
+    )
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "BREACH" in captured.out and "single-name AAA" in captured.out

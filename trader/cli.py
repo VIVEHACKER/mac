@@ -81,6 +81,7 @@ from engine.walkforward import (
     run_factor_walk_forward,
 )
 from risk.equity_track import EquityTrackStore
+from risk.exposure import ExposureLimits, build_exposure_report, check_exposure_limits
 from risk.halt_state import HaltStateStore
 from risk.kill_switch import check_kill_switch
 from risk.policy import RiskPolicy
@@ -154,6 +155,7 @@ CORE_COMMANDS = {
     "valuate",
     "entry",
     "paper",
+    "paper-exposure",
     "risk-check",
     "live-policy",
     "live-readiness",
@@ -231,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_entry(parsed)
     if parsed.command == "paper":
         return _run_paper(parsed)
+    if parsed.command == "paper-exposure":
+        return _run_paper_exposure(parsed)
     if parsed.command == "risk-check":
         return _run_risk_check(parsed)
     if parsed.command == "live-policy":
@@ -750,6 +754,28 @@ def build_parser() -> argparse.ArgumentParser:
     risk_check.add_argument("--max-gross-exposure", type=float, default=1.0)
 
     sub.add_parser("live-policy", help="Show required live-trading environment gates.")
+
+    paper_exposure = sub.add_parser(
+        "paper-exposure",
+        help="Portfolio exposure report for a paper-drill book (gross/net/single-name) "
+        "against policy limits, marked from the live price catalog.",
+    )
+    paper_exposure.add_argument(
+        "--strategy-id",
+        default="aqr_top7_cap20_trail10_pit110",
+        help="paper-drill strategy id (state file out/paper-drill-state-<id>.json)",
+    )
+    paper_exposure.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
+    paper_exposure.add_argument("--max-mark-age-days", type=int, default=5)
+    paper_exposure.add_argument(
+        "--max-gross",
+        type=float,
+        default=1.10,
+        help="gross/net limit vs state NAV. Paper NAV is NOT marked-to-market, so gains "
+        "inflate gross past 100%% — the 10%% headroom avoids false breaches on an "
+        "unlevered book. Tighten for live books (real broker equity IS marked).",
+    )
+    paper_exposure.add_argument("--max-single-name", type=float, default=0.25)
 
     live_readiness = sub.add_parser(
         "live-readiness",
@@ -2634,6 +2660,100 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
             )
     print("\n".join(lines))
     return 0 if not issues else 2
+
+
+def _run_paper_exposure(args: argparse.Namespace) -> int:
+    """Exposure report for a paper book: state positions x latest catalog marks vs limits.
+
+    Fail-closed: a position without a fresh mark (catalog miss, or older than
+    --max-mark-age-days) aborts with the missing symbols listed — run
+    `trader live-price-ingest "<syms>" --source yahoo` to refresh, rather than
+    silently valuing a book on stale prices.
+    """
+    import json as _json
+
+    from scripts.paper_drill import state_path_for  # lazy: keeps yfinance off this path
+
+    state_path = state_path_for(args.strategy_id)
+    if not state_path.exists():
+        print(f"no paper state for {args.strategy_id!r} ({state_path.name} missing)")
+        return 2
+    state = _json.loads(state_path.read_text())
+    positions_qty: dict[str, float] = {
+        sym: float(qty) for sym, qty in (state.get("positions") or {}).items() if float(qty) != 0
+    }
+    nav = float(state.get("nav") or 0.0)
+    if not positions_qty:
+        print(
+            f"paper book {args.strategy_id} holds no positions (NAV ${nav:,.2f}) — nothing to report"
+        )
+        return 0
+
+    catalog = MarketDataCatalog(args.catalog_db)
+    today = date.today()
+    marks: dict[str, tuple[float, date]] = {}
+    stale_or_missing: list[str] = []
+    for sym in sorted(positions_qty):
+        bars = catalog.get_bars(sym, market="us", freq="1d")
+        if not bars:
+            stale_or_missing.append(sym)
+            continue
+        last = bars[-1]
+        if (today - last.ts).days > args.max_mark_age_days:
+            stale_or_missing.append(f"{sym}(stale {last.ts})")
+            continue
+        marks[sym] = (float(last.close), last.ts)
+    if stale_or_missing:
+        print(
+            f"FAIL-CLOSED: no fresh mark for {', '.join(stale_or_missing)} "
+            f"(max age {args.max_mark_age_days}d). Refresh with:\n"
+            f'  .venv/bin/trader live-price-ingest "{",".join(sorted(positions_qty))}" --source yahoo'
+        )
+        return 2
+
+    snapshots = [
+        PositionSnapshot(
+            symbol=sym,
+            market="us",
+            qty=qty,
+            market_value=qty * marks[sym][0],
+            avg_entry_price=0.0,
+        )
+        for sym, qty in positions_qty.items()
+    ]
+    equity = nav if nav > 0 else sum(p.market_value for p in snapshots)
+    report = build_exposure_report(snapshots, equity)
+    check = check_exposure_limits(
+        report,
+        ExposureLimits(
+            max_gross_exposure=args.max_gross,
+            # Long-only paper book: net == gross, so the same headroom applies (see --max-gross).
+            max_net_exposure=args.max_gross,
+            max_single_name=args.max_single_name,
+        ),
+    )
+
+    lines = [
+        f"# Paper Exposure — {args.strategy_id}",
+        "",
+        f"NAV (state): ${nav:,.2f} | marked book: ${sum(p.market_value for p in snapshots):,.2f}",
+        f"Gross {report.gross_exposure:.2%} | Net {report.net_exposure:.2%} | "
+        f"Top {report.top_symbol} {report.top_weight:.2%}",
+        "",
+        "| Symbol | Qty | Mark | Mark Date | Value | Weight |",
+        "|---|---:|---:|---|---:|---:|",
+    ]
+    for snap in sorted(snapshots, key=lambda p: -abs(p.market_value)):
+        mark, mark_date = marks[snap.symbol]
+        lines.append(
+            f"| {snap.symbol} | {snap.qty:g} | ${mark:,.2f} | {mark_date} | "
+            f"${snap.market_value:,.2f} | {report.symbol_weights[snap.symbol]:.2%} |"
+        )
+    lines += ["", f"Limits: {'PASS' if check.passed else 'BREACH'}"]
+    for reason in check.reasons:
+        lines.append(f"- {reason}")
+    print("\n".join(lines))
+    return 0 if check.passed else 2
 
 
 def _run_live_price_ingest(args: argparse.Namespace) -> int:
