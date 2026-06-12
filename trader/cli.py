@@ -301,7 +301,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     chart_read = sub.add_parser(
         "chart-read",
-        help="Read the chart (FVG/OB/매물대/볼륨/호가/OI/패턴) and recommend entry timing.",
+        help="Read the chart (FVG/OB/매물대/볼륨/호가/OI/패턴) — ADVISORY context only. "
+        "Validation found NO predictive edge in the entry states (ENTER hit-rate 38-42%%, "
+        "IC negative at all horizons; docs/CHART_VALIDATION.md): not an entry trigger.",
     )
     _add_market_symbol_args(chart_read)
     chart_read.add_argument(

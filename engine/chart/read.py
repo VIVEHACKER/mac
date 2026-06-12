@@ -1069,6 +1069,11 @@ def format_chart_read(read: ChartRead) -> str:
     lines.append("=" * 64)
     lines.append(f" 차트 리딩 — {read.symbol} ({read.market}) {read.timeframe} @ {read.asof}")
     lines.append("=" * 64)
+    # The validation verdict travels WITH the output, not buried in docs: entry states
+    # have no predictive edge (ENTER 적중률 38-42%, IC 전 horizon 음수 — CHART_VALIDATION.md).
+    lines.append(" ⚠ ADVISORY — 검증 결과 진입 신호 엣지 없음. 진입 트리거로 사용 금지,")
+    lines.append("   참고용 컨텍스트 전용 (docs/CHART_VALIDATION.md).")
+    lines.append("-" * 64)
     lines.append(f" 방향        : {dir_kr}")
     lines.append(f" 결정        : {read.decision.value}")
     lines.append(f" 컨플루언스  : {read.confluence:.1f} / 100")
