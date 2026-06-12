@@ -3,3 +3,6 @@ out/
 __pycache__/
 *.pyc
 
+.fred_cache/
+.harness/
+.claude/
