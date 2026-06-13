@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import cast
 
 from data.models import PriceBar
 from engine.chart.read import _range_position, read_chart
@@ -55,7 +56,7 @@ def _zigzag(anchors: list[tuple[str, float]], seg: int = 8) -> list[PriceBar]:
 
 
 # Bullish, ending on a fresh high → premium close.
-_PREMIUM = [
+_PREMIUM: list[tuple[str, float]] = [
     ("L", 100),
     ("H", 120),
     ("L", 110),
@@ -66,7 +67,7 @@ _PREMIUM = [
     ("H", 165),
 ]
 # Bullish, ending on a deep pullback (still a higher low) → discount close.
-_DISCOUNT = [
+_DISCOUNT: list[tuple[str, float]] = [
     ("L", 100),
     ("H", 120),
     ("L", 110),
@@ -92,7 +93,7 @@ def test_mean_reversion_vetoes_premium_chase_long() -> None:
     off = read_chart(bars, direction="long", mean_reversion=False)
 
     assert on.trend_bias is TrendBias.BULLISH  # not RANGING — isolates the location gate
-    assert on.features["range_pos"] > 0.6  # premium
+    assert cast(float, on.features["range_pos"]) > 0.6  # premium
     assert on.vetoed is True
     assert "프리미엄" in str(on.features["veto_reason"])
     assert on.decision is EntryState.AVOID
@@ -106,7 +107,7 @@ def test_mean_reversion_allows_discount_long() -> None:
     off = read_chart(bars, direction="long", mean_reversion=False)
 
     assert on.trend_bias is TrendBias.BULLISH
-    assert on.features["range_pos"] < 0.6  # discount — gate must stay inert
+    assert cast(float, on.features["range_pos"]) < 0.6  # discount — gate must stay inert
     assert "프리미엄" not in str(on.features["veto_reason"])
     assert on.decision is off.decision  # the gate changes nothing in discount
 

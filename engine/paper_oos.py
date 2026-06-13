@@ -13,9 +13,12 @@ are passed in) so it stays pure and testable.
 
 from __future__ import annotations
 
+import csv
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 
 from engine.significance import per_period_sharpe
@@ -72,6 +75,88 @@ def append_entry(path: Path, entry: PaperOOSEntry) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(asdict(entry), default=str) + "\n")
+
+
+def load_mark_price_history_csv(path: Path) -> dict[str, dict[str, float]]:
+    """Load a close-price CSV as ``date -> symbol -> close`` marks.
+
+    The first column is treated as the date column (``Date``/``date``/pandas index);
+    every other numeric column is treated as a symbol. Empty/non-numeric cells are
+    skipped so sparse price files can still score the periods with available marks.
+    """
+
+    history: dict[str, dict[str, float]] = {}
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            return history
+        date_column = _detect_date_column(reader.fieldnames)
+        for row in reader:
+            raw_date = row.get(date_column, "").strip()
+            if not raw_date:
+                continue
+            mark_date = date.fromisoformat(raw_date[:10]).isoformat()
+            marks: dict[str, float] = {}
+            for column, raw_value in row.items():
+                if column == date_column or raw_value is None:
+                    continue
+                value = raw_value.strip()
+                if not value:
+                    continue
+                try:
+                    marks[column.strip().upper()] = float(value)
+                except ValueError:
+                    continue
+            if marks:
+                history[mark_date] = marks
+    return history
+
+
+def mark_prices_at_dates(
+    price_history: dict[str, dict[str, float]],
+    dates: list[str],
+    *,
+    max_staleness_days: int | None = None,
+) -> dict[str, dict[str, float]]:
+    """Return last available marks at or before each requested ISO date.
+
+    Freshness is tracked PER SYMBOL, not per row: ``load_mark_price_history_csv``
+    permits sparse rows (a date may carry only some symbols), so a later SPY-only
+    row must not erase a held symbol's still-fresh earlier close. Each symbol keeps
+    its own most-recent (date, value).
+
+    ``max_staleness_days`` bounds how far a mark may be carried forward, applied per
+    symbol: a symbol whose most recent close is older than that many days is dropped
+    from the requested date, so a stale price file cannot silently score later
+    closed periods with frozen prices (a forward-OOS integrity hazard for the
+    live-readiness gate). ``None`` keeps unbounded carry-forward.
+    """
+
+    available_dates = sorted(date.fromisoformat(mark_date) for mark_date in price_history)
+    marks: dict[str, dict[str, float]] = {}
+    latest_by_symbol: dict[str, tuple[date, float]] = {}
+    cursor = 0
+    for requested in sorted({date.fromisoformat(item[:10]) for item in dates}):
+        while cursor < len(available_dates) and available_dates[cursor] <= requested:
+            observed = available_dates[cursor]
+            for symbol, value in price_history[observed.isoformat()].items():
+                latest_by_symbol[symbol] = (observed, value)
+            cursor += 1
+        row = {
+            symbol: value
+            for symbol, (observed, value) in latest_by_symbol.items()
+            if max_staleness_days is None or (requested - observed).days <= max_staleness_days
+        }
+        if row:
+            marks[requested.isoformat()] = row
+    return marks
+
+
+def _detect_date_column(fieldnames: Sequence[str]) -> str:
+    for candidate in fieldnames:
+        if candidate.strip().lower() in {"date", "ts", "timestamp", "datetime"}:
+            return candidate
+    return fieldnames[0]
 
 
 def _period_return(entry: PaperOOSEntry, marks: dict[str, float]) -> float | None:

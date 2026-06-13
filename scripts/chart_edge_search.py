@@ -197,8 +197,8 @@ def main() -> int:
             obs.extend(o)
             print(f"  {sym} (1d): {len(bars)} bars → {len(o)} obs")
         with open(cache, "w") as fh:
-            for o in obs:
-                fh.write(json.dumps(o) + "\n")
+            for row in obs:
+                fh.write(json.dumps(row) + "\n")
         print(f"[saved] {cache}: {len(obs)} obs")
 
     print("\n가설: ACT 신호를 디스카운트(되돌림) 구간으로 조건화하면 엣지가 양으로 뒤집히는가?")

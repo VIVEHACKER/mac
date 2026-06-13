@@ -1,6 +1,6 @@
 # Deployment Readiness — IDEAL line (`aqr_top7_cap20_trail10`)
 
-_Last assessed: 2026-05-29. Research-only; not investment advice._
+_Last assessed: 2026-06-13. Research-only; not investment advice._
 
 ## Verdict
 
@@ -14,8 +14,8 @@ broker keys, live kill-switch test) that code cannot satisfy.
 |---|---|
 | Statistical edge (OOS) | ✅ strong — Sharpe 1.40, PSR 100%, bootstrap CI [0.92, 1.92] |
 | Fundamental-coverage robustness | ✅ robust — no directional decay to 25% coverage |
-| Reproducibility (fundamentals) | ✅ pinned via content-hashed snapshot |
-| Backtest↔order-gen parity | ✅ both can pin the same snapshot |
+| Reproducibility (fundamentals + prices) | ✅ pinned via content-hashed snapshots |
+| Backtest↔order-gen parity | ✅ backtest and order generation can pin matching snapshots |
 | Pre-trade risk path / kill switch | ✅ drilled end-to-end vs BrokerAdapter stand-in (CI-enforced); fail-closed arming guard; ⚠️ real-Alpaca drill pending keys |
 | Paper-trading OOS | 🔄 accruing — 2 tracks (IDEAL T0 06-05, combined-80/20 T0 06-10) on automated daily cadence crons; first closed period ~07-06 |
 | Live env + broker keys | ❌ keys pending; ✅ live-prices DB populated (keyless yahoo EOD fallback) |
@@ -78,10 +78,9 @@ is not.
 - Survivorship: the 106-name universe is PIT-sourced but `pit-2008-backfill`, not
   a true historical membership feed. Real alpha is estimated at +5–8%/yr after
   this and fees.
-- **Prices are NOT pinned** — `yfinance` OHLC can revise, so the *price* leg of a
-  backtest is not byte-reproducible (the observed Variant N break was
-  fundamentals, with prices identical; still, pin prices before claiming full
-  end-to-end reproducibility).
+- Prices are now pinned for canonical validation (`prices-ideal-2026-06-01`), but
+  live operation still depends on a fresh mark source for execution sizing. Treat
+  stale or missing marks as a hard pre-trade block.
 
 ## Remaining gaps to real money (ranked)
 
@@ -90,7 +89,7 @@ original gaps; closures cite their evidence)
 
 | # | Gap | Owner | Severity | Status |
 |---|---|---|---|---|
-| 1 | Paper-trading OOS ≥30 (ideally 90–180) days | operator | **blocker** | 🔄 accruing — 2 automated tracks (IDEAL + combined-80/20), first closed period ~07-06; `paper_oos score` pipeline drilled on both |
+| 1 | Paper-trading OOS ≥30 days plus scoreable ledger periods/performance | operator + code | **blocker** | 🔄 accruing — 2 automated tracks (IDEAL + combined-80/20), first closed period ~07-06; `live-readiness` now fails `alpaca-live` until `LIVE_MIN_PAPER_OOS_PERIODS` and `LIVE_MIN_PAPER_OOS_VS_BACKTEST` are met from `LIVE_PAPER_OOS_PRICES` |
 | 2 | Kill-switch / halt latch vs a real broker | operator + code | **blocker** | ◐ logic drilled end-to-end vs BrokerAdapter stand-in (CI: test_kill_switch_drill) + fail-closed arming guard; remaining: adapter-level drill vs real Alpaca (needs keys) |
 | 3 | Broker (Alpaca) keys; live-prices DB | operator | **blocker** | ◐ keys pending; DB populated via keyless `live-price-ingest --source yahoo` |
 | 4 | Independent Codex review | operator | — | ✅ closed 2026-06-12 — full-program review (af74961→main); both findings (P1 untracked forecast modules, P2 submit-fake arming crash) fixed |
@@ -100,6 +99,7 @@ original gaps; closures cite their evidence)
 | 8 | Single-strategy concentration | operator | high | ◐ combined IDEAL80/lowvol20 passed all backtest gates (3 bars, fee stress, family PBO 0.330) and is accruing its own paper track; not adopted for capital |
 | 9 | Price leg not pinned; fee drag unmodeled | code | — | ✅ closed — canonical pinned price snapshot + `TRADER_REQUIRE_PINNED` fail-closed gate; after-cost validated at 5/10 bps (+7.87%/+7.40%) |
 | 10 | Portfolio-level exposure monitoring | code | — | ✅ closed — `trader paper-exposure` (gross/net/single-name vs limits, fail-closed on stale marks) over `risk/exposure.py` |
+| 11 | Crisis stress-window evidence (live gate's `min_stress_windows=2`, `worst≥+30%`) | code/operator | **blocker** | ◐ MEASURED (`scripts/stress_windows_validation.py` → `out/aqr-ideal-stress-windows.md`): 3 windows (COVID +35.07%, 2022 +23.12%, 2018Q4 −16.42%; GFC untestable pre-2008 pin). Fails absolute +30% bar AND relative bar (2018Q4 excess −5.40% — momentum fell MORE than SPY). The +30% bar was built for crash-HEDGED sleeves; a long-only book can't meet it. **Operator decision: add a hedge sleeve (re-validate) OR adopt a strategy-appropriate stress gate.** Will NOT lower the threshold to force a pass |
 
 ## Go / no-go checklist (before any real capital)
 
@@ -112,7 +112,9 @@ original gaps; closures cite their evidence)
    header must read `Fundamentals: snapshot:<name>` (never `LIVE-CATALOG`).
 4. Run the `live-dry-run` block; confirm pre-trade gates pass.
 5. Paper-trade ≥30 days; reconcile fills (`trader live-reconcile`).
-6. Complete the Codex review (after 2026-05-31).
+6. Confirm `trader live-readiness` passes; for `alpaca-live` this includes the
+   current paper OOS ledger meeting `LIVE_MIN_PAPER_OOS_PERIODS` scoreable closed
+   periods and `LIVE_MIN_PAPER_OOS_VS_BACKTEST` using `LIVE_PAPER_OOS_PRICES`.
 7. Set `LIVE_*` gates (see `LIVE_OPERATIONS.md`), start at ≤5% capital, Kelly ≤0.25.
 
 Live activation (`LIVE_TRADING_ENABLED`, broker keys, capital) is an explicit

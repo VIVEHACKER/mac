@@ -18,6 +18,10 @@ LIVE_MAX_CAPITAL=<maximum capital this system may use>
 LIVE_POLICY_VERSION=<risk policy version>
 LIVE_MIN_PAPER_DAYS=30
 LIVE_MIN_SHADOW_DAYS=10
+LIVE_MIN_PAPER_OOS_PERIODS=6
+LIVE_MIN_PAPER_OOS_VS_BACKTEST=0.5
+LIVE_PAPER_OOS_BACKTEST_EXCESS=0.08
+LIVE_PAPER_OOS_PRICES=<CSV with Date,<symbols>,SPY closes>
 LIVE_MAX_LIMIT_DEVIATION=0.03
 LIVE_MAX_MARK_DEVIATION=0.02
 LIVE_CATALOG_DB=data/store/live-prices.duckdb
@@ -36,10 +40,14 @@ of approved capital.
 `LIVE_ORDER_SUBMISSION_ENABLED` is a separate final switch. Keep it unset during
 research, backtesting, paper, and shadow drills.
 
-For `alpaca-live`, the default drill requirement is 30 paper days and 10 shadow
-days if `LIVE_MIN_PAPER_DAYS` / `LIVE_MIN_SHADOW_DAYS` are unset. Market orders
-are disabled by default in the live risk policy; set `LIVE_ALLOW_MARKET_ORDERS=true`
-only for a documented exception.
+For `alpaca-live`, the default drill requirement is 30 paper days, 10 shadow
+days, 6 scoreable paper-OOS ledger periods, and live/backtest excess ratio ≥0.5x
+if `LIVE_MIN_PAPER_DAYS`, `LIVE_MIN_SHADOW_DAYS`,
+`LIVE_MIN_PAPER_OOS_PERIODS`, and `LIVE_MIN_PAPER_OOS_VS_BACKTEST` are unset.
+`LIVE_PAPER_OOS_PRICES` must point to a close-price CSV so the ledger periods can
+be scored, not merely counted. Market orders are disabled by default in the live
+risk policy; set `LIVE_ALLOW_MARKET_ORDERS=true` only for a documented
+exception.
 
 `live-readiness`, `live-submit`, and `live-price-ingest` default to
 `LIVE_CATALOG_DB` instead of the research/backtest catalog. Keep live prices in
@@ -428,11 +436,17 @@ risk path (`risk/pretrade.py`) without broker calls.
 
 ### Paper, then live (operator decision — fail closed)
 
-Live is gated by the env vars in "Live Gates" above plus `live-readiness`. The
-recommended path before any live capital:
+Live is gated by the env vars in "Live Gates" above plus `live-readiness`. For
+`alpaca-live`, `live-readiness` also fails closed until the current strategy's
+`out/paper-oos-ledger-<strategy_id>.jsonl` has at least
+`LIVE_MIN_PAPER_OOS_PERIODS` scoreable closed periods using
+`LIVE_PAPER_OOS_PRICES`, and the live/backtest excess ratio is at least
+`LIVE_MIN_PAPER_OOS_VS_BACKTEST`. The recommended path before any live capital:
 
 1. Alpaca **paper** keys in `.env`; run the `live-submit` block monthly for
-   `LIVE_MIN_PAPER_DAYS` (default 30) — really 3-6 months for this strategy.
+   `LIVE_MIN_PAPER_DAYS` (default 30) and at least
+   `LIVE_MIN_PAPER_OOS_PERIODS` scoreable closed ledger periods (default 6) —
+   really 3-6 months for this strategy.
 2. Validate fills reconcile (`trader live-reconcile`).
 3. Only then consider `alpaca-live` with ≤5% of capital and Kelly ≤ 0.25.
 

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-import pytest
-
 from data.models import FundamentalRecord, PriceBar
 from valuation.recommendation import (
     AQREvaluation,
@@ -146,6 +144,7 @@ def test_format_evaluation_renders_key_sections() -> None:
     assert "Confidence" in report or "신뢰도" in report
     assert "Entry" in report or "평균" in report
     # The laddered average buy price must appear (the core of profit maximization).
+    assert result.entry_plan is not None
     assert f"{result.entry_plan.target_entry:.2f}" in report
 
 
@@ -285,15 +284,13 @@ def test_format_scan_renders_ranked_table_with_holdings_marked() -> None:
 
 
 def test_load_validated_strategy_reads_shipped_ideal_baseline() -> None:
-    # The shipped baseline is provisional, so loading it must warn the caller.
-    with pytest.warns(UserWarning, match="PROVISIONAL"):
-        strategy = load_validated_strategy()
+    strategy = load_validated_strategy()
 
     assert isinstance(strategy, ValidatedStrategy)
     assert strategy.strategy_id == "aqr_top7_cap20_trail10"
     assert strategy.top_n == 7
     assert strategy.lookback == 126
-    assert strategy.provisional is True
+    assert strategy.provisional is False
     assert 0.0 <= strategy.wf_positive_rate <= 1.0
     assert 0.0 <= strategy.psr <= 1.0
     assert 0.0 <= strategy.dsr <= 1.0

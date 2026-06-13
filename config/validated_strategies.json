@@ -1,5 +1,5 @@
 {
-  "_note": "Validated anchor strategies for the recommender. Reliability stats are read by valuation/confidence.py. The IDEAL baseline numbers come from out/MASTER-REPORT-2008-2026.md (gate-approved aqr_top7_cap20_trail10). psr/dsr are PROVISIONAL conservative placeholders pending the P3 re-validation harness, which will regenerate this file from engine/significance.py output.",
+  "_note": "Validated anchor strategies for the recommender. Reliability stats are read by valuation/confidence.py. The IDEAL baseline numbers come from pinned walk-forward + PBO evidence: out/aqr-ideal-walkforward-fee10.md and out/aqr-pbo-validation.md. Backtest return size is still fragile/survivorship-inflated, so use SPY-excess and paper OOS before capital.",
   "default": "aqr_top7_cap20_trail10",
   "strategies": {
     "aqr_top7_cap20_trail10": {
@@ -8,10 +8,13 @@
       "top_n": 7,
       "lookback": 126,
       "wf_positive_rate": 0.87,
-      "psr": 0.80,
-      "dsr": 0.55,
-      "provisional": true,
-      "source": "out/MASTER-REPORT-2008-2026.md + out/aqr-ideal-grid.md"
+      "psr": 1.00,
+      "dsr": 1.00,
+      "pbo": 0.39,
+      "avg_excess_after_cost": 0.074,
+      "fee_bps": 10,
+      "provisional": false,
+      "source": "out/aqr-ideal-walkforward-fee10.md + out/aqr-pbo-validation.md"
     }
   }
 }

@@ -206,8 +206,11 @@ AQR 신호가 횡단면이라 **한 번의 패스로 검증 유니버스(106종)
 
 ### 설정 — `config/validated_strategies.json`
 추천기의 앵커 전략과 신뢰도 통계(wf_positive_rate/psr/dsr)는 이 파일에서 로드한다.
-`aqr_top7_cap20_trail10`(gate-approved IDEAL 베이스라인)이 기본값. psr/dsr는 **잠정
-보수값**이며 P3 재검증 하니스가 `engine/significance.py` 출력으로 갱신할 예정.
+`aqr_top7_cap20_trail10`(gate-approved IDEAL 베이스라인)이 기본값. 현재 값은 pinned
+walk-forward + PBO 산출물 기준이다: 10bps 비용 반영 평균 SPY 초과 +7.40%/yr,
+positive 86.7%, baseline PSR/DSR 1.00. 단 PBO 0.390으로 **수익률 크기/설정 선택은
+fragile**하므로 추천기는 신뢰도 calibration에만 쓰고, 실자금 투입은 paper OOS ledger가
+성숙한 뒤 별도 승인한다.
 
 ### 실행
 ```bash

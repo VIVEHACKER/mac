@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
 from trader.execution.rebalance import sized_targets
+
+
+class _SizedTargetArgs(TypedDict):
+    aum: float
+    marks: dict[str, float]
+    vols: dict[str, float]
+
+
+class _SizedTargetArgsWithDownside(_SizedTargetArgs):
+    downside_pct: float
 
 
 def test_all_targets_respect_hard_concentration_cap() -> None:
@@ -18,14 +30,18 @@ def test_all_targets_respect_hard_concentration_cap() -> None:
 
 
 def test_higher_downside_shrinks_position() -> None:
-    common = {"aum": 1_000_000.0, "marks": {"AAA": 100.0}, "vols": {"AAA": 0.35}}
+    common: _SizedTargetArgs = {
+        "aum": 1_000_000.0,
+        "marks": {"AAA": 100.0},
+        "vols": {"AAA": 0.35},
+    }
     low = sized_targets(["AAA"], downside_pct=0.20, **common)[0]
     high = sized_targets(["AAA"], downside_pct=0.40, **common)[0]
     assert high.target_qty <= low.target_qty
 
 
 def test_kelly_edge_can_reduce_size() -> None:
-    common = {
+    common: _SizedTargetArgsWithDownside = {
         "aum": 1_000_000.0,
         "marks": {"AAA": 100.0},
         "vols": {"AAA": 0.35},

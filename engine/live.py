@@ -21,6 +21,9 @@ class LiveTradingPolicy:
     policy_version: str
     min_paper_days: int = 0
     min_shadow_days: int = 0
+    min_paper_oos_periods: int = 0
+    min_paper_oos_vs_backtest: float = 0.0
+    paper_oos_backtest_excess: float = 0.08
 
     @property
     def ready(self) -> bool:
@@ -47,6 +50,12 @@ def load_live_trading_policy() -> LiveTradingPolicy:
         policy_version=os.getenv("LIVE_POLICY_VERSION", "").strip(),
         min_paper_days=_env_int("LIVE_MIN_PAPER_DAYS", 30 if live_broker else 0),
         min_shadow_days=_env_int("LIVE_MIN_SHADOW_DAYS", 10 if live_broker else 0),
+        min_paper_oos_periods=_env_int("LIVE_MIN_PAPER_OOS_PERIODS", 6 if live_broker else 0),
+        min_paper_oos_vs_backtest=_env_float(
+            "LIVE_MIN_PAPER_OOS_VS_BACKTEST",
+            0.5 if live_broker else 0.0,
+        ),
+        paper_oos_backtest_excess=_env_float("LIVE_PAPER_OOS_BACKTEST_EXCESS", 0.08),
     )
 
 
