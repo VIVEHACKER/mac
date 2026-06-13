@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from math import exp, sin
 from pathlib import Path
@@ -723,6 +724,7 @@ def test_live_readiness_requires_paper_and_shadow_drills_for_live_broker(
         broker="alpaca-live",
         min_paper_days="1",
         min_shadow_days="1",
+        min_paper_oos_periods="0",
     )
 
     blocked = cli.main(
@@ -748,6 +750,347 @@ def test_live_readiness_requires_paper_and_shadow_drills_for_live_broker(
     assert blocked == 2
     assert "paper drill days 0 < 1" in captured.out
     assert "shadow drill days 0 < 1" in captured.out
+
+
+def test_live_readiness_requires_paper_oos_closed_periods_for_live_broker(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="2",
+    )
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--paper-oos-dir",
+            str(tmp_path / "oos"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "paper OOS closed periods 0 < 2" in captured.out
+
+
+def test_live_readiness_accepts_paper_oos_closed_periods_for_live_broker(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    paper_oos_dir = tmp_path / "oos"
+    paper_oos_prices = tmp_path / "paper-oos-prices.csv"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _write_paper_oos_ledger(
+        paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
+        strategy_id="approved-live",
+        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+    )
+    _write_paper_oos_prices(
+        paper_oos_prices,
+        rows=[
+            ("2026-04-01", 101.0, 100.0),
+            ("2026-05-01", 101.0, 100.0),
+        ],
+    )
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="2",
+    )
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--paper-oos-dir",
+            str(paper_oos_dir),
+            "--paper-oos-prices",
+            str(paper_oos_prices),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Ready | yes" in captured.out
+    assert "Required Paper OOS Periods | 2" in captured.out
+
+
+def test_live_readiness_ignores_future_paper_oos_rows_before_as_of(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    # Codex P2 (PIT): rebalances dated after --as-of were not knowable then and
+    # must not satisfy the closed-period gate. Only 2026-03-01 <= as_of survives,
+    # so closed periods = 0 < 2 and readiness must block.
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    paper_oos_dir = tmp_path / "oos"
+    paper_oos_prices = tmp_path / "paper-oos-prices.csv"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _write_paper_oos_ledger(
+        paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
+        strategy_id="approved-live",
+        rebal_dates=["2026-03-01", "2026-06-01", "2026-07-01"],  # 2 future rows
+    )
+    _write_paper_oos_prices(
+        paper_oos_prices,
+        rows=[("2026-06-01", 101.0, 100.0), ("2026-07-01", 101.0, 100.0)],
+    )
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="2",
+    )
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--paper-oos-dir",
+            str(paper_oos_dir),
+            "--paper-oos-prices",
+            str(paper_oos_prices),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "paper OOS closed periods 0 < 2" in captured.out
+
+
+def test_live_readiness_requires_paper_oos_prices_for_live_broker(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    paper_oos_dir = tmp_path / "oos"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _write_paper_oos_ledger(
+        paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
+        strategy_id="approved-live",
+        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+    )
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="2",
+    )
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--paper-oos-dir",
+            str(paper_oos_dir),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "paper OOS prices CSV is required" in captured.out
+
+
+def test_live_readiness_blocks_weak_paper_oos_ratio_for_live_broker(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    paper_oos_dir = tmp_path / "oos"
+    paper_oos_prices = tmp_path / "paper-oos-prices.csv"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _write_paper_oos_ledger(
+        paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
+        strategy_id="approved-live",
+        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+    )
+    _write_paper_oos_prices(
+        paper_oos_prices,
+        rows=[
+            ("2026-04-01", 100.0, 101.0),
+            ("2026-05-01", 100.0, 101.0),
+        ],
+    )
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="2",
+        min_paper_oos_vs_backtest="0.5",
+    )
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--paper-oos-dir",
+            str(paper_oos_dir),
+            "--paper-oos-prices",
+            str(paper_oos_prices),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "paper OOS live/backtest ratio" in captured.out
+
+
+def test_live_readiness_blocks_when_ratio_gate_required_but_uncomputable(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    # Codex P2 regression: ratio gate required (>0) but backtest excess is 0, so
+    # vs_backtest is None. The gate must BLOCK, not silently pass, with enough periods.
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    paper_oos_dir = tmp_path / "oos"
+    paper_oos_prices = tmp_path / "paper-oos-prices.csv"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _write_paper_oos_ledger(
+        paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
+        strategy_id="approved-live",
+        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+    )
+    _write_paper_oos_prices(
+        paper_oos_prices,
+        rows=[
+            ("2026-04-01", 100.0, 101.0),
+            ("2026-05-01", 100.0, 101.0),
+        ],
+    )
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-live",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="2",
+        min_paper_oos_vs_backtest="0.5",
+        paper_oos_backtest_excess="0",  # makes vs_backtest uncomputable
+    )
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--paper-oos-dir",
+            str(paper_oos_dir),
+            "--paper-oos-prices",
+            str(paper_oos_prices),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "ratio gate is required" in captured.out
+    assert "LIVE_PAPER_OOS_BACKTEST_EXCESS" in captured.out
 
 
 def test_live_readiness_reports_catalog_failure_without_traceback(
@@ -1031,6 +1374,9 @@ def _set_live_env(
     broker: str = "fake",
     min_paper_days: str | None = None,
     min_shadow_days: str | None = None,
+    min_paper_oos_periods: str | None = None,
+    min_paper_oos_vs_backtest: str | None = None,
+    paper_oos_backtest_excess: str | None = None,
 ) -> None:
     monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
     monkeypatch.setenv("LIVE_TRADING_ACK_RISK", "true")
@@ -1043,6 +1389,12 @@ def _set_live_env(
         monkeypatch.setenv("LIVE_MIN_PAPER_DAYS", min_paper_days)
     if min_shadow_days is not None:
         monkeypatch.setenv("LIVE_MIN_SHADOW_DAYS", min_shadow_days)
+    if min_paper_oos_periods is not None:
+        monkeypatch.setenv("LIVE_MIN_PAPER_OOS_PERIODS", min_paper_oos_periods)
+    if min_paper_oos_vs_backtest is not None:
+        monkeypatch.setenv("LIVE_MIN_PAPER_OOS_VS_BACKTEST", min_paper_oos_vs_backtest)
+    if paper_oos_backtest_excess is not None:
+        monkeypatch.setenv("LIVE_PAPER_OOS_BACKTEST_EXCESS", paper_oos_backtest_excess)
 
 
 def _approve_strategy(registry: Path, strategy_id: str) -> None:
@@ -1062,6 +1414,36 @@ def _approve_strategy(registry: Path, strategy_id: str) -> None:
         stress_passed=True,
     )
     cli.ResearchRegistry(registry).append(evidence, cli.evaluate_promotion(evidence))
+
+
+def _write_paper_oos_ledger(
+    path: Path,
+    *,
+    strategy_id: str,
+    rebal_dates: list[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for rebal_date in rebal_dates:
+        lines.append(
+            json.dumps(
+                {
+                    "rebal_date": rebal_date,
+                    "strategy_id": strategy_id,
+                    "weights": {"QQQ": 1.0},
+                    "entry_prices": {"QQQ": 100.0},
+                    "benchmark_symbol": "SPY",
+                    "benchmark_price": 100.0,
+                }
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_paper_oos_prices(path: Path, *, rows: list[tuple[str, float, float]]) -> None:
+    lines = ["Date,QQQ,SPY"]
+    lines.extend(f"{day},{qqq},{spy}" for day, qqq, spy in rows)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _bar(symbol: str, source: str) -> PriceBar:
@@ -1636,7 +2018,9 @@ def test_live_price_ingest_yahoo_fallback_is_keyless(tmp_path, capsys, monkeypat
     )
 
     db = tmp_path / "live.duckdb"
-    result = cli.main(["live-price-ingest", "QQQ,SPY", "--source", "yahoo", "--catalog-db", str(db)])
+    result = cli.main(
+        ["live-price-ingest", "QQQ,SPY", "--source", "yahoo", "--catalog-db", str(db)]
+    )
 
     captured = capsys.readouterr()
     assert result == 0
@@ -1657,7 +2041,14 @@ def test_live_price_ingest_yahoo_partial_failure_exits_nonzero(
 
     monkeypatch.setattr(cli, "fetch_yahoo_bars", fetch)
     result = cli.main(
-        ["live-price-ingest", "QQQ,BAD", "--source", "yahoo", "--catalog-db", str(tmp_path / "l.duckdb")]
+        [
+            "live-price-ingest",
+            "QQQ,BAD",
+            "--source",
+            "yahoo",
+            "--catalog-db",
+            str(tmp_path / "l.duckdb"),
+        ]
     )
 
     captured = capsys.readouterr()
@@ -1713,12 +2104,18 @@ def test_paper_exposure_reports_and_passes(tmp_path, capsys, monkeypatch) -> Non
     sid = "exposure-test"
     _paper_state(tmp_path, sid, {"AAA": 100, "BBB": 50})
     db = tmp_path / "cat.duckdb"
-    MarketDataCatalog(db).put_bars(
-        [_yahoo_bar("AAA", 100.0), _yahoo_bar("BBB", 200.0)]
-    )
+    MarketDataCatalog(db).put_bars([_yahoo_bar("AAA", 100.0), _yahoo_bar("BBB", 200.0)])
     # _yahoo_bar stamps 2026-06-09; allow that age so the marks count as fresh.
     result = cli.main(
-        ["paper-exposure", "--strategy-id", sid, "--catalog-db", str(db), "--max-mark-age-days", "9999"]
+        [
+            "paper-exposure",
+            "--strategy-id",
+            sid,
+            "--catalog-db",
+            str(db),
+            "--max-mark-age-days",
+            "9999",
+        ]
     )
     captured = capsys.readouterr()
     assert result == 0
@@ -1733,7 +2130,15 @@ def test_paper_exposure_fails_closed_on_missing_mark(tmp_path, capsys, monkeypat
     db = tmp_path / "cat.duckdb"
     MarketDataCatalog(db).put_bars([_yahoo_bar("AAA", 100.0)])
     result = cli.main(
-        ["paper-exposure", "--strategy-id", sid, "--catalog-db", str(db), "--max-mark-age-days", "9999"]
+        [
+            "paper-exposure",
+            "--strategy-id",
+            sid,
+            "--catalog-db",
+            str(db),
+            "--max-mark-age-days",
+            "9999",
+        ]
     )
     captured = capsys.readouterr()
     assert result == 2
@@ -1747,7 +2152,15 @@ def test_paper_exposure_flags_breach(tmp_path, capsys, monkeypatch) -> None:
     db = tmp_path / "cat.duckdb"
     MarketDataCatalog(db).put_bars([_yahoo_bar("AAA", 100.0)])
     result = cli.main(
-        ["paper-exposure", "--strategy-id", sid, "--catalog-db", str(db), "--max-mark-age-days", "9999"]
+        [
+            "paper-exposure",
+            "--strategy-id",
+            sid,
+            "--catalog-db",
+            str(db),
+            "--max-mark-age-days",
+            "9999",
+        ]
     )
     captured = capsys.readouterr()
     assert result == 2

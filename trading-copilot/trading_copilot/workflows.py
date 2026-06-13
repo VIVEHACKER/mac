@@ -2,15 +2,22 @@ from __future__ import annotations
 
 from datetime import date
 
-from .economic_calendar import (
-    EconomicCalendarProvider,
-    collect_economic_events,
-    format_economic_calendar_report,
+from . import forecast_ledger, rate_forecast
+from .backtest import (
+    DEFAULT_HOLDING_DAYS,
+    backtest_to_csv,
+    format_backtest_report,
+    run_backtest,
 )
 from .earnings_calendar import (
     EarningsCalendarProvider,
     HybridEarningsCalendarProvider,
     format_earnings_calendar_report,
+)
+from .economic_calendar import (
+    EconomicCalendarProvider,
+    collect_economic_events,
+    format_economic_calendar_report,
 )
 from .events import (
     EventProvider,
@@ -31,13 +38,6 @@ from .industry_rotation import (
     format_industry_report,
     industry_scores_to_csv,
 )
-from .market_data import (
-    MarketDataProvider,
-    YahooChartProvider,
-    format_quote_report,
-    format_snapshot_line,
-)
-from .metrics import build_technical_profile
 from .macro import (
     FredCsvProvider,
     MacroDataProvider,
@@ -50,7 +50,13 @@ from .macro_forecast import (
     forecast_dashboard,
     format_forecast_report,
 )
-from . import forecast_ledger
+from .market_data import (
+    MarketDataProvider,
+    YahooChartProvider,
+    format_quote_report,
+    format_snapshot_line,
+)
+from .metrics import build_technical_profile
 from .ml_recommendations import (
     build_ml_recommendation,
     format_ml_recommendation_report,
@@ -70,21 +76,15 @@ from .pattern_mining import (
     pattern_results_to_csv,
 )
 from .playbook import PlaybookBuilder, format_playbook_report
-from .quote_summary import QuoteSummaryProvider, YahooQuoteSummaryProvider, map_to_sector_etf
-from .regime import build_regime_report, format_regime_report
-from .backtest import (
-    DEFAULT_HOLDING_DAYS,
-    backtest_to_csv,
-    format_backtest_report,
-    run_backtest,
-)
 from .portfolio import (
     DEFAULT_SINGLE_STOCK_POOL,
     build_aggressive_portfolio,
     format_portfolio_report,
     portfolio_to_csv,
 )
+from .quote_summary import QuoteSummaryProvider, YahooQuoteSummaryProvider, map_to_sector_etf
 from .recommendations import build_recommendation_report, score_recommendation
+from .regime import build_regime_report, format_regime_report
 from .screening import candidates_to_csv, format_screen_report, screen_members
 from .signals import detect_forecast_signals, format_signals_report
 from .skill_registry import SkillRegistry
@@ -464,6 +464,87 @@ class TradingWorkflows:
         scored = forecast_ledger.score_pending(providers, scored_at=scored_at, path=path)
         header = f"Scored {len(scored)} newly-released forecast(s).\n\n"
         return header + forecast_ledger.ledger_summary(path)
+
+    def _rate_providers(self, today: date | None = None) -> dict[str, MacroDataProvider]:
+        providers: dict[str, MacroDataProvider] = {"us": self.macro}
+        try:
+            from .ecos import EcosProvider
+
+            providers["kr"] = EcosProvider()
+            if today is not None:
+                # Daily provider for the KORIBOR market signal: the sample key
+                # caps daily queries at 10 rows, so keep the window short.
+                from datetime import timedelta
+
+                providers["kr_market"] = EcosProvider(
+                    cycle="D",
+                    start=(today - timedelta(days=12)).strftime("%Y%m%d"),
+                    end=today.strftime("%Y%m%d"),
+                )
+        except Exception:  # noqa: BLE001 - KR provider is optional
+            pass
+        return providers
+
+    def rate_forecast_report(self, region: str, today: date) -> str:
+        signals = rate_forecast.collect_signals(region, self._rate_providers(today), today)
+        return rate_forecast.format_rate_forecast_report(signals)
+
+    def rate_record_report(
+        self,
+        region: str,
+        recorded_at: date,
+        path: str = rate_forecast.DEFAULT_RATE_LEDGER,
+        horizon_days: int = 21,
+        force: bool = False,
+    ) -> str:
+        meeting = rate_forecast.next_meeting(region.lower(), recorded_at)
+        days_out = (meeting - recorded_at).days
+        if days_out > horizon_days:
+            header = (
+                f"Next {region} meeting {meeting.isoformat()} is {days_out}d away "
+                f"(> {horizon_days}d horizon) — not recorded.\n\n"
+            )
+            return header + rate_forecast.rate_ledger_summary(path)
+        if days_out == 0:
+            # Date-granularity ledger cannot prove a meeting-day entry predates
+            # the announcement — forward-OOS integrity needs strictly-prior rows.
+            header = (
+                f"{region} meeting {meeting.isoformat()} is today — recording refused "
+                "(forward-OOS requires a strictly pre-meeting date).\n\n"
+            )
+            return header + rate_forecast.rate_ledger_summary(path)
+        if not force and rate_forecast.already_recorded(region, meeting, path):
+            # Idempotent rerun: skip before touching any provider so a daily
+            # cron stays green even when FRED/ECOS are down.
+            header = f"{region} {meeting.isoformat()} already recorded — skipped.\n\n"
+            return header + rate_forecast.rate_ledger_summary(path)
+        signals = rate_forecast.collect_signals(
+            region, self._rate_providers(recorded_at), recorded_at
+        )
+        row = rate_forecast.record_rate_forecast(
+            signals, recorded_at=recorded_at, path=path, force=force
+        )
+        header = (
+            f"Recorded {region} {signals.meeting.isoformat()} forecast.\n\n"
+            if row
+            else f"{region} {signals.meeting.isoformat()} already recorded or scored — "
+            "skipped (--force supersedes a pending forecast, never a scored one).\n\n"
+        )
+        return (
+            header
+            + rate_forecast.format_rate_forecast_report(signals)
+            + "\n"
+            + rate_forecast.rate_ledger_summary(path)
+        )
+
+    def rate_score_report(
+        self, scored_at: date, path: str = rate_forecast.DEFAULT_RATE_LEDGER
+    ) -> str:
+        scored = rate_forecast.score_rate_pending(
+            self._rate_providers(), scored_at=scored_at, path=path
+        )
+        header = f"Scored {len(scored)} announced decision(s).\n\n"
+        return header + rate_forecast.rate_ledger_summary(path)
 
     def economic_calendar_report(
         self,

@@ -61,6 +61,13 @@ from engine.live import (
     load_live_trading_policy,
 )
 from engine.paper import PaperBroker
+from engine.paper_oos import (
+    PaperOOSEntry,
+    load_ledger,
+    load_mark_price_history_csv,
+    mark_prices_at_dates,
+    score_ledger,
+)
 from engine.portfolio import (
     format_portfolio_report,
     format_screen_report,
@@ -132,6 +139,7 @@ DEFAULT_HALT_STATE = ROOT / "data" / "store" / "live-halt.json"
 DEFAULT_EQUITY_STATE = ROOT / "data" / "store" / "live-equity.json"
 DEFAULT_RESEARCH_REGISTRY = ROOT / "data" / "store" / "research-registry.jsonl"
 DEFAULT_DRILL_LOG = ROOT / "data" / "store" / "live-drills.jsonl"
+DEFAULT_PAPER_OOS_DIR = ROOT / "out"
 CORE_COMMANDS = {
     "init",
     "ingest",
@@ -272,6 +280,11 @@ def _default_live_catalog_db() -> Path:
 
 def _default_live_mark_deviation() -> float:
     return float(os.getenv("LIVE_MAX_MARK_DEVIATION", "0.02") or "0.02")
+
+
+def _default_paper_oos_prices() -> Path | None:
+    raw = os.getenv("LIVE_PAPER_OOS_PRICES", "").strip()
+    return Path(raw) if raw else None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -786,6 +799,10 @@ def build_parser() -> argparse.ArgumentParser:
     live_readiness.add_argument("--registry", type=Path, default=DEFAULT_RESEARCH_REGISTRY)
     live_readiness.add_argument("--halt-state", type=Path, default=DEFAULT_HALT_STATE)
     live_readiness.add_argument("--drill-log", type=Path, default=DEFAULT_DRILL_LOG)
+    live_readiness.add_argument("--paper-oos-dir", type=Path, default=DEFAULT_PAPER_OOS_DIR)
+    live_readiness.add_argument(
+        "--paper-oos-prices", type=Path, default=_default_paper_oos_prices()
+    )
     live_readiness.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
     live_readiness.add_argument("--as-of", default=date.today().isoformat())
     live_readiness.add_argument(
@@ -944,6 +961,8 @@ def build_parser() -> argparse.ArgumentParser:
     live_submit.add_argument("--halt-state", type=Path, default=DEFAULT_HALT_STATE)
     live_submit.add_argument("--equity-state", type=Path, default=DEFAULT_EQUITY_STATE)
     live_submit.add_argument("--drill-log", type=Path, default=DEFAULT_DRILL_LOG)
+    live_submit.add_argument("--paper-oos-dir", type=Path, default=DEFAULT_PAPER_OOS_DIR)
+    live_submit.add_argument("--paper-oos-prices", type=Path, default=_default_paper_oos_prices())
     live_submit.add_argument("--registry", type=Path, default=DEFAULT_RESEARCH_REGISTRY)
     live_submit.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
 
@@ -2515,6 +2534,8 @@ def _run_live_policy() -> int:
         f"| Policy Version | {policy.policy_version or 'missing'} |",
         f"| Required Paper Drill Days | {policy.min_paper_days} |",
         f"| Required Shadow Drill Days | {policy.min_shadow_days} |",
+        f"| Required Paper OOS Periods | {policy.min_paper_oos_periods} |",
+        f"| Min Paper OOS / Backtest | {policy.min_paper_oos_vs_backtest:.2f}x |",
         f"| Allowed Order Types | {', '.join(risk_policy.allowed_order_types)} |",
         f"| Max Order Notional | {risk_policy.max_order_notional:,.2f} |",
         f"| Max Daily New Notional | {risk_policy.max_daily_new_notional:,.2f} |",
@@ -2538,6 +2559,8 @@ def _run_live_readiness(args: argparse.Namespace) -> int:
         registry=ResearchRegistry(args.registry),
         halt_store=HaltStateStore(args.halt_state),
         drill_log=DrillLog(args.drill_log),
+        paper_oos_dir=args.paper_oos_dir,
+        paper_oos_prices=args.paper_oos_prices,
         catalog=MarketDataCatalog(args.catalog_db),
         required_prices=required_prices,
         as_of=_parse_date(args.as_of),
@@ -2550,6 +2573,7 @@ def _run_live_readiness(args: argparse.Namespace) -> int:
             issues,
             required_prices=required_prices,
             require_order_submission=args.require_order_submission,
+            paper_oos_prices=args.paper_oos_prices,
         )
     )
     return 0 if not issues else 2
@@ -2927,6 +2951,8 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         registry=ResearchRegistry(args.registry),
         halt_store=HaltStateStore(args.halt_state),
         drill_log=DrillLog(args.drill_log),
+        paper_oos_dir=args.paper_oos_dir,
+        paper_oos_prices=args.paper_oos_prices,
         catalog=catalog,
         required_prices=required_prices,
         as_of=_parse_date(args.as_of),
@@ -2972,6 +2998,7 @@ def _run_live_submit(args: argparse.Namespace) -> int:
                 issues,
                 required_prices=required_prices,
                 require_order_submission=args.submit,
+                paper_oos_prices=args.paper_oos_prices,
             )
         )
         return 2
@@ -3094,6 +3121,8 @@ def _live_readiness_issues(
     registry: ResearchRegistry,
     halt_store: HaltStateStore,
     drill_log: DrillLog,
+    paper_oos_dir: Path,
+    paper_oos_prices: Path | None,
     catalog: MarketDataCatalog,
     required_prices: tuple[tuple[str, str], ...],
     as_of: date,
@@ -3119,6 +3148,103 @@ def _live_readiness_issues(
         )
         for reason in drill_summary.reasons:
             issues.append(DataQualityIssue("error", "live-drill", policy.strategy_id, reason))
+        if policy.min_paper_oos_periods > 0:
+            ledger_path = _paper_oos_ledger_path(paper_oos_dir, policy.strategy_id)
+            try:
+                entries = _paper_oos_entries(ledger_path, policy.strategy_id, as_of=as_of)
+                closed_periods = _paper_oos_closed_periods(entries)
+            except Exception as exc:
+                issues.append(
+                    DataQualityIssue(
+                        "error",
+                        "paper-oos",
+                        policy.strategy_id,
+                        f"paper OOS ledger check failed: {exc}",
+                    )
+                )
+            else:
+                if closed_periods < policy.min_paper_oos_periods:
+                    issues.append(
+                        DataQualityIssue(
+                            "error",
+                            "paper-oos",
+                            policy.strategy_id,
+                            f"paper OOS closed periods {closed_periods} < "
+                            f"{policy.min_paper_oos_periods} ({ledger_path})",
+                        )
+                    )
+                elif paper_oos_prices is None:
+                    issues.append(
+                        DataQualityIssue(
+                            "error",
+                            "paper-oos",
+                            policy.strategy_id,
+                            "paper OOS prices CSV is required to score closed periods; "
+                            "set --paper-oos-prices or LIVE_PAPER_OOS_PRICES",
+                        )
+                    )
+                else:
+                    try:
+                        history = load_mark_price_history_csv(paper_oos_prices)
+                        marks = mark_prices_at_dates(
+                            history,
+                            [entry.rebal_date for entry in entries],
+                            max_staleness_days=max_price_age_days,
+                        )
+                        record = score_ledger(
+                            entries,
+                            marks,
+                            backtest_excess_ann=policy.paper_oos_backtest_excess,
+                        )
+                    except Exception as exc:
+                        issues.append(
+                            DataQualityIssue(
+                                "error",
+                                "paper-oos",
+                                policy.strategy_id,
+                                f"paper OOS scoring failed: {exc}",
+                            )
+                        )
+                    else:
+                        if record.n_periods < policy.min_paper_oos_periods:
+                            issues.append(
+                                DataQualityIssue(
+                                    "error",
+                                    "paper-oos",
+                                    policy.strategy_id,
+                                    f"paper OOS scoreable periods {record.n_periods} < "
+                                    f"{policy.min_paper_oos_periods} ({paper_oos_prices})",
+                                )
+                            )
+                        if policy.min_paper_oos_vs_backtest > 0.0:
+                            if record.vs_backtest is None:
+                                # Ratio gate is required but uncomputable. When there
+                                # ARE enough scoreable periods, the only cause is a
+                                # zero/unset backtest excess — a config error that must
+                                # block, never silently skip the gate. (Too-few-periods
+                                # is already reported above, so don't pile on there.)
+                                if record.n_periods >= policy.min_paper_oos_periods:
+                                    issues.append(
+                                        DataQualityIssue(
+                                            "error",
+                                            "paper-oos",
+                                            policy.strategy_id,
+                                            "paper OOS live/backtest ratio gate is required "
+                                            f"({policy.min_paper_oos_vs_backtest:.2f}x) but could "
+                                            "not be computed; set LIVE_PAPER_OOS_BACKTEST_EXCESS "
+                                            "to the nonzero backtested annual excess",
+                                        )
+                                    )
+                            elif record.vs_backtest < policy.min_paper_oos_vs_backtest:
+                                issues.append(
+                                    DataQualityIssue(
+                                        "error",
+                                        "paper-oos",
+                                        policy.strategy_id,
+                                        f"paper OOS live/backtest ratio {record.vs_backtest:.2f}x < "
+                                        f"{policy.min_paper_oos_vs_backtest:.2f}x",
+                                    )
+                                )
     halt = halt_store.current()
     if halt.halted:
         issues.append(DataQualityIssue("error", "halt", "live-halt", f"halted: {halt.reason}"))
@@ -3143,12 +3269,43 @@ def _live_readiness_issues(
     return issues
 
 
+def _paper_oos_ledger_path(paper_oos_dir: Path, strategy_id: str) -> Path:
+    return Path(paper_oos_dir) / f"paper-oos-ledger-{strategy_id}.jsonl"
+
+
+def _paper_oos_entries(
+    ledger_path: Path, strategy_id: str, *, as_of: date | None = None
+) -> list[PaperOOSEntry]:
+    """Ledger entries for one strategy, sorted by rebalance date.
+
+    ``as_of`` enforces point-in-time integrity for the readiness gate: rebalances
+    dated after ``as_of`` were not knowable then, so they must not count toward the
+    closed-period or ratio gates. ISO date strings compare lexicographically.
+    """
+    cutoff = as_of.isoformat() if as_of is not None else None
+    return sorted(
+        (
+            entry
+            for entry in load_ledger(ledger_path)
+            if entry.strategy_id == strategy_id
+            and (cutoff is None or entry.rebal_date[:10] <= cutoff)
+        ),
+        key=lambda entry: entry.rebal_date,
+    )
+
+
+def _paper_oos_closed_periods(entries: list[PaperOOSEntry]) -> int:
+    rebal_dates = {entry.rebal_date for entry in entries}
+    return max(0, len(rebal_dates) - 1)
+
+
 def _format_live_readiness(
     policy: LiveTradingPolicy,
     issues: list[DataQualityIssue],
     *,
     required_prices: tuple[tuple[str, str], ...],
     require_order_submission: bool,
+    paper_oos_prices: Path | None,
 ) -> str:
     latest_prices = ", ".join(f"{market}:{symbol}" for symbol, market in required_prices) or "none"
     lines = [
@@ -3166,6 +3323,9 @@ def _format_live_readiness(
         f"| Policy Version | {policy.policy_version or 'missing'} |",
         f"| Required Paper Drill Days | {policy.min_paper_days} |",
         f"| Required Shadow Drill Days | {policy.min_shadow_days} |",
+        f"| Required Paper OOS Periods | {policy.min_paper_oos_periods} |",
+        f"| Min Paper OOS / Backtest | {policy.min_paper_oos_vs_backtest:.2f}x |",
+        f"| Paper OOS Prices | {str(paper_oos_prices) if paper_oos_prices else 'missing'} |",
         f"| Required Prices | {latest_prices} |",
     ]
     if issues:

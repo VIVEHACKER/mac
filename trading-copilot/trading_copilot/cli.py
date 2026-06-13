@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
+from .pattern_mining import ASSET_SETS, expand_asset_set
 from .skill_registry import SkillRegistry
 from .storage import TradingStore
 from .workflows import TradingWorkflows
-from .pattern_mining import ASSET_SETS, expand_asset_set
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -105,6 +105,35 @@ def main(argv: list[str] | None = None) -> int:
         from . import forecast_ledger as _fl
 
         return emit(_fl.ledger_summary(args.ledger), args.output)
+
+    if args.command == "rate-forecast":
+        from datetime import date as _date
+
+        return emit(workflows.rate_forecast_report(args.region, _date.today()), args.output)
+
+    if args.command == "rate-record":
+        from datetime import date as _date
+
+        return emit(
+            workflows.rate_record_report(
+                args.region,
+                _date.today(),
+                path=args.ledger,
+                horizon_days=args.horizon_days,
+                force=args.force,
+            ),
+            args.output,
+        )
+
+    if args.command == "rate-score":
+        from datetime import date as _date
+
+        return emit(workflows.rate_score_report(_date.today(), path=args.ledger), args.output)
+
+    if args.command == "rate-ledger":
+        from . import rate_forecast as _rf
+
+        return emit(_rf.rate_ledger_summary(args.ledger), args.output)
 
     if args.command == "regime":
         return emit(workflows.regime_report(), args.output)
@@ -417,6 +446,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     forecast_ledger_cmd.add_argument("--ledger", default="out/forecast_ledger.jsonl")
     forecast_ledger_cmd.add_argument("--output", type=Path)
+
+    rate_fc = sub.add_parser(
+        "rate-forecast",
+        help="Forecast the next FOMC / BOK rate decision as {cut, hold, hike} probabilities.",
+    )
+    rate_fc.add_argument("--region", default="us", choices=["us", "kr"])
+    rate_fc.add_argument("--output", type=Path)
+
+    rate_record = sub.add_parser(
+        "rate-record",
+        help="Record the next rate-decision forecast to the forward-OOS rate ledger.",
+    )
+    rate_record.add_argument("--region", default="us", choices=["us", "kr"])
+    rate_record.add_argument("--ledger", default="out/rate_ledger.jsonl")
+    rate_record.add_argument(
+        "--horizon-days",
+        type=int,
+        default=21,
+        help="Only record when the meeting is within this many days (default 21).",
+    )
+    rate_record.add_argument(
+        "--force",
+        action="store_true",
+        help="Supersede an already-recorded pending forecast for the same meeting.",
+    )
+    rate_record.add_argument("--output", type=Path)
+
+    rate_score = sub.add_parser(
+        "rate-score",
+        help="Score pending rate-decision forecasts against announced decisions.",
+    )
+    rate_score.add_argument("--ledger", default="out/rate_ledger.jsonl")
+    rate_score.add_argument("--output", type=Path)
+
+    rate_ledger_cmd = sub.add_parser(
+        "rate-ledger",
+        help="Summarise the policy-rate decision ledger (modal hit rate + Brier).",
+    )
+    rate_ledger_cmd.add_argument("--ledger", default="out/rate_ledger.jsonl")
+    rate_ledger_cmd.add_argument("--output", type=Path)
 
     regime = sub.add_parser(
         "regime",

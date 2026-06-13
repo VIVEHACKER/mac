@@ -7,6 +7,8 @@ from engine.paper_oos import (
     PaperOOSEntry,
     append_entry,
     load_ledger,
+    load_mark_price_history_csv,
+    mark_prices_at_dates,
     score_ledger,
 )
 
@@ -60,6 +62,77 @@ def test_score_ledger_renormalises_when_a_mark_is_missing() -> None:
     assert record.n_periods == 1
     # only A present -> port return = A's +10%, bench flat -> excess +10%
     assert record.cumulative_return == pytest.approx(0.10, abs=1e-9)
+
+
+def test_price_history_csv_marks_last_available_close(tmp_path) -> None:
+    prices = tmp_path / "prices.csv"
+    prices.write_text(
+        "\n".join(
+            [
+                "Date,A,SPY",
+                "2026-01-31,101,400",
+                "2026-02-28,105,410",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    history = load_mark_price_history_csv(prices)
+    marks = mark_prices_at_dates(history, ["2026-02-01", "2026-03-01"])
+
+    assert marks["2026-02-01"] == {"A": 101.0, "SPY": 400.0}
+    assert marks["2026-03-01"] == {"A": 105.0, "SPY": 410.0}
+
+
+def test_mark_prices_staleness_bound_drops_carried_forward_marks() -> None:
+    # CSV ends 2026-04-01; a later close must NOT be priced with the stale mark.
+    history = {
+        "2026-03-01": {"A": 100.0, "SPY": 400.0},
+        "2026-04-01": {"A": 110.0, "SPY": 410.0},
+    }
+    requested = ["2026-04-03", "2026-05-01"]
+
+    unbounded = mark_prices_at_dates(history, requested)
+    assert unbounded["2026-05-01"] == {"A": 110.0, "SPY": 410.0}  # legacy carry-forward
+
+    bounded = mark_prices_at_dates(history, requested, max_staleness_days=7)
+    assert bounded["2026-04-03"] == {"A": 110.0, "SPY": 410.0}  # 2d old -> fresh enough
+    assert "2026-05-01" not in bounded  # 30d old -> dropped, period left unscored
+
+
+def test_score_ledger_unscored_when_close_mark_too_stale() -> None:
+    # The live-readiness gate must not count a period scored on a frozen price.
+    entries = [
+        _entry("2026-03-01", {"A": 1.0}, {"A": 100.0}, 400.0),
+        _entry("2026-05-01", {"B": 1.0}, {"B": 100.0}, 400.0),
+    ]
+    history = {"2026-03-01": {"A": 100.0, "SPY": 400.0}, "2026-04-01": {"A": 130.0, "SPY": 410.0}}
+
+    fresh = mark_prices_at_dates(history, ["2026-05-01"], max_staleness_days=7)
+    assert score_ledger(entries, fresh).n_periods == 0  # close mark too stale -> not scored
+
+
+def test_mark_prices_carries_sparse_symbols_independently() -> None:
+    # Codex P2: a later SPY-only row must NOT erase A's still-fresh earlier close.
+    history = {
+        "2026-04-01": {"A": 100.0, "SPY": 400.0},
+        "2026-04-02": {"SPY": 402.0},  # sparse row — A omitted
+    }
+
+    marks = mark_prices_at_dates(history, ["2026-04-02"], max_staleness_days=7)
+    assert marks["2026-04-02"] == {"A": 100.0, "SPY": 402.0}  # A carried, SPY updated
+
+
+def test_mark_prices_per_symbol_staleness_drops_only_stale_symbol() -> None:
+    # A goes stale while SPY stays fresh -> only A is dropped, SPY remains.
+    history = {
+        "2026-03-01": {"A": 100.0},  # A's last mark (old)
+        "2026-04-28": {"SPY": 410.0},  # SPY fresh near the close
+    }
+
+    marks = mark_prices_at_dates(history, ["2026-05-01"], max_staleness_days=7)
+    assert marks["2026-05-01"] == {"SPY": 410.0}  # A (61d) dropped, SPY (3d) kept
 
 
 def test_append_entry_is_pre_registered_and_refuses_duplicates(tmp_path) -> None:
