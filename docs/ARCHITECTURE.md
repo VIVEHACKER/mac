@@ -112,7 +112,7 @@ trader/
 │   ├── iv_crush.py          # 어닝 임박 IV 급등 → 발표 후 매도
 │   ├── value_long.py        # valuation rating ≥ +2 종목 매수 (Buffett-style)
 │   └── ml_xgboost.py        # XGBoost 시그널 (MPS) — 펀더멘털 + 가격 + 매크로 + valuation 결합
-├── signals/                 # 🔲 설계 트리(21) — 구현 3: foreign_flow, vix_term·vix_peak(✅ 정보게이트 INFORMATIVE)
+├── signals/                 # 🔲 설계 트리(21) — 구현 4: foreign_flow, vix_term·vix_peak(✅INFORMATIVE), cot_extreme(검증:NO EDGE)
 │                            #    (신규 신호는 검증 게이트 통과 전 자금배분 금지 — advisory only)
 │   ├── activist_13f.py      # 13F 신규/증가 — Pershing/Tiger 미러
 │   ├── insider.py           # Form 4 + DART 임원보고 — 클러스터 매수
