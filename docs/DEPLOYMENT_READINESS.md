@@ -99,6 +99,7 @@ original gaps; closures cite their evidence)
 | 8 | Single-strategy concentration | operator | high | ◐ combined IDEAL80/lowvol20 passed all backtest gates (3 bars, fee stress, family PBO 0.330) and is accruing its own paper track; not adopted for capital |
 | 9 | Price leg not pinned; fee drag unmodeled | code | — | ✅ closed — canonical pinned price snapshot + `TRADER_REQUIRE_PINNED` fail-closed gate; after-cost validated at 5/10 bps (+7.87%/+7.40%) |
 | 10 | Portfolio-level exposure monitoring | code | — | ✅ closed — `trader paper-exposure` (gross/net/single-name vs limits, fail-closed on stale marks) over `risk/exposure.py` |
+| 11 | Crisis stress-window evidence (live gate's `min_stress_windows=2`, `worst≥+30%`) | code/operator | **blocker** | ◐ MEASURED (`scripts/stress_windows_validation.py` → `out/aqr-ideal-stress-windows.md`): 3 windows (COVID +35.07%, 2022 +23.12%, 2018Q4 −16.42%; GFC untestable pre-2008 pin). Fails absolute +30% bar AND relative bar (2018Q4 excess −5.40% — momentum fell MORE than SPY). The +30% bar was built for crash-HEDGED sleeves; a long-only book can't meet it. **Operator decision: add a hedge sleeve (re-validate) OR adopt a strategy-appropriate stress gate.** Will NOT lower the threshold to force a pass |
 
 ## Go / no-go checklist (before any real capital)
 
