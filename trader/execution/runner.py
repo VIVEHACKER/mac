@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -20,6 +21,24 @@ from trader.execution.broker import (
 )
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore, OrderEvent
+from trader.operations.observability import Notifier, get_logger, log_event
+
+_LOGGER = get_logger("trader.execution")
+
+
+def _alert(
+    notifier: Notifier | None, *, level: str, event: str, message: str, **fields: object
+) -> None:
+    """Structured-log a critical execution event AND, if a notifier is configured, push an
+    external alert. A broken notifier must never break trading, so its errors are swallowed.
+    Without a notifier the event is still logged (closes the audit's no-observability gap)."""
+    pylevel = logging.WARNING if level in ("warning", "error", "critical") else logging.INFO
+    log_event(_LOGGER, event, message, level=pylevel, **fields)
+    if notifier is not None:
+        try:
+            notifier.notify(level=level, event=event, message=message, fields=fields)
+        except Exception as exc:  # noqa: BLE001 — a failed alert must not break the trading path
+            log_event(_LOGGER, "notifier_error", f"notifier raised: {exc}", level=logging.WARNING)
 
 
 @dataclass(frozen=True)
@@ -116,6 +135,7 @@ def process_order_intents(
     peak_equity: float | None = None,
     fill_poll: FillPoll | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    notifier: Notifier | None = None,
 ) -> list[ExecutionResult]:
     # Fail-closed arming check (adversarial-review finding): reference_equity=None used to
     # silently skip the whole kill-switch block — a future live/paper entry point that forgot
@@ -139,6 +159,9 @@ def process_order_intents(
         reason = f"broker account/positions unavailable: {exc}"
         if not dry_run:
             halt_store.activate(reason, source="execution-runner")
+        _alert(
+            notifier, level="critical", event="broker_read_failed", message=reason, dry_run=dry_run
+        )
         blocked_reads: list[ExecutionResult] = []
         for raw in intents:
             intent = raw.normalized()
@@ -180,6 +203,7 @@ def process_order_intents(
             halt = halt_store.activate(
                 "kill-switch: " + "; ".join(kill.reasons), source="kill-switch"
             )
+            _alert(notifier, level="critical", event="kill_switch_halt", message=halt.reason)
     # An active halt (pre-existing OR just-latched) pauses the WHOLE batch, and the intents are NOT
     # recorded — a halt is a temporary pause, not a per-order rejection, so the same orders stay
     # retryable on every later cycle until the halt is cleared (Codex P2).
@@ -289,6 +313,13 @@ def process_order_intents(
             halt = halt_store.activate(
                 f"uncertain broker submit state for {intent.client_order_id}: {exc}",
                 source="execution-runner",
+            )
+            _alert(
+                notifier,
+                level="critical",
+                event="broker_uncertain_submit",
+                message=str(exc),
+                client_order_id=intent.client_order_id,
             )
             store.record_event(
                 OrderEvent(
