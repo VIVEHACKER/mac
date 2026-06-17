@@ -74,11 +74,27 @@ class JsonlOrderStore:
             status = payload.get("status") or payload.get("event_type")
         return status
 
+    def latest_broker_orders(self) -> dict[str, dict[str, Any]]:
+        """Latest broker-order snapshot per client_order_id, from broker_submit/broker_poll
+        events. Returns the BrokerOrder payload dict (symbol/market/side/filled_qty/status/...);
+        later events (e.g. a poll showing the final fill) overwrite earlier ones. Used to derive
+        the reconciliation baseline from the system's own fills instead of a hand-typed string."""
+        latest: dict[str, dict[str, Any]] = {}
+        for row in self.rows():
+            if row.get("record_type") != "event":
+                continue
+            event = row.get("payload") or {}
+            if event.get("event_type") not in ("broker_submit", "broker_poll"):
+                continue
+            order = event.get("payload") or {}
+            cid = str(order.get("client_order_id") or row.get("client_order_id") or "")
+            if cid:
+                latest[cid] = order
+        return latest
+
     def intent_count_on(self, day: date) -> int:
         return sum(
-            1
-            for row in self.rows()
-            if row.get("record_type") == "intent" and _row_date(row) == day
+            1 for row in self.rows() if row.get("record_type") == "intent" and _row_date(row) == day
         )
 
     def buy_notional_on(self, day: date, marks: dict[str, float]) -> float:

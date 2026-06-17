@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
@@ -11,6 +13,7 @@ from trader.execution.broker import (
     AccountSnapshot,
     BrokerAdapter,
     BrokerError,
+    BrokerOrder,
     BrokerRejectedError,
     BrokerTemporaryError,
     PositionSnapshot,
@@ -25,6 +28,55 @@ class ExecutionResult:
     action: str
     status: str
     reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FillPoll:
+    """Post-submit fill-polling config. A live market order returns accepted/new with
+    filled_qty=0 (async fill); without polling the order_store keeps that non-terminal
+    snapshot forever and the ledger diverges from the real position (readiness-audit gap).
+    Opt-in: process_order_intents only polls when a FillPoll is passed."""
+
+    max_polls: int = 5
+    interval_s: float = 1.0
+
+
+def _poll_until_terminal(
+    broker: BrokerAdapter,
+    order: BrokerOrder,
+    store: JsonlOrderStore,
+    fill_poll: FillPoll | None,
+    sleep: Callable[[float], None],
+) -> BrokerOrder:
+    """Poll get_order until the order is terminal (or polls run out), recording each fresh
+    snapshot so partial->filled transitions land in the ledger. The order is ALREADY live,
+    so a status-check blip (BrokerError) is NOT a reason to halt — it is recorded and polling
+    stops; reconciliation against the broker catches any residual drift."""
+    if fill_poll is None or order.terminal:
+        return order
+    current = order
+    for _ in range(fill_poll.max_polls):
+        sleep(fill_poll.interval_s)
+        try:
+            polled = broker.get_order(current.client_order_id)
+        except BrokerError as exc:
+            store.record_event(
+                OrderEvent(
+                    event_type="broker_poll_uncertain",
+                    client_order_id=current.client_order_id,
+                    ts=datetime.now(UTC),
+                    status="uncertain",
+                    message=str(exc),
+                )
+            )
+            return current
+        if polled is None:
+            continue
+        current = polled
+        store.record_broker_order("broker_poll", current)
+        if current.terminal:
+            break
+    return current
 
 
 def _project_after_fill(
@@ -62,6 +114,8 @@ def process_order_intents(
     dry_run: bool = True,
     reference_equity: float | None = None,
     peak_equity: float | None = None,
+    fill_poll: FillPoll | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[ExecutionResult]:
     # Fail-closed arming check (adversarial-review finding): reference_equity=None used to
     # silently skip the whole kill-switch block — a future live/paper entry point that forgot
@@ -250,6 +304,9 @@ def process_order_intents(
             )
             continue
         store.record_broker_order("broker_submit", order)
+        # Poll for the real fill so an async accepted/filled_qty=0 order does not leave the
+        # ledger stuck on a non-terminal snapshot (no-op unless fill_poll is configured).
+        order = _poll_until_terminal(broker, order, store, fill_poll, sleep)
         results.append(ExecutionResult(intent.client_order_id, "submit", order.status))
         # Project ONLY after a successful submit — a rejected or uncertain order never moved
         # the book, so its exposure must not leak into later intents' risk checks (Codex P2).
