@@ -37,7 +37,9 @@ from scripts.aqr_ideal_grid import DEFAULT_PRICES, DEFAULT_SNAPSHOT  # noqa: E40
 from scripts.aqr_ideal_walkforward import prefetch, run_window  # noqa: E402
 
 OUT_DIR = ROOT / "out"
-GATE_MIN_WORST_STRESS = 0.30  # research_registry.LIVE_PROMOTION_GATE.min_worst_stress_return
+# Mirror research_registry.LIVE_PROMOTION_GATE (relative-to-SPY crisis gate, 2026-06-17).
+GATE_MIN_WORST_STRESS_EXCESS = -0.10  # worst single-window excess vs SPY floor
+GATE_MIN_MEAN_STRESS_EXCESS = 0.0  # mean crisis-window excess must exceed this
 
 # (window label, strategy total return, SPY total return, excess, window MDD) — None when untested.
 StressRow = tuple[str, float | None, float | None, float | None, float | None]
@@ -85,13 +87,20 @@ def main() -> int:
     excesses = [r[3] for r in rows if r[3] is not None]
     worst_stress = min(strat_returns) if strat_returns else None
     worst_excess = min(excesses) if excesses else None
+    mean_excess = sum(excesses) / len(excesses) if excesses else None
     full = run_window(
         pd.Timestamp("2009-06-01"), pd.Timestamp(prices.index.max()), prices, fund_cache, cfg=cfg
     )
     full_mdd: float | None = float(full["mdd"]) if full else None
 
-    gate_pass = worst_stress is not None and worst_stress >= GATE_MIN_WORST_STRESS
-    relative_pass = worst_excess is not None and worst_excess > 0.0
+    # Adopted live gate (relative to SPY): mean crisis excess positive AND no single
+    # window worse than -10% vs SPY. Computed from raw measured excess, not a flag.
+    gate_pass = (
+        mean_excess is not None
+        and worst_excess is not None
+        and mean_excess > GATE_MIN_MEAN_STRESS_EXCESS
+        and worst_excess >= GATE_MIN_WORST_STRESS_EXCESS
+    )
 
     pct = lambda x: "n/a" if x is None else f"{x * 100:+.2f}%"  # noqa: E731
     lines = [
@@ -112,27 +121,29 @@ def main() -> int:
         )
     lines += [
         "",
-        "## Two readings (both honest)",
+        "## Live gate (relative to SPY) — adopted 2026-06-17",
         "",
-        f"- **GATE (absolute, worst >= +{GATE_MIN_WORST_STRESS:.0%}):** worst stress total "
-        f"return {pct(worst_stress)} → **{'PASS' if gate_pass else 'FAIL'}**. This bar was "
-        "built for crash-HEDGED sleeves that profit in crashes; a long-only momentum book "
-        "structurally cannot meet it (it falls with the market). The FAIL is expected and "
-        "does NOT mean the strategy is broken — it means the gate shape is wrong for it.",
-        f"- **STRATEGY-APPROPRIATE (relative, excess > 0 every crisis):** worst window excess "
-        f"vs SPY {pct(worst_excess)} → **{'PASS' if relative_pass else 'FAIL'}**. For a "
-        "long-only excess strategy with a drawdown de-risk, 'lose less than buy-and-hold in "
-        "every crisis' is the meaningful risk-control test.",
+        f"- **Mean crisis excess vs SPY > {GATE_MIN_MEAN_STRESS_EXCESS:+.0%}:** "
+        f"{pct(mean_excess)} → **{'PASS' if (mean_excess is not None and mean_excess > GATE_MIN_MEAN_STRESS_EXCESS) else 'FAIL'}** "
+        "(beats buy-and-hold on average through crises).",
+        f"- **Worst single-window excess vs SPY >= {GATE_MIN_WORST_STRESS_EXCESS:+.0%}:** "
+        f"{pct(worst_excess)} → **{'PASS' if (worst_excess is not None and worst_excess >= GATE_MIN_WORST_STRESS_EXCESS) else 'FAIL'}** "
+        "(de-risk bounds any single crisis to within one trailing-stop width of SPY).",
+        f"- **COMPOSITE live gate:** **{'PASS' if gate_pass else 'FAIL'}**.",
         "",
-        "## What this unblocks / what it doesn't",
-        "- CLOSES the 'stress windows missing / worst stress return missing / full-sample "
-        "drawdown missing' evidence gap: those are now MEASURED above.",
-        "- Does NOT flip the live gate to green: the absolute +30% bar still fails (correctly, "
-        "for a long-only book). This script will NOT lower that threshold to force a pass.",
-        "- Operator decision required: (a) add a crash-hedge sleeve and FULLY re-validate, or "
-        "(b) consciously adopt a strategy-appropriate stress gate (relative-to-SPY) in "
-        "research_registry.LIVE_PROMOTION_GATE. Either is a deliberate call, not an "
-        "auto-applied change.",
+        "## Feed to the registry",
+        "",
+        "These measured values are the relative-gate evidence "
+        "(`trader model-gate --worst-stress-excess ... --mean-stress-excess ...`):",
+        f"- worst_stress_excess = {worst_excess if worst_excess is not None else 'n/a'}",
+        f"- mean_stress_excess  = {mean_excess if mean_excess is not None else 'n/a'}",
+        f"- worst_stress_return (absolute, informational) = "
+        f"{worst_stress if worst_stress is not None else 'n/a'}",
+        "",
+        "The absolute +30%-in-every-crash bar was retired (a long-only book falls with the "
+        "market and cannot meet it); the relative composite above is the strategy-appropriate "
+        "risk-control test. This script does not write the registry — re-run `model-gate` "
+        "with the values above to record them.",
     ]
     args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))

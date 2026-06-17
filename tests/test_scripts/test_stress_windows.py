@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.stress_windows_validation import GATE_MIN_WORST_STRESS, _total_return
+from scripts.stress_windows_validation import (
+    GATE_MIN_MEAN_STRESS_EXCESS,
+    GATE_MIN_WORST_STRESS_EXCESS,
+    _total_return,
+)
 
 
 def test_total_return_compounds_monthly() -> None:
@@ -16,4 +20,5 @@ def test_gate_threshold_matches_promotion_gate() -> None:
     # Guards against drift between this script and the live-readiness gate it reports on.
     from trader.research_registry import LIVE_PROMOTION_GATE
 
-    assert LIVE_PROMOTION_GATE.min_worst_stress_return == GATE_MIN_WORST_STRESS
+    assert LIVE_PROMOTION_GATE.min_worst_stress_excess == GATE_MIN_WORST_STRESS_EXCESS
+    assert LIVE_PROMOTION_GATE.min_mean_stress_excess == GATE_MIN_MEAN_STRESS_EXCESS

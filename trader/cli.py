@@ -983,6 +983,16 @@ def build_parser() -> argparse.ArgumentParser:
     model_gate.add_argument("--stress-windows-tested", type=int, default=0)
     model_gate.add_argument("--worst-stress-return", type=float)
     model_gate.add_argument("--stress-passed", action="store_true")
+    model_gate.add_argument(
+        "--worst-stress-excess",
+        type=float,
+        help="Worst single crisis-window return minus the benchmark (relative gate).",
+    )
+    model_gate.add_argument(
+        "--mean-stress-excess",
+        type=float,
+        help="Mean crisis-window return minus the benchmark across tested windows.",
+    )
     model_gate.add_argument("--command", dest="source_command", default="")
     model_gate.add_argument("--source-commit", default="")
     model_gate.add_argument("--notes", default="")
@@ -3092,6 +3102,8 @@ def _run_model_gate(args: argparse.Namespace) -> int:
         stress_windows_tested=args.stress_windows_tested,
         worst_stress_return=args.worst_stress_return,
         stress_passed=args.stress_passed,
+        worst_stress_excess=args.worst_stress_excess,
+        mean_stress_excess=args.mean_stress_excess,
         command=args.source_command,
         source_commit=args.source_commit,
         notes=args.notes,
@@ -3115,6 +3127,8 @@ def _run_model_gate(args: argparse.Namespace) -> int:
         f"| Full-sample MDD | {_pct_or_na(evidence.full_sample_max_drawdown)} |",
         f"| Stress Windows Tested | {evidence.stress_windows_tested} |",
         f"| Worst Stress Return | {_pct_or_na(evidence.worst_stress_return)} |",
+        f"| Worst Stress Excess vs Bench | {_pct_or_na(evidence.worst_stress_excess)} |",
+        f"| Mean Stress Excess vs Bench | {_pct_or_na(evidence.mean_stress_excess)} |",
         f"| Stress Windows | {'pass' if evidence.stress_passed else 'fail'} |",
         f"| Verdict | {'APPROVED' if decision.passed else 'BLOCKED'} |",
     ]

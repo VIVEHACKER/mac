@@ -1485,9 +1485,9 @@ def _approve_strategy(registry: Path, strategy_id: str) -> None:
         pit_audit_passed=True,
         full_sample_annualized_return=0.18,
         full_sample_max_drawdown=0.25,
-        stress_windows_tested=2,
-        worst_stress_return=0.35,
-        stress_passed=True,
+        stress_windows_tested=3,
+        worst_stress_excess=0.10,
+        mean_stress_excess=0.15,
     )
     cli.ResearchRegistry(registry).append(evidence, cli.evaluate_promotion(evidence))
 

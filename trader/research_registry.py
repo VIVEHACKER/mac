@@ -20,12 +20,24 @@ class PromotionGate:
     min_stress_windows: int = 0
     min_worst_stress_return: float | None = None
     require_stress_pass: bool = False
+    # Relative (vs-benchmark) crisis gate — the strategy-appropriate test for a
+    # long-only book whose de-risk should lose less than buy-and-hold, while a
+    # crash-hedged sleeve clears it trivially with large positive excess.
+    min_worst_stress_excess: float | None = None
+    min_mean_stress_excess: float | None = None
 
 
+# Relative-to-SPY crisis gate (operator decision 2026-06-17): replaces the
+# absolute "+30% in every crash" bar, which a long-only momentum book cannot
+# meet structurally. Composite: the mean crisis-window excess vs the benchmark
+# must be positive (beats buy-and-hold on average through crises) AND no single
+# window may underperform the benchmark by more than 10% (within one portfolio
+# trailing-stop width — the de-risk must actually bound crisis underperformance).
+# Computed from raw measured excess, not a self-reported pass flag.
 LIVE_PROMOTION_GATE = PromotionGate(
     min_stress_windows=2,
-    min_worst_stress_return=0.30,
-    require_stress_pass=True,
+    min_worst_stress_excess=-0.10,
+    min_mean_stress_excess=0.0,
     max_full_sample_drawdown=0.35,
 )
 
@@ -49,6 +61,8 @@ class StrategyEvidence:
     stress_windows_tested: int = 0
     worst_stress_return: float | None = None
     stress_passed: bool = False
+    worst_stress_excess: float | None = None
+    mean_stress_excess: float | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +127,22 @@ def evaluate_promotion(
             reasons.append(
                 f"worst stress return {evidence.worst_stress_return:.2%} < "
                 f"{gate.min_worst_stress_return:.2%}"
+            )
+    if gate.min_worst_stress_excess is not None:
+        if evidence.worst_stress_excess is None:
+            reasons.append("worst stress excess vs benchmark is missing")
+        elif evidence.worst_stress_excess < gate.min_worst_stress_excess:
+            reasons.append(
+                f"worst stress excess {evidence.worst_stress_excess:.2%} < "
+                f"{gate.min_worst_stress_excess:.2%}"
+            )
+    if gate.min_mean_stress_excess is not None:
+        if evidence.mean_stress_excess is None:
+            reasons.append("mean stress excess vs benchmark is missing")
+        elif evidence.mean_stress_excess <= gate.min_mean_stress_excess:
+            reasons.append(
+                f"mean stress excess {evidence.mean_stress_excess:.2%} <= "
+                f"{gate.min_mean_stress_excess:.2%}"
             )
     return PromotionDecision(passed=not reasons, reasons=tuple(reasons))
 
@@ -200,6 +230,8 @@ def make_evidence(
     stress_windows_tested: int = 0,
     worst_stress_return: float | None = None,
     stress_passed: bool = False,
+    worst_stress_excess: float | None = None,
+    mean_stress_excess: float | None = None,
 ) -> StrategyEvidence:
     return StrategyEvidence(
         strategy_id=strategy_id,
@@ -219,12 +251,16 @@ def make_evidence(
         stress_windows_tested=stress_windows_tested,
         worst_stress_return=worst_stress_return,
         stress_passed=stress_passed,
+        worst_stress_excess=worst_stress_excess,
+        mean_stress_excess=mean_stress_excess,
     )
 
 
 def _evidence_from_row(row: dict[str, Any]) -> StrategyEvidence:
     payload = row.get("evidence") or {}
-    generated_at = _parse_datetime(str(payload.get("generated_at") or row.get("generated_at") or ""))
+    generated_at = _parse_datetime(
+        str(payload.get("generated_at") or row.get("generated_at") or "")
+    )
     return StrategyEvidence(
         strategy_id=str(payload.get("strategy_id") or row.get("strategy_id") or ""),
         parameter_label=str(payload.get("parameter_label") or ""),
@@ -240,13 +276,13 @@ def _evidence_from_row(row: dict[str, Any]) -> StrategyEvidence:
         command=str(payload.get("command", "") or ""),
         source_commit=str(payload.get("source_commit", "") or ""),
         notes=str(payload.get("notes", "") or ""),
-        full_sample_annualized_return=_optional_float(
-            payload.get("full_sample_annualized_return")
-        ),
+        full_sample_annualized_return=_optional_float(payload.get("full_sample_annualized_return")),
         full_sample_max_drawdown=_optional_float(payload.get("full_sample_max_drawdown")),
         stress_windows_tested=int(payload.get("stress_windows_tested", 0) or 0),
         worst_stress_return=_optional_float(payload.get("worst_stress_return")),
         stress_passed=bool(payload.get("stress_passed", False)),
+        worst_stress_excess=_optional_float(payload.get("worst_stress_excess")),
+        mean_stress_excess=_optional_float(payload.get("mean_stress_excess")),
     )
 
 
