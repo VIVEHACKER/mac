@@ -150,3 +150,38 @@ def test_null_and_logging_notifiers_are_safe() -> None:
     NullNotifier().notify(level="info", event="t", message="m", fields={})
     LoggingNotifier().notify(level="warning", event="t", message="m", fields={"a": 1})
     log_event(get_logger("trader.test"), "unit", "ok", count=1)
+
+
+def test_level_to_pylevel_preserves_severity() -> None:
+    import logging
+
+    from trader.operations.observability import level_to_pylevel
+
+    # Codex Step-4 P2: critical/error must NOT collapse to warning.
+    assert level_to_pylevel("critical") == logging.CRITICAL
+    assert level_to_pylevel("error") == logging.ERROR
+    assert level_to_pylevel("warning") == logging.WARNING
+    assert level_to_pylevel("info") == logging.INFO
+    assert level_to_pylevel("unknown") == logging.INFO
+
+
+def test_logging_notifier_emits_at_critical_level() -> None:
+    import logging
+
+    logger = get_logger("trader.test.severity")
+    seen: list[int] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record.levelno)
+
+    logger.addHandler(_Capture())
+    LoggingNotifier(logger).notify(level="critical", event="kill", message="m", fields={})
+    assert logging.CRITICAL in seen  # not downgraded to WARNING
+
+
+def test_webhook_notifier_swallows_malformed_url() -> None:
+    # Codex Step-4 P3: an empty/malformed URL raises during Request() construction; the
+    # best-effort contract requires it be swallowed (not propagated into the trading path).
+    WebhookNotifier("").notify(level="critical", event="t", message="m", fields={})
+    WebhookNotifier("not a valid url").notify(level="info", event="t", message="m", fields={})

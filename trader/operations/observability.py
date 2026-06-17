@@ -62,6 +62,21 @@ def log_event(
     logger.log(level, message, extra={"event": event, "fields": fields})
 
 
+_LEVELS = {
+    "critical": logging.CRITICAL,
+    "error": logging.ERROR,
+    "warning": logging.WARNING,
+    "info": logging.INFO,
+    "debug": logging.DEBUG,
+}
+
+
+def level_to_pylevel(level: str) -> int:
+    """Map an alert severity string to a stdlib logging level, preserving CRITICAL/ERROR so
+    dashboards filtering on severity see kill-switch halts at their true level (Codex P2)."""
+    return _LEVELS.get(level.lower(), logging.INFO)
+
+
 @runtime_checkable
 class Notifier(Protocol):
     def notify(
@@ -83,8 +98,7 @@ class LoggingNotifier:
         self._logger = logger or get_logger("trader.alerts")
 
     def notify(self, *, level: str, event: str, message: str, fields: Mapping[str, Any]) -> None:
-        pylevel = logging.WARNING if level in ("warning", "error", "critical") else logging.INFO
-        log_event(self._logger, event, message, level=pylevel, **dict(fields))
+        log_event(self._logger, event, message, level=level_to_pylevel(level), **dict(fields))
 
 
 class WebhookNotifier:
@@ -98,17 +112,19 @@ class WebhookNotifier:
         self._logger = logger or get_logger("trader.alerts")
 
     def notify(self, *, level: str, event: str, message: str, fields: Mapping[str, Any]) -> None:
-        body = json.dumps(
-            {"level": level, "event": event, "message": message, "fields": dict(fields)},
-            default=str,
-        ).encode("utf-8")
-        req = urllib_request.Request(
-            self._url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        # Everything — request construction AND delivery — is inside the guard, so an empty or
+        # malformed URL is swallowed too, honouring the no-raise contract (Codex P3).
         try:
+            body = json.dumps(
+                {"level": level, "event": event, "message": message, "fields": dict(fields)},
+                default=str,
+            ).encode("utf-8")
+            req = urllib_request.Request(
+                self._url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             urllib_request.urlopen(req, timeout=self._timeout_s).close()  # noqa: S310 — operator URL
         except Exception as exc:  # noqa: BLE001 — best-effort: never break trading on a failed alert
             log_event(

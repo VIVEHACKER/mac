@@ -190,3 +190,82 @@ def test_latest_broker_orders_keeps_last_snapshot_per_order(tmp_path) -> None:
     latest = store.latest_broker_orders()
     assert latest["c1"]["status"] == "filled"
     assert latest["c1"]["filled_qty"] == 4.0
+
+
+class _CancelOnPollBroker:
+    """submit returns accepted (filled 0); get_order returns a TERMINAL canceled (filled 0)."""
+
+    def get_account(self) -> AccountSnapshot:
+        return _account()
+
+    def list_positions(self) -> list[PositionSnapshot]:
+        return []
+
+    def submit_order(self, intent: OrderIntent) -> BrokerOrder:
+        n = intent.normalized()
+        return BrokerOrder(
+            broker_order_id="b1",
+            client_order_id=n.client_order_id,
+            symbol=n.symbol,
+            market=n.market,
+            side=n.side,
+            qty=n.qty,
+            filled_qty=0.0,
+            status="accepted",
+            submitted_at=datetime(2026, 5, 12, tzinfo=UTC),
+        )
+
+    def get_order(self, client_order_id: str) -> BrokerOrder:
+        return BrokerOrder(
+            broker_order_id="b1",
+            client_order_id=client_order_id,
+            symbol="AAA",
+            market="us",
+            side="buy",
+            qty=40,
+            filled_qty=0.0,
+            status="canceled",
+            submitted_at=datetime(2026, 5, 12, tzinfo=UTC),
+        )
+
+
+def test_terminal_nofill_poll_does_not_project(tmp_path) -> None:
+    # Codex Step-2 P1: a buy that polls to a terminal canceled (filled_qty=0) must NOT project
+    # its 4,000 notional. If it wrongly did, B's projected cash (6,000 -> 2,000) would breach
+    # the 50% reserve and B would be risk_block; with the fix B's cash is intact and B submits.
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+
+    def _buy(symbol: str, key: str) -> OrderIntent:
+        return OrderIntent(
+            strategy="approved-etf",
+            symbol=symbol,
+            market="us",
+            side="buy",
+            qty=40,
+            order_type="limit",
+            limit_price=100,
+            rebalance_key=key,
+            asof_ts=datetime(2026, 5, 12, tzinfo=UTC),
+        ).normalized()
+
+    results = process_order_intents(
+        [_buy("AAA", "a"), _buy("BBB", "b")],
+        broker=_CancelOnPollBroker(),
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(
+            max_order_notional=5_000,
+            max_daily_new_notional=20_000,
+            max_symbol_weight=1.0,
+            max_gross_exposure=2.0,
+            min_cash_fraction=0.5,
+        ),
+        marks={"AAA": 100, "BBB": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+        fill_poll=FillPoll(max_polls=2, interval_s=0.0),
+        sleep=lambda _seconds: None,
+    )
+
+    assert [r.status for r in results] == ["canceled", "canceled"]

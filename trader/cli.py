@@ -109,7 +109,7 @@ from trader.execution.adapters.fake import FakeBrokerAdapter
 from trader.execution.broker import AccountSnapshot, BrokerAdapter, PositionSnapshot
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore
-from trader.execution.reconciler import reconcile_positions
+from trader.execution.reconciler import expected_positions_from_store, reconcile_positions
 from trader.execution.runner import process_order_intents
 from trader.operations.drills import DrillLog, DrillRecord, DrillSummary
 from trader.research_registry import (
@@ -844,9 +844,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live_reconcile.add_argument(
         "--expected",
-        required=True,
-        help="Comma-separated expected positions, e.g. QQQ:us:2,TLT:us:0.",
+        default=None,
+        help="Comma-separated expected positions, e.g. QQQ:us:2,TLT:us:0. Omit and pass "
+        "--from-store to derive the baseline from recorded fills instead of typing it.",
     )
+    live_reconcile.add_argument(
+        "--from-store",
+        action="store_true",
+        help="Derive expected positions from the order log's recorded net fills "
+        "(auto-reconcile) instead of --expected.",
+    )
+    live_reconcile.add_argument("--order-log", type=Path, default=DEFAULT_ORDER_LOG)
     live_reconcile.add_argument(
         "--broker", choices=["fake", "alpaca-paper", "alpaca-live"], default=None
     )
@@ -2660,7 +2668,19 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc))
         return 2
-    expected = _parse_expected_positions(args.expected)
+    if args.from_store and args.expected:
+        print("Pass either --expected or --from-store, not both.")
+        return 2
+    if args.from_store:
+        # Auto-reconcile: baseline = the system's own recorded net fills, not operator memory.
+        expected = expected_positions_from_store(JsonlOrderStore(args.order_log))
+        baseline = f"order-log:{args.order_log}"
+    elif args.expected:
+        expected = _parse_expected_positions(args.expected)
+        baseline = "--expected"
+    else:
+        print("Provide --expected POSITIONS or --from-store (derive from the order log).")
+        return 2
     issues = reconcile_positions(
         expected,
         broker.list_positions(),
@@ -2672,6 +2692,7 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
         "| Field | Value |",
         "|---|---:|",
         f"| Broker | {broker_name} |",
+        f"| Baseline | {baseline} |",
         f"| Expected Positions | {len(expected)} |",
         f"| Mismatches | {len(issues)} |",
     ]

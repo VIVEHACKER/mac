@@ -21,7 +21,12 @@ from trader.execution.broker import (
 )
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore, OrderEvent
-from trader.operations.observability import Notifier, get_logger, log_event
+from trader.operations.observability import (
+    Notifier,
+    get_logger,
+    level_to_pylevel,
+    log_event,
+)
 
 _LOGGER = get_logger("trader.execution")
 
@@ -31,9 +36,9 @@ def _alert(
 ) -> None:
     """Structured-log a critical execution event AND, if a notifier is configured, push an
     external alert. A broken notifier must never break trading, so its errors are swallowed.
-    Without a notifier the event is still logged (closes the audit's no-observability gap)."""
-    pylevel = logging.WARNING if level in ("warning", "error", "critical") else logging.INFO
-    log_event(_LOGGER, event, message, level=pylevel, **fields)
+    Without a notifier the event is still logged (closes the audit's no-observability gap).
+    Severity is preserved (critical->CRITICAL) so log-based alerting sees the true level."""
+    log_event(_LOGGER, event, message, level=level_to_pylevel(level), **fields)
     if notifier is not None:
         try:
             notifier.notify(level=level, event=event, message=message, fields=fields)
@@ -339,7 +344,15 @@ def process_order_intents(
         # ledger stuck on a non-terminal snapshot (no-op unless fill_poll is configured).
         order = _poll_until_terminal(broker, order, store, fill_poll, sleep)
         results.append(ExecutionResult(intent.client_order_id, "submit", order.status))
-        # Project ONLY after a successful submit — a rejected or uncertain order never moved
-        # the book, so its exposure must not leak into later intents' risk checks (Codex P2).
-        positions, account = _project_after_fill(positions, account, intent, marks)
+        # Project the ACTUAL committed quantity onto the book for later intents in this batch.
+        # If polling confirmed a terminal outcome we know exactly what filled, so project
+        # filled_qty (a terminal no-fill — async rejected/canceled — projects 0 = no change,
+        # so a rejected sell does NOT free phantom room for a later buy: Codex Step-2 P1). An
+        # order still working (non-terminal, e.g. unpolled) projects the full intent, the
+        # conservative assumption that it will fill.
+        proj_qty = order.filled_qty if order.terminal else intent.qty
+        if proj_qty > 0:
+            positions, account = _project_after_fill(
+                positions, account, replace(intent, qty=proj_qty), marks
+            )
     return results
