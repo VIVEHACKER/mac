@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
+
+from alpaca.common.exceptions import APIError
 
 from risk.halt_state import HaltStateStore
 from risk.policy import RiskPolicy
 from risk.pretrade import evaluate_pretrade_order
+from trader.execution.adapters.alpaca import AlpacaBrokerAdapter
 from trader.execution.adapters.fake import FakeBrokerAdapter
-from trader.execution.broker import AccountSnapshot, PositionSnapshot
+from trader.execution.broker import (
+    AccountSnapshot,
+    BrokerTemporaryError,
+    PositionSnapshot,
+)
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore
 from trader.execution.reconciler import reconcile_positions
@@ -533,3 +542,195 @@ def _intent(qty: float = 2, rebalance_key: str = "2026-05-12") -> OrderIntent:
         rebalance_key=rebalance_key,
         asof_ts=datetime(2026, 5, 12, tzinfo=UTC),
     )
+
+
+# --- live broker safety contract through the REAL Alpaca adapter (audit: "verified 0 times") ---
+
+
+def _api_error(status: int, message: str = "boom") -> APIError:
+    http_error = SimpleNamespace(response=SimpleNamespace(status_code=status))
+    return APIError(json.dumps({"code": status * 100, "message": message}), http_error)
+
+
+class _ScriptedAlpacaClient:
+    """Minimal alpaca-py TradingClient stand-in: reads succeed, submit raises ``submit_exc``."""
+
+    def __init__(self, submit_exc: BaseException):
+        self._submit_exc = submit_exc
+
+    def get_account(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            id="acc",
+            buying_power=10_000,
+            cash=10_000,
+            equity=10_000,
+            trading_blocked=False,
+            account_blocked=False,
+            pattern_day_trader=False,
+            daytrade_count=0,
+            currency="USD",
+            last_equity=10_000,
+        )
+
+    def get_all_positions(self) -> list[object]:
+        return []
+
+    def submit_order(self, request: object) -> object:
+        raise self._submit_exc
+
+    def get_order_by_client_id(self, client_order_id: str) -> object:
+        return None
+
+
+class _FailingReadBroker:
+    """A broker whose account read fails (network down) — must fail closed, never submit."""
+
+    def get_account(self) -> AccountSnapshot:
+        raise BrokerTemporaryError("network down reading account")
+
+    def list_positions(self) -> list[PositionSnapshot]:
+        return []
+
+    def submit_order(self, intent: OrderIntent) -> object:
+        raise AssertionError("submit_order must not be reached when reads fail")
+
+    def get_order(self, client_order_id: str) -> object:
+        return None
+
+
+def test_alpaca_5xx_submit_latches_halt_through_runner(tmp_path) -> None:
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    broker = AlpacaBrokerAdapter(
+        client=_ScriptedAlpacaClient(_api_error(503)), sleep=lambda _seconds: None
+    )
+
+    result = process_order_intents(
+        [_intent().normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert result[0].status == "uncertain"
+    assert halt.current().halted  # the live halt latch fires on a REAL alpaca 5xx
+
+
+def test_alpaca_4xx_submit_records_reject_without_halt(tmp_path) -> None:
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    broker = AlpacaBrokerAdapter(
+        client=_ScriptedAlpacaClient(_api_error(403, "insufficient buying power")),
+        sleep=lambda _seconds: None,
+    )
+
+    result = process_order_intents(
+        [_intent().normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert result[0].status == "rejected"
+    assert not halt.current().halted  # a definite rejection is not an uncertain state
+
+
+def test_broker_read_failure_blocks_batch_and_latches_halt(tmp_path) -> None:
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+
+    result = process_order_intents(
+        [_intent().normalized()],
+        broker=_FailingReadBroker(),
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert result[0].status == "risk_block"
+    assert any("unavailable" in reason for reason in result[0].reasons)
+    assert halt.current().halted
+
+
+def test_uncertain_submit_halts_rest_of_batch(tmp_path) -> None:
+    # Codex P1: an uncertain (temporary) submit latches a halt, and EVERY remaining intent in
+    # the batch must be blocked rather than submitted into the uncertain broker state.
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=10_000, cash=10_000, equity=10_000),
+        mode="timeout",
+    )
+
+    results = process_order_intents(
+        [_intent(rebalance_key="first").normalized(), _intent(rebalance_key="second").normalized()],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert results[0].status == "uncertain"
+    # Blocked by the latched halt (status risk_block), NOT submitted (which would be "uncertain").
+    assert results[1].status == "risk_block"
+    assert any("halted" in reason for reason in results[1].reasons)
+    assert halt.current().halted
+
+
+def test_rejected_submit_does_not_project_exposure(tmp_path) -> None:
+    # Codex P2: a rejected order must NOT project onto the book. If A's rejection wrongly
+    # projected its 4,000 notional, B's projected cash (6,000 -> 2,000) would breach the 50%
+    # reserve and B would be risk_block; with the fix the book is unmoved and B reaches the broker.
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=10_000, cash=10_000, equity=10_000),
+        mode="reject",
+    )
+
+    def _buy(symbol: str, key: str) -> OrderIntent:
+        return OrderIntent(
+            strategy="approved-etf",
+            symbol=symbol,
+            market="us",
+            side="buy",
+            qty=40,
+            order_type="limit",
+            limit_price=100,
+            rebalance_key=key,
+            asof_ts=datetime(2026, 5, 12, tzinfo=UTC),
+        ).normalized()
+
+    results = process_order_intents(
+        [_buy("AAA", "a"), _buy("BBB", "b")],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(
+            max_order_notional=5_000,
+            max_daily_new_notional=20_000,
+            max_symbol_weight=1.0,
+            max_gross_exposure=2.0,
+            min_cash_fraction=0.5,
+        ),
+        marks={"AAA": 100, "BBB": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert [r.status for r in results] == ["rejected", "rejected"]
+    assert not halt.current().halted
