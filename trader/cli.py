@@ -891,7 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_dry_run.add_argument("--qty", type=float, required=True)
     live_dry_run.add_argument("--price", type=float, required=True)
     live_dry_run.add_argument("--strategy", default="manual-live-dry-run")
-    live_dry_run.add_argument("--order-type", default="market", choices=["market", "limit"])
+    live_dry_run.add_argument("--order-type", default="limit", choices=["market", "limit"])
     live_dry_run.add_argument("--limit-price", type=float)
     live_dry_run.add_argument("--rebalance-key", default="manual")
     live_dry_run.add_argument("--cash", type=float, default=10_000.0)
@@ -2872,6 +2872,10 @@ def _live_equity_refs(
 
 def _run_live_dry_run(args: argparse.Namespace) -> int:
     symbol = _catalog_symbol(args.symbol, args.market)
+    # Mirror live-submit: a limit order with no explicit limit defaults to the mark.
+    limit_price = args.limit_price
+    if args.order_type == "limit" and limit_price is None:
+        limit_price = args.price
     intent = OrderIntent(
         strategy=args.strategy,
         symbol=symbol,
@@ -2879,7 +2883,7 @@ def _run_live_dry_run(args: argparse.Namespace) -> int:
         side=args.side,
         qty=args.qty,
         order_type=args.order_type,
-        limit_price=args.limit_price,
+        limit_price=limit_price,
         rebalance_key=args.rebalance_key,
         reason="cli live dry run",
         asof_ts=datetime.now(UTC),
@@ -2891,9 +2895,15 @@ def _run_live_dry_run(args: argparse.Namespace) -> int:
         equity=args.equity,
     )
     broker = FakeBrokerAdapter(account=account, mode=args.fake_mode)
+    # Mirror the live-submit guard: market orders are rejected unless
+    # LIVE_ALLOW_MARKET_ORDERS=true, so the dry-run rehearsal cannot pass an order
+    # type the real path would block (the rehearsal must not give false confidence).
+    allow_market = os.getenv("LIVE_ALLOW_MARKET_ORDERS", "").lower() == "true"
+    allowed_order_types = ("market", "limit") if allow_market else ("limit",)
     policy = RiskPolicy(
         policy_id="cli-live-dry-run",
         allowed_markets=(args.market,),
+        allowed_order_types=allowed_order_types,
         max_order_notional=args.max_order_notional,
         max_daily_new_notional=args.max_daily_new_notional,
         max_symbol_weight=1.0,

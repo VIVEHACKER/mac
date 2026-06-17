@@ -534,6 +534,82 @@ def test_live_dry_run_records_order_gate(tmp_path, capsys) -> None:
     assert "accepted" in captured.out
 
 
+def test_live_dry_run_defaults_to_limit_order(tmp_path, capsys) -> None:
+    # Codex #5: the rehearsal must default to limit (the same safe default as
+    # live-submit), not market, and a limit with no explicit price uses the mark.
+    result = cli.main(
+        [
+            "live-dry-run",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "accepted" in captured.out
+
+
+def test_live_dry_run_blocks_market_order_without_env(tmp_path, monkeypatch, capsys) -> None:
+    # Codex #5: rehearsal must mirror the live guard — market is rejected unless
+    # LIVE_ALLOW_MARKET_ORDERS=true, so the dry-run cannot give false confidence.
+    monkeypatch.delenv("LIVE_ALLOW_MARKET_ORDERS", raising=False)
+    result = cli.main(
+        [
+            "live-dry-run",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--order-type",
+            "market",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "risk_block" in captured.out
+
+
+def test_live_dry_run_allows_market_order_with_env(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("LIVE_ALLOW_MARKET_ORDERS", "true")
+    result = cli.main(
+        [
+            "live-dry-run",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "2",
+            "--price",
+            "100",
+            "--order-type",
+            "market",
+            "--order-log",
+            str(tmp_path / "orders.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "accepted" in captured.out
+
+
 def test_live_dry_run_blocks_halted_system(tmp_path, capsys) -> None:
     halt_state = tmp_path / "halt.json"
     cli.main(["live-halt", "activate", "--reason", "risk drill", "--halt-state", str(halt_state)])
