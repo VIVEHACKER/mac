@@ -40,6 +40,7 @@ OUT_DIR = ROOT / "out"
 # Mirror research_registry.LIVE_PROMOTION_GATE (relative-to-SPY crisis gate, 2026-06-17).
 GATE_MIN_WORST_STRESS_EXCESS = -0.10  # worst single-window excess vs SPY floor
 GATE_MIN_MEAN_STRESS_EXCESS = 0.0  # mean crisis-window excess must exceed this
+GATE_MIN_STRESS_WINDOWS = 2  # at least this many windows must actually be measured
 
 # (window label, strategy total return, SPY total return, excess, window MDD) — None when untested.
 StressRow = tuple[str, float | None, float | None, float | None, float | None]
@@ -93,10 +94,13 @@ def main() -> int:
     )
     full_mdd: float | None = float(full["mdd"]) if full else None
 
-    # Adopted live gate (relative to SPY): mean crisis excess positive AND no single
-    # window worse than -10% vs SPY. Computed from raw measured excess, not a flag.
+    # Adopted live gate (relative to SPY): at least GATE_MIN_STRESS_WINDOWS measured,
+    # mean crisis excess positive AND no single window worse than -10% vs SPY.
+    # Computed from raw measured excess, not a flag. The window-count check mirrors
+    # LIVE_PROMOTION_GATE.min_stress_windows so a 1-window run cannot report PASS.
     gate_pass = (
-        mean_excess is not None
+        len(excesses) >= GATE_MIN_STRESS_WINDOWS
+        and mean_excess is not None
         and worst_excess is not None
         and mean_excess > GATE_MIN_MEAN_STRESS_EXCESS
         and worst_excess >= GATE_MIN_WORST_STRESS_EXCESS
@@ -129,6 +133,9 @@ def main() -> int:
         f"- **Worst single-window excess vs SPY >= {GATE_MIN_WORST_STRESS_EXCESS:+.0%}:** "
         f"{pct(worst_excess)} → **{'PASS' if (worst_excess is not None and worst_excess >= GATE_MIN_WORST_STRESS_EXCESS) else 'FAIL'}** "
         "(de-risk bounds any single crisis to within one trailing-stop width of SPY).",
+        f"- **Windows measured >= {GATE_MIN_STRESS_WINDOWS}:** {len(excesses)} → "
+        f"**{'PASS' if len(excesses) >= GATE_MIN_STRESS_WINDOWS else 'FAIL'}** "
+        "(too few measured windows is fail-closed, matching the live gate).",
         f"- **COMPOSITE live gate:** **{'PASS' if gate_pass else 'FAIL'}**.",
         "",
         "## Feed to the registry",

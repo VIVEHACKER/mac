@@ -90,6 +90,26 @@ class FactorValidationSuite:
         return min(returns) if returns else 0.0
 
     @property
+    def stress_window_excesses(self) -> tuple[float, ...]:
+        """Per-window total return minus the benchmark's total return over the same
+        window — the relative-to-benchmark crisis evidence the live gate scores."""
+        return tuple(
+            item.result.total_return - item.result.benchmark_return
+            for item in self.stress_windows
+            if item.result is not None
+        )
+
+    @property
+    def worst_stress_excess(self) -> float | None:
+        excesses = self.stress_window_excesses
+        return min(excesses) if excesses else None
+
+    @property
+    def mean_stress_excess(self) -> float | None:
+        excesses = self.stress_window_excesses
+        return sum(excesses) / len(excesses) if excesses else None
+
+    @property
     def stress_passed(self) -> bool:
         if self.tested_stress_windows < self.thresholds.min_stress_windows:
             return False

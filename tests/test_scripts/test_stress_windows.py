@@ -4,6 +4,7 @@ import pytest
 
 from scripts.stress_windows_validation import (
     GATE_MIN_MEAN_STRESS_EXCESS,
+    GATE_MIN_STRESS_WINDOWS,
     GATE_MIN_WORST_STRESS_EXCESS,
     _total_return,
 )
@@ -22,3 +23,4 @@ def test_gate_threshold_matches_promotion_gate() -> None:
 
     assert LIVE_PROMOTION_GATE.min_worst_stress_excess == GATE_MIN_WORST_STRESS_EXCESS
     assert LIVE_PROMOTION_GATE.min_mean_stress_excess == GATE_MIN_MEAN_STRESS_EXCESS
+    assert LIVE_PROMOTION_GATE.min_stress_windows == GATE_MIN_STRESS_WINDOWS

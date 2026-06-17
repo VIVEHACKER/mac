@@ -2033,6 +2033,8 @@ def _run_validate_model(args: argparse.Namespace) -> int:
             stress_windows_tested=suite.tested_stress_windows,
             worst_stress_return=suite.worst_stress_return,
             stress_passed=suite.stress_passed,
+            worst_stress_excess=suite.worst_stress_excess,
+            mean_stress_excess=suite.mean_stress_excess,
             notes=(
                 f"parameter_positive_rate={suite.parameter_positive_rate:.4f}; "
                 f"worst_stress_return={suite.worst_stress_return:.4f}; "

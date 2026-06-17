@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
 from data.models import PriceBar
 from engine.validation import (
     FactorValidationThresholds,
@@ -67,6 +69,14 @@ def test_factor_validation_suite_runs_multiple_validation_layers() -> None:
     assert suite.fee_stress
     assert suite.parameter_variants
     assert suite.tested_stress_windows == 1
+    # Relative crisis evidence (for the SPY-relative live gate): per-window excess
+    # = strategy total return - benchmark total return; worst/mean derive from it.
+    excesses = suite.stress_window_excesses
+    assert len(excesses) == 1
+    window = suite.stress_windows[0].result
+    assert excesses[0] == pytest.approx(window.total_return - window.benchmark_return)
+    assert suite.worst_stress_excess == pytest.approx(min(excesses))
+    assert suite.mean_stress_excess == pytest.approx(sum(excesses) / len(excesses))
     assert "Factor Validation Suite" in text
     assert "Fee Stress" in text
     assert "Parameter Perturbation" in text
