@@ -1,5 +1,7 @@
 # 펀드 전략 분석 → 시스템 매핑
 
+> 외부 소스(다큐·인터뷰)에서 도출한 **검증 전 전략 가설**은 [`STRATEGY_NOTES.md`](STRATEGY_NOTES.md) 참조 (예: Biberion 이머징 샷건 — regime-dependent 바스켓 모멘텀).
+
 ## 1. 순수 퀀트 (수학·통계 기반)
 
 ### Renaissance Technologies — Medallion Fund
@@ -163,3 +165,4 @@ DCF/Multiples/RIM 통합 fair value로 가능한 전략 (자세히는 `VALUATION
 | **잔차(베타조정) 모멘텀** (`scripts/residual_momentum_skill.py`) | 2026-06-14, 선택실력 비교(raw vs residual, 207리밸, 단일 사전선언 정의·룩백 튜닝 없음) | raw IC +0.011·top−uni +1.19% / residual IC +0.010·top−uni +1.34% | **NO IMPROVEMENT** — 사전선언 2바(IC AND 스프레드 동시 개선) 중 IC 바 FAIL. **결론: 메가캡 유니버스가 고베타 동질적이라 벗겨낼 idiosyncratic이 적음 — 신호 엔지니어링으론 이 유니버스서 스킬 못 올림.** 변종 양산 안 함. 진짜 레버는 유니버스 확장(B)/PIT 데이터(A) | `out/residual-momentum-skill.md` |
 | **광역 유니버스 선택실력** (lever B, `scripts/picking_skill_broad.py`) | 2026-06-15, 1055종목(prices∩fundamentals) 171리밸 데실 rank-IC, 메가캡과 동일 랭커 | broad IC **−0.001** vs 메가캡 +0.018; **bottom decile +4.11% > top +2.05%(역전!)** | **BREADTH DOES NOT HELP (해로움)** — AQR 컴포짓이 중소형주서 단기반전에 걸려 랭킹 역전, 루저를 top으로 고름. 엣지는 메가캡-모멘텀 국한. 유니버스 확장으로 스킬 못 올림. 진짜 레버는 A(PIT 데이터, 유료·불확실). 동일 survivorship 조건이라 breadth 효과만 격리 | `out/picking-skill-broad.md` |
 | **52주 신고가 근접도** (George-Hwang 2004, `scripts/highproximity_skill.py`) | 2026-06-15, raw 모멘텀 대비·메가캡·**다중검정 보정 바(t>2.7, ~7신호 Bonferroni)** | proximity IC **−0.024(t≈−0.3)**·top −0.65% vs 유니버스 / raw IC +0.012 | **NO EDGE (음수)** — 메가캡선 신고가 근접 종목이 오히려 언더퍼폼. **factor-zoo 선택 레인 종료**(7+ 신호, 통과까지 검색=p해킹). 결론: 가용 데이터 신호공학으론 이 북의 선택 스킬 못 올림 | `out/highproximity-skill.md` |
+| **KR 급등주 스크린** (퀄리티-게이트 모멘텀+거래량 급증, `engine/screener.py`/`scripts/kr_surge_skill.py`) | 2026-06-18, KOSPI 시총상위 120·48개월 walk-forward·FinanceDataReader(무료)·**UNPINNED+생존편향 caveat**·단일 사전선언 정의 | rank-IC **−0.001(t≈0)**·급등 top10 **+2.09%/월 vs 유니버스 +2.82%**(top−uni **−0.73%/월**)·bottom10 +0.96% | **NO EDGE (음수)** — 급등(가격+거래량) 추격 top픽이 우량 유니버스 보유보다 매월 −0.73% 언더퍼폼(낙관 수치인데도). US 모멘텀-픽킹·52주고가 negatives + 김진 이사 "이게 간다 논리 안 먹힘"과 일치. **"잡주 제외(유동성/시총 게이트)"는 유효하나 그 안 급등 선택은 해로움.** advisory 전용·자본 미배선. 촉매(펀더멘털 이면) 차원은 미측정 | `out/kr-surge-skill.md` |

@@ -36,6 +36,7 @@ dependencies = [
     "torch>=2.5",
     "torchvision>=0.20",
     "python-dotenv>=1.0",
+    "finance-datareader>=0.9.202",
 ]
 
 [project.scripts]
