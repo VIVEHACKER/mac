@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -142,6 +143,11 @@ def _gate_int(name: str, floor: int, allow_reduced: bool) -> int:
 
 def _gate_float(name: str, floor: float, allow_reduced: bool) -> float:
     value = _env_float(name, floor)
+    # Reject non-finite values: NaN compares False to everything, so `nan` would slip past the
+    # `< floor` check AND be skipped by the readiness comparison (`ratio > nan` is False) — a
+    # one-value .env bypass. Clamp non-finite to the floor regardless of ack (Codex Step-7a P1).
+    if not math.isfinite(value):
+        return floor
     if value < floor and not allow_reduced:
         return floor
     return value

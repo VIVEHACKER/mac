@@ -70,6 +70,16 @@ def test_env_can_still_raise_gates(monkeypatch) -> None:
     assert policy.min_paper_oos_vs_backtest == 0.8
 
 
+def test_nonfinite_ratio_gate_is_clamped_to_floor(monkeypatch) -> None:
+    # Codex Step-7a P1: NaN compares False to everything, so `=nan` would slip past both the
+    # floor check and the readiness comparison — a one-value bypass. It must clamp to the floor.
+    _live(monkeypatch)
+    for value in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("LIVE_MIN_PAPER_OOS_VS_BACKTEST", value)
+        policy = load_live_trading_policy()
+        assert policy.min_paper_oos_vs_backtest == 0.5
+
+
 def test_paper_broker_has_no_live_floor(monkeypatch) -> None:
     monkeypatch.setenv("LIVE_BROKER", "alpaca-paper")
     policy = load_live_trading_policy()
