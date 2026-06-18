@@ -663,6 +663,30 @@ def test_broker_read_failure_blocks_batch_and_latches_halt(tmp_path) -> None:
     assert halt.current().halted
 
 
+def test_broker_read_failure_does_not_overwrite_existing_halt(tmp_path) -> None:
+    """A transient broker-read failure must NOT clobber a pre-existing manual halt —
+    else clearing the read-failure halt would silently resume past the original
+    unresolved blocker (Codex P2)."""
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    halt.activate("broker position mismatch", source="manual")
+
+    result = process_order_intents(
+        [_intent().normalized()],
+        broker=_FailingReadBroker(),
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert result[0].status == "risk_block"
+    assert halt.current().reason == "broker position mismatch"  # original preserved
+    assert halt.current().source == "manual"
+
+
 def test_uncertain_submit_halts_rest_of_batch(tmp_path) -> None:
     # Codex P1: an uncertain (temporary) submit latches a halt, and EVERY remaining intent in
     # the batch must be blocked rather than submitted into the uncertain broker state.

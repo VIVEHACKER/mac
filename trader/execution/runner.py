@@ -162,7 +162,12 @@ def process_order_intents(
         positions = broker.list_positions()
     except BrokerError as exc:
         reason = f"broker account/positions unavailable: {exc}"
-        if not dry_run:
+        # Latch a halt so a manual resume is required — but NEVER overwrite an existing
+        # halt's reason/source. A prior manual/reconciliation halt must survive: if this
+        # transient read-failure reason replaced it, clearing the read-failure halt would
+        # silently resume trading past the original unresolved blocker (Codex P2). Mirrors
+        # the kill-switch latch below, which also refuses to overwrite an active halt.
+        if not dry_run and not halt_store.current().halted:
             halt_store.activate(reason, source="execution-runner")
         _alert(
             notifier, level="critical", event="broker_read_failed", message=reason, dry_run=dry_run
