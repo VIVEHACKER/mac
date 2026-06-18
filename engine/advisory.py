@@ -46,12 +46,16 @@ class AdvisoryBand:
 def advisory_band(
     symbol: str, market: str, bars: list[PriceBar], config: BandConfig | None = None
 ) -> AdvisoryBand | None:
-    """ATR advisory band for one symbol, or None if there is too little history or zero ATR
-    (no volatility => risk cannot be framed). Bars are sorted defensively before ATR."""
+    """ATR advisory band for one symbol, or None if it cannot be framed: too little history,
+    zero ATR (no volatility), bars from a DIFFERENT market than requested, or a non-positive
+    entry/stop (high ATR vs price => impossible levels). Bars are sorted defensively before ATR."""
     cfg = config or BandConfig()
     if len(bars) < cfg.atr_window + 1:
         return None
     ordered = sorted(bars, key=lambda b: b.ts)
+    # Guard against computing a band from the wrong market's bars (Codex P2).
+    if ordered[-1].market.lower() != market.lower():
+        return None
     atr = _atr(ordered, cfg.atr_window)
     if atr <= 0:
         return None
@@ -59,6 +63,10 @@ def advisory_band(
     entry = close - cfg.entry_pullback_atr * atr
     stop = entry - cfg.stop_atr_mult * atr
     target = entry + cfg.target_atr_mult * atr
+    # High ATR relative to price can drive entry/stop to zero or negative — non-tradable. Skip
+    # rather than present impossible risk levels as usable (Codex P2).
+    if entry <= 0 or stop <= 0:
+        return None
     risk = entry - stop
     reward_risk = (target - entry) / risk if risk > 0 else 0.0
     return AdvisoryBand(symbol, market, close, atr, entry, stop, target, reward_risk)

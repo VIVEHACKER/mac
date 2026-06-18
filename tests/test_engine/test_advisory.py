@@ -63,6 +63,34 @@ def test_unsorted_bars_handled() -> None:
     assert advisory_band("X", "kr", shuffled) == advisory_band("X", "kr", ordered)
 
 
+def test_wrong_market_bars_are_skipped() -> None:
+    # Codex P2: bars carry market "kr"; requesting "us" must NOT compute a band from them.
+    kr_bars = _bars("X", [100.0 + i * 0.5 for i in range(40)], market="kr")
+    assert advisory_band("X", "us", kr_bars) is None
+    assert advisory_band("X", "kr", kr_bars) is not None
+
+
+def test_nonpositive_levels_are_skipped() -> None:
+    # Codex P2: huge ATR relative to price drives stop negative -> non-tradable -> skip.
+    start = date(2026, 1, 1)
+    volatile = [
+        PriceBar(
+            symbol="V",
+            market="kr",
+            source_symbol="V",
+            ts=start + timedelta(days=i),
+            open=10.0,
+            high=15.0,
+            low=5.0,
+            close=10.0,
+            volume=1000.0,
+        )
+        for i in range(40)
+    ]
+    band = advisory_band("V", "kr", volatile)
+    assert band is None  # stop = 10 - 0.5*ATR - 2*ATR would be <= 0
+
+
 def test_bands_for_preserves_order_and_skips_unscorable() -> None:
     bars_by = {
         "A": _bars("A", [100.0 + i * 0.5 for i in range(40)]),
