@@ -26,14 +26,45 @@ from engine.advisory import AdvisoryBand, BandConfig, advisory_bands_for  # noqa
 _CURRENCY = {"kr": "KRW", "us": "USD"}
 
 
-def _fetch(symbols: list[str], market: str, start: str, end: str) -> dict[str, list[PriceBar]]:
+def _aqr_us_picks(top_n: int) -> list[tuple[str, str]]:
+    """Top-N US picks from the VALIDATED AQR rank (value+momentum+quality) on the pinned megacap
+    universe — the only selection in this repo with a measured (modest, fragile) edge. Returns
+    (symbol, 'us') in rank order; bands are then attached from fresh OHLCV in main()."""
+    from datetime import datetime
+
+    from data.price_snapshot import read_price_snapshot
+    from scripts.aqr_ideal_grid import DEFAULT_PRICES, DEFAULT_SNAPSHOT
+    from scripts.aqr_ideal_walkforward import MEGACAPS, build_pricebars, lookup_pit, prefetch
+    from strategies.factor_aqr import rank_aqr_factors
+
+    prices = read_price_snapshot(DEFAULT_PRICES, verify=True)
+    fund_cache = prefetch(None, snapshot_path=DEFAULT_SNAPSHOT)
+    last = prices.index.max()
+    as_of = datetime(last.year, last.month, last.day)
+    bars_by_sym, fund_by_sym = {}, {}
+    for sym in MEGACAPS:
+        fund = lookup_pit(fund_cache.get(sym, []), as_of)
+        if fund is None:
+            continue
+        bars = build_pricebars(prices, sym, last)
+        if bars:
+            fund_by_sym[sym.upper()] = fund
+            bars_by_sym[sym] = bars
+    scores = rank_aqr_factors(bars_by_sym, fund_by_sym, lookback=126)
+    return [(s.symbol, "us") for s in scores[:top_n]]
+
+
+def _fetch(
+    symbols: list[str], market: str, start: str, end: str | None
+) -> dict[str, list[PriceBar]]:
     import FinanceDataReader as fdr  # noqa: N813
 
     currency = _CURRENCY.get(market, "")
     out: dict[str, list[PriceBar]] = {}
     for sym in symbols:
         try:
-            df = fdr.DataReader(sym, start, end)
+            # end=None -> fetch to the latest available bar (avoid a stale hard-coded cap).
+            df = fdr.DataReader(sym, start) if end is None else fdr.DataReader(sym, start, end)
         except Exception:
             continue
         if df is None or df.empty or "Close" not in df.columns:
@@ -59,12 +90,15 @@ def _fetch(symbols: list[str], market: str, start: str, end: str) -> dict[str, l
     return out
 
 
-def format_bands(bands: list[AdvisoryBand], *, market: str) -> str:
+def format_bands(
+    bands: list[AdvisoryBand], *, market: str, selection: str = "your watchlist"
+) -> str:
     lines = [
-        "# Advisory entry/stop/target — RISK FRAMING ONLY (not a validated signal)",
+        "# Advisory entry/stop/target — RISK FRAMING (not a chart/surge prediction)",
         "",
-        f"market={market} | selection is YOURS (surge/chart picking measured ~0 edge); these are "
-        "ATR risk levels for manual execution on Toss.",
+        f"market={market} | selection: {selection} | these are ATR risk levels for manual "
+        "execution on Toss — surge/chart picking measured ~0 edge, so only the AQR selection "
+        "(if used) carries a measured edge; the bands frame risk, they do not predict.",
         "",
         "| symbol | close | entry | stop | target | R:R | ATR |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -80,22 +114,41 @@ def format_bands(bands: list[AdvisoryBand], *, market: str) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Advisory entry/stop/target for a watchlist.")
-    parser.add_argument("--symbols", required=True, help="Comma-separated tickers (your picks).")
+    parser = argparse.ArgumentParser(description="Advisory entry/stop/target for picks.")
+    parser.add_argument("--symbols", help="Comma-separated tickers (your watchlist).")
+    parser.add_argument(
+        "--from-aqr",
+        action="store_true",
+        help="Auto-select picks from the VALIDATED US AQR rank instead of --symbols (US only).",
+    )
+    parser.add_argument("--top", type=int, default=7, help="Number of AQR picks (--from-aqr).")
     parser.add_argument("--market", choices=["kr", "us"], default="kr")
-    parser.add_argument("--start", default="2025-06-01")
-    parser.add_argument("--end", default="2026-05-31")
+    parser.add_argument("--start", default="2025-01-01", help="History start (lookback for ATR).")
+    parser.add_argument("--end", default=None, help="History end; default = latest available.")
     parser.add_argument("--atr-window", type=int, default=14)
     args = parser.parse_args()
 
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    if not symbols:
-        print("no symbols given")
+    if args.from_aqr:
+        if args.market != "us":
+            print(
+                "--from-aqr is US-only (the validated AQR strategy is US megacap); use --market us"
+            )
+            return 2
+        picks = _aqr_us_picks(args.top)
+        selection = f"validated US AQR top-{args.top}"
+    else:
+        if not args.symbols:
+            print("provide --symbols TICKERS or --from-aqr (US validated selection)")
+            return 2
+        picks = [(s.strip(), args.market) for s in args.symbols.split(",") if s.strip()]
+        selection = "your watchlist"
+    if not picks:
+        print("no picks resolved")
         return 2
+    symbols = [p[0] for p in picks]
     bars_by = _fetch(symbols, args.market, args.start, args.end)
-    picks = [(s, args.market) for s in symbols]
     bands = advisory_bands_for(picks, bars_by, BandConfig(atr_window=args.atr_window))
-    print(format_bands(bands, market=args.market))
+    print(format_bands(bands, market=args.market, selection=selection))
     return 0
 
 
