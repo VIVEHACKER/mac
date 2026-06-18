@@ -1461,6 +1461,11 @@ def _set_live_env(
     monkeypatch.setenv("LIVE_BROKER", broker)
     monkeypatch.setenv("LIVE_MAX_CAPITAL", "10000")
     monkeypatch.setenv("LIVE_POLICY_VERSION", "test-policy-v1")
+    # These readiness tests deliberately choose explicit gate thresholds (including reduced
+    # ones) to isolate a single gate, so acknowledge reduced validation — otherwise the live
+    # floor (Step 7) would clamp the chosen thresholds. The floor itself is covered separately
+    # in tests/test_risk/test_live_gate_floor.py.
+    monkeypatch.setenv("LIVE_ACCEPT_REDUCED_VALIDATION", "true")
     if min_paper_days is not None:
         monkeypatch.setenv("LIVE_MIN_PAPER_DAYS", min_paper_days)
     if min_shadow_days is not None:
