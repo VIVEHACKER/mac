@@ -26,7 +26,10 @@ class ScreenConfig:
     surge_window: int = 5  # recent window whose volume is compared to the baseline
     volume_base_window: int = 20  # trailing baseline window for average volume
     atr_window: int = 14
-    min_avg_dollar_volume: float = 0.0  # liquidity gate — the primary 잡주 exclusion
+    # Liquidity gate — the primary 잡주 exclusion. In the bars' NATIVE currency (price*volume):
+    # USD for US bars, KRW for KR bars. Run the screener per-market and set the threshold to the
+    # market's currency (a single mixed-currency call cannot use one threshold) — Codex P2.
+    min_avg_turnover: float = 0.0
     min_quality: float = 0.0  # quality gate (only applied when a quality map is supplied)
     min_momentum: float = 0.0  # require a positive run-up by default
     min_volume_surge: float = 1.5  # recent avg volume must be >= this x the baseline
@@ -43,7 +46,7 @@ class Candidate:
     close: float
     momentum: float
     volume_surge: float
-    avg_dollar_volume: float
+    avg_turnover: float  # native-currency price*volume (USD for US, KRW for KR)
     quality: float | None
     atr: float
     entry: float  # ADVISORY entry (close minus a small ATR pullback)
@@ -63,7 +66,8 @@ def _atr(bars: list[PriceBar], window: int) -> float:
     return fmean(trs) if trs else 0.0
 
 
-def _avg_dollar_volume(bars: list[PriceBar], window: int) -> float:
+def _avg_turnover(bars: list[PriceBar], window: int) -> float:
+    """Average price*volume (turnover) over the last ``window`` bars, in native currency."""
     recent = bars[-window:]
     if not recent:
         return 0.0
@@ -117,12 +121,15 @@ def screen_surge(
     )
 
     passed: list[tuple[str, str, float, float, float, float, float | None, float]] = []
-    for symbol, bars in bars_by_symbol.items():
-        if len(bars) < min_bars:
+    for symbol, raw_bars in bars_by_symbol.items():
+        if len(raw_bars) < min_bars:
             continue
+        # Defensive sort: trailing-window signals assume chronological order; an unsorted
+        # series would make bars[-1] stale and the windows wrong (Codex P2).
+        bars = sorted(raw_bars, key=lambda b: b.ts)
         last = bars[-1]
-        adv = _avg_dollar_volume(bars, cfg.volume_base_window)
-        if adv < cfg.min_avg_dollar_volume:  # liquidity gate — exclude 잡주
+        turnover = _avg_turnover(bars, cfg.volume_base_window)
+        if turnover < cfg.min_avg_turnover:  # liquidity gate — exclude 잡주
             continue
         q = quality.get(symbol) if quality is not None else None
         if quality is not None and (q is None or q < cfg.min_quality):  # quality gate
@@ -134,7 +141,7 @@ def screen_surge(
         if surge < cfg.min_volume_surge:
             continue
         atr = _atr(bars, cfg.atr_window)
-        passed.append((symbol, last.market, last.close, mom, surge, adv, q, atr))
+        passed.append((symbol, last.market, last.close, mom, surge, turnover, q, atr))
 
     if not passed:
         return []
@@ -142,7 +149,7 @@ def screen_surge(
     mom_z = _z_scores([row[3] for row in passed])
     surge_z = _z_scores([row[4] for row in passed])
     candidates: list[Candidate] = []
-    for i, (symbol, market, close, mom, surge, adv, q, atr) in enumerate(passed):
+    for i, (symbol, market, close, mom, surge, turnover, q, atr) in enumerate(passed):
         score = mom_z[i] + surge_z[i]
         entry = close - cfg.entry_pullback_atr * atr
         candidates.append(
@@ -152,7 +159,7 @@ def screen_surge(
                 close=close,
                 momentum=mom,
                 volume_surge=surge,
-                avg_dollar_volume=adv,
+                avg_turnover=turnover,
                 quality=q,
                 atr=atr,
                 entry=entry,
@@ -162,7 +169,7 @@ def screen_surge(
                 reasons=(
                     f"momentum={mom:+.1%}",
                     f"volume_surge={surge:.2f}x",
-                    f"adv=${adv:,.0f}",
+                    f"turnover={turnover:,.0f}",
                 ),
             )
         )

@@ -49,7 +49,7 @@ def _flat_vol(v: float = 1000.0, n: int = _N) -> list[float]:
 
 
 def test_liquidity_gate_excludes_junk() -> None:
-    cfg = ScreenConfig(min_avg_dollar_volume=100_000)
+    cfg = ScreenConfig(min_avg_turnover=100_000)
     bars = {
         "GOOD": _bars("GOOD", _rising(), _surge_vol(base=1000, surge=3000)),
         "JUNK": _bars("JUNK", _rising(), _surge_vol(base=5, surge=15)),  # same surge, tiny $vol
@@ -120,3 +120,16 @@ def test_top_n_limit() -> None:
 def test_insufficient_history_skipped() -> None:
     bars = {"SHORT": _bars("SHORT", _rising(n=10), _surge_vol(n=10, window=2))}
     assert screen_surge(bars) == []
+
+
+def test_unsorted_bars_are_sorted_defensively() -> None:
+    # Codex P2: an out-of-order series must be sorted by ts before window calcs, so the result
+    # matches the sorted input (here: a clean surging name that should pass).
+    ordered = _bars("X", _rising(), _surge_vol())
+    shuffled = [ordered[i] for i in (*range(40, _N), *range(0, 40))]  # second half first
+    from_ordered = screen_surge({"X": ordered})
+    from_shuffled = screen_surge({"X": shuffled})
+    assert len(from_shuffled) == 1
+    assert from_shuffled[0].close == from_ordered[0].close
+    assert from_shuffled[0].momentum == from_ordered[0].momentum
+    assert from_shuffled[0].volume_surge == from_ordered[0].volume_surge
