@@ -139,6 +139,11 @@ def main() -> int:
         if args.top < 1:
             print("--top must be >= 1")
             return 2
+        from scripts.aqr_ideal_grid import DEFAULT_PRICES
+
+        if not DEFAULT_PRICES.exists():
+            print(f"--from-aqr needs the pinned AQR snapshot at {DEFAULT_PRICES} (local data)")
+            return 2
         picks = _aqr_us_picks(args.top)
         selection = f"validated US AQR top-{args.top}"
     else:

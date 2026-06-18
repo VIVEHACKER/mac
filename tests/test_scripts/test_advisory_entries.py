@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from engine.advisory import AdvisoryBand
 from scripts.advisory_entries import format_bands
 
@@ -39,8 +41,13 @@ def test_format_bands_shows_selection_label() -> None:
 
 
 def test_aqr_us_picks_returns_ranked_us_tuples() -> None:
-    # Validated-selection wiring: ranks the pinned AQR megacap universe (no network).
+    # Validated-selection wiring: ranks the pinned AQR megacap universe (no network). The pinned
+    # snapshots are gitignored (local-only), so skip cleanly where they are absent (e.g. CI).
     from scripts.advisory_entries import _aqr_us_picks
+    from scripts.aqr_ideal_grid import DEFAULT_PRICES, DEFAULT_SNAPSHOT
+
+    if not DEFAULT_PRICES.exists() or not DEFAULT_SNAPSHOT.exists():
+        pytest.skip("pinned price/fundamentals snapshot not available (gitignored; CI)")
 
     picks = _aqr_us_picks(5)
     assert len(picks) == 5
