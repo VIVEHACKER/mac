@@ -30,6 +30,8 @@ def _aqr_us_picks(top_n: int) -> list[tuple[str, str]]:
     """Top-N US picks from the VALIDATED AQR rank (value+momentum+quality) on the pinned megacap
     universe — the only selection in this repo with a measured (modest, fragile) edge. Returns
     (symbol, 'us') in rank order; bands are then attached from fresh OHLCV in main()."""
+    if top_n < 1:  # a negative slice would silently select ~the whole universe (Codex P2)
+        return []
     from datetime import datetime
 
     from data.price_snapshot import read_price_snapshot
@@ -133,6 +135,9 @@ def main() -> int:
             print(
                 "--from-aqr is US-only (the validated AQR strategy is US megacap); use --market us"
             )
+            return 2
+        if args.top < 1:
+            print("--top must be >= 1")
             return 2
         picks = _aqr_us_picks(args.top)
         selection = f"validated US AQR top-{args.top}"

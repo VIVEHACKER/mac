@@ -46,3 +46,11 @@ def test_aqr_us_picks_returns_ranked_us_tuples() -> None:
     assert len(picks) == 5
     assert all(market == "us" for _, market in picks)
     assert all(isinstance(sym, str) and sym for sym, _ in picks)
+
+
+def test_aqr_us_picks_rejects_nonpositive_top() -> None:
+    # Codex P2: a negative top must not slice to ~the whole universe.
+    from scripts.advisory_entries import _aqr_us_picks
+
+    assert _aqr_us_picks(0) == []
+    assert _aqr_us_picks(-5) == []
