@@ -163,33 +163,42 @@ def main() -> int:
                 bars_by[sym] = pbars
         scores = rank_aqr_factors(bars_by, fund_by, lookback=126)
         picks = [s.symbol for s in scores[:TOP_N]]
-        adv_rets, base_rets = [], []
+        adv_rets, base_rets, month_trades = [], [], []
+        complete = True
         for sym in picks:
             bars = ohlcv.get(sym) or ohlcv.get(sym.upper())
-            if not bars:
-                continue
-            rebal_date = rebal.date()
-            idx = ts_index.get(sym, ts_index.get(sym.upper(), {})).get(rebal_date)
-            if idx is None:  # align to nearest prior trading day in the OHLCV feed
-                prior = [b.ts for b in bars if b.ts <= rebal_date]
-                if not prior:
-                    continue
-                idx = len(prior) - 1
-            adv = _simulate_advisory(bars, idx)
-            base = _baseline(bars, idx)
+            idx = None
+            if bars:
+                rebal_date = rebal.date()
+                idx = ts_index.get(sym, ts_index.get(sym.upper(), {})).get(rebal_date)
+                if idx is None:  # align to nearest prior trading day in the OHLCV feed
+                    prior = [b.ts for b in bars if b.ts <= rebal_date]
+                    idx = (len(prior) - 1) if prior else None
+            adv = _simulate_advisory(bars, idx) if (bars and idx is not None) else None
+            base = _baseline(bars, idx) if (bars and idx is not None) else None
             if adv is None or base is None:
-                continue
+                # A selected pick lacks aligned OHLCV: skip the WHOLE month rather than
+                # renormalize the average over the data-available subset (Codex P2 — bias).
+                complete = False
+                break
             adv_rets.append(adv)
             base_rets.append(base)
-            adv_trades.append(adv)
-            if adv != 0.0:
-                fills += 1
-                if adv > 0:
-                    wins += 1
-        if len(adv_rets) >= 3:
+            month_trades.append(adv)
+        if complete and adv_rets:
             months += 1
             adv_period.append(sum(adv_rets) / len(adv_rets))
             base_period.append(sum(base_rets) / len(base_rets))
+            for adv in month_trades:  # commit trade stats only for fully-covered months
+                adv_trades.append(adv)
+                if adv != 0.0:
+                    fills += 1
+                    if adv > 0:
+                        wins += 1
+
+    if not adv_period:
+        # No fully-covered rebalances — emit no verdict from zero evidence (Codex P2).
+        print("no valid rebalances with full OHLCV coverage — cannot validate (check range/data)")
+        return 1
 
     def avg(xs: list[float]) -> float:
         return sum(xs) / len(xs) if xs else 0.0
