@@ -50,6 +50,7 @@ logs/
 
 # Local tool artifacts
 .omx/
+.claude/
 
 # 백테스트 결과
 results/
