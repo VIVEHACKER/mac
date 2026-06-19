@@ -191,7 +191,7 @@ def main():
         tgt = sum(1 for r in sel if r[1] == "target")
         return tgt, len(sel)
 
-    L = []
+    L = []  # noqa: N806
     L.append("")
     L.append("---")
     L.append("")

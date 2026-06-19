@@ -312,10 +312,13 @@ def _structure_vote(feat: _Features, direction: str) -> SignalContribution | Non
         defining = [e for e in ms.events if e.event_type.endswith(("CHoCH", "BOS"))]
         if defining:
             latest = max(defining, key=lambda e: e.bar_index)
-            if latest.event_type.endswith("CHoCH") and not _has_supporting_fvg(feat, bias):
-                if weight > _W_STRUCTURE_NOFVG_CHOCH:
-                    weight = _W_STRUCTURE_NOFVG_CHOCH
-                    note += " · FVG 미동반 CHoCH 가중 캡(A-1)"
+            if (
+                latest.event_type.endswith("CHoCH")
+                and not _has_supporting_fvg(feat, bias)
+                and weight > _W_STRUCTURE_NOFVG_CHOCH
+            ):
+                weight = _W_STRUCTURE_NOFVG_CHOCH
+                note += " · FVG 미동반 CHoCH 가중 캡(A-1)"
     d = _bias_dir(bias)
     aligned = 1 if d == _intended_sign(direction) else -1
     return SignalContribution(
