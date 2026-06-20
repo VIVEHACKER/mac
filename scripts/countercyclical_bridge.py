@@ -43,16 +43,24 @@ DEFAULT_MARKET_CSV = ROOT / "data" / "snapshots" / "spy-history.csv"
 def load_market_prices(path: Path, as_of: date | None, window: int) -> list[float]:
     """Read (date, close) rows, keep rows <= as_of, return the last `window` closes oldest->newest.
 
-    CSV must have a 'date' (YYYY-MM-DD) and a 'close' column. PIT: nothing after as_of is used."""
-    rows: list[tuple[date, float]] = []
+    CSV must have a 'date' (YYYY-MM-DD) and a 'close' column. PIT: nothing after as_of is used.
+    Fail-closed (caught by main's ValueError handler, not a raw KeyError traceback): missing columns
+    and conflicting duplicate dates raise ValueError; identical duplicate dates dedupe."""
+    by_date: dict[date, float] = {}
     with path.open(newline="") as fh:
-        for r in csv.DictReader(fh):
+        reader = csv.DictReader(fh)
+        fields = reader.fieldnames or []
+        if "date" not in fields or "close" not in fields:
+            raise ValueError(f"market CSV must have 'date' and 'close' columns (got {fields})")
+        for r in reader:
             d = datetime.fromisoformat(r["date"]).date()
             if as_of is not None and d > as_of:
                 continue
-            rows.append((d, float(r["close"])))
-    rows.sort(key=lambda x: x[0])
-    closes = [c for _d, c in rows]
+            c = float(r["close"])
+            if d in by_date and by_date[d] != c:
+                raise ValueError(f"market CSV has conflicting closes for {d}: {by_date[d]} vs {c}")
+            by_date[d] = c
+    closes = [by_date[d] for d in sorted(by_date)]
     return closes[-window:] if window > 0 else closes
 
 
@@ -88,7 +96,9 @@ def main(argv: list[str] | None = None) -> int:
         core = select_core_basket(universe, sectors=sectors, as_of=effective)
         core_weights = {h.symbol: h.weight for h in core.holdings}
 
-        prices = load_market_prices(args.market_csv, as_of, args.window)
+        # PIT: slice the market series to the SAME resolved cutoff as the core/hunt legs (not the raw
+        # user as_of, which is None when --as-of is omitted and would read future prices).
+        prices = load_market_prices(args.market_csv, effective, args.window)
         drawdown = market_drawdown(prices)
         gate = default_value_gate(core, threshold=args.value_threshold)
         deployment = compute_deployment(drawdown, gate, budget=args.bridge_budget)
@@ -98,8 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     print(format_deployment(deployment))
 
     if args.book:
+        # Same resolved cutoff for the hunt leg too (single-cutoff discipline across all legs).
         insider_signals, capital_signals, hunt_universe, _sec, _eff = build_hunt_inputs(
-            catalog=MarketDataCatalog(args.db), as_of=as_of, **common
+            catalog=MarketDataCatalog(args.db), as_of=effective, **common
         )
         hunt = select_hunt_basket(
             insider_signals,

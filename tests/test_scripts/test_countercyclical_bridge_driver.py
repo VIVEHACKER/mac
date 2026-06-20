@@ -64,6 +64,36 @@ def test_load_window_keeps_the_last_n_closes(tmp_path: Path):
     assert closes == [102.0, 103.0]  # trailing window, newest end
 
 
+def test_load_missing_close_column_raises_valueerror(tmp_path: Path):
+    # ValueError (not a raw KeyError) so main()'s (ValueError, FileNotFoundError) handler catches it.
+    csv = tmp_path / "spy.csv"
+    csv.write_text("date,high\n2026-05-29,100.0\n")
+    with pytest.raises(ValueError):
+        cb.load_market_prices(csv, None, window=252)
+
+
+def test_load_missing_date_column_raises_valueerror(tmp_path: Path):
+    csv = tmp_path / "spy.csv"
+    csv.write_text("time,close\n2026-05-29,100.0\n")
+    with pytest.raises(ValueError):
+        cb.load_market_prices(csv, None, window=252)
+
+
+def test_load_conflicting_duplicate_date_raises(tmp_path: Path):
+    csv = tmp_path / "spy.csv"
+    _write_history(
+        csv, [("2026-05-29", 100.0), ("2026-05-29", 110.0)]
+    )  # same date, different close
+    with pytest.raises(ValueError):
+        cb.load_market_prices(csv, None, window=252)
+
+
+def test_load_identical_duplicate_date_dedupes(tmp_path: Path):
+    csv = tmp_path / "spy.csv"
+    _write_history(csv, [("2026-05-29", 100.0), ("2026-05-29", 100.0), ("2026-05-30", 105.0)])
+    assert cb.load_market_prices(csv, None, window=252) == [100.0, 105.0]
+
+
 def test_load_then_drawdown_is_pit_correct(tmp_path: Path):
     # Peak (120) is AFTER as_of and must be excluded; within the cut, peak=110, last=99 -> 10% drawdown.
     csv = tmp_path / "spy.csv"
