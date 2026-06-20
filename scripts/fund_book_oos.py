@@ -83,19 +83,19 @@ def assemble_book(args, *, as_of):
                 "pass --momentum-snapshot to pin fundamentals",
                 file=sys.stderr,
             )
-        universe = load_momentum_universe(args.momentum_universe)
+        momentum_syms = load_momentum_universe(args.momentum_universe)
         prices = read_price_snapshot(args.price_history, verify=True)
         fund_cache = prefetch(MarketDataCatalog(args.db), snapshot_path=args.momentum_snapshot)
         as_of_dt = datetime.combine(effective, datetime.max.time())
         fund_by_sym = {}
-        for sym in universe:
+        for sym in momentum_syms:
             rec = lookup_pit(fund_cache.get(sym, []), as_of_dt)
             if rec is not None:
                 fund_by_sym[sym.upper()] = rec
         momentum = select_momentum_basket(
             prices,
             fund_by_sym,
-            universe,
+            momentum_syms,
             as_of=effective,
             top_n=args.momentum_top_n,
             cap=args.momentum_cap,
@@ -117,7 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--score", action="store_true", help="score the ledger instead of recording")
     p.add_argument("--dry-run", action="store_true", help="print the entry without appending")
     p.add_argument("--periods-per-year", type=float, default=12.0)
-    p.add_argument("--max-staleness-days", type=int, default=None)
+    p.add_argument(
+        "--max-staleness-days",
+        type=int,
+        default=None,
+        help="bound carry-forward of stale marks (per symbol), applied at BOTH record and score time; "
+        "None = unbounded (entry prices may be stale — pass a bound for forward-OOS integrity)",
+    )
     # assembly knobs (mirror scripts/fund_book.py)
     p.add_argument("--core-fraction", type=float, default=0.35)
     p.add_argument("--hunt-fraction", type=float, default=0.15)
@@ -150,11 +156,15 @@ def main(argv: list[str] | None = None) -> int:
         as_of = datetime.fromisoformat(args.as_of).date() if args.as_of else None
         book, effective = assemble_book(args, as_of=as_of)
         rebal_date = effective.isoformat()
-        marks_at = mark_prices_at_dates(history, [rebal_date]).get(rebal_date, {})
+        # Same staleness bound as scoring (line above) — else a stale entry price would be recorded
+        # then dropped at score time, silently recomposing the book (adversarial-review HIGH).
+        marks_at = mark_prices_at_dates(
+            history, [rebal_date], max_staleness_days=args.max_staleness_days
+        ).get(rebal_date, {})
         bench_price = marks_at.get(args.benchmark.upper())
-        if bench_price is None:
+        if bench_price is None or bench_price <= 0.0:
             raise SystemExit(
-                f"no benchmark price for {args.benchmark} at {rebal_date} in {args.marks}"
+                f"no positive benchmark price for {args.benchmark} at {rebal_date} in {args.marks}"
             )
         entry = fund_book_to_entry(
             book,

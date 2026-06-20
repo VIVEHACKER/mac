@@ -123,19 +123,19 @@ def main(argv: list[str] | None = None) -> int:
                     "pass --momentum-snapshot to pin fundamentals",
                     file=sys.stderr,
                 )
-            universe = load_momentum_universe(args.momentum_universe)
+            momentum_syms = load_momentum_universe(args.momentum_universe)
             prices = read_price_snapshot(args.price_history, verify=True)
             fund_cache = prefetch(MarketDataCatalog(args.db), snapshot_path=args.momentum_snapshot)
             as_of_dt = datetime.combine(effective, datetime.max.time())
             fund_by_sym = {}
-            for sym in universe:
+            for sym in momentum_syms:
                 rec = lookup_pit(fund_cache.get(sym, []), as_of_dt)
                 if rec is not None:
                     fund_by_sym[sym.upper()] = rec
             momentum = select_momentum_basket(
                 prices,
                 fund_by_sym,
-                universe,
+                momentum_syms,
                 as_of=effective,
                 top_n=args.momentum_top_n,
                 cap=args.momentum_cap,

@@ -173,6 +173,43 @@ def test_score_vs_backtest_only_when_provided():
     assert rec.vs_backtest == pytest.approx(rec.annualized_excess / 0.08)
 
 
+def test_score_skips_symbol_with_zero_entry_price():
+    # adversarial-review MEDIUM: a non-positive entry price must be skipped (renormalise over the rest)
+    entries = [
+        _entry("2026-01-01", {"A": 0.5, "B": 0.5}, {"A": 0.0, "B": 100.0}, 400.0),  # A buy = 0
+        _entry("2026-02-01", {"A": 0.5, "B": 0.5}, {"A": 0.0, "B": 100.0}, 400.0),
+    ]
+    marks = {"2026-02-01": {"A": 120.0, "B": 110.0, "SPY": 400.0}}
+    rec = score_ledger(entries, marks)
+    # A skipped (buy <= 0) -> renormalise over B only: +10%; bench flat -> excess 0.10
+    assert rec.cumulative_return == pytest.approx(0.10)
+    assert rec.cumulative_excess == pytest.approx(0.10)
+
+
+def test_score_skips_period_with_missing_benchmark_mark():
+    # adversarial-review MEDIUM: benchmark symbol absent from exit marks -> period skipped (fail-closed)
+    entries = [
+        _entry("2026-01-01", {"A": 1.0}, {"A": 100.0}, 400.0),
+        _entry("2026-02-01", {"A": 1.0}, {"A": 100.0}, 400.0),
+    ]
+    marks = {"2026-02-01": {"A": 120.0}}  # no SPY
+    rec = score_ledger(entries, marks)
+    assert rec.n_periods == 0
+
+
+def test_score_reserve_cash_treated_flat():
+    # adversarial-review LOW: weights summing < 1.0 (reserve cash) -> reserve neither helps nor hurts;
+    # port return is over the invested names only, NOT diluted by reserve.
+    entries = [
+        _entry("2026-01-01", {"A": 0.5}, {"A": 100.0}, 400.0),  # invested 0.5, reserve 0.5
+        _entry("2026-02-01", {"A": 0.5}, {"A": 100.0}, 400.0),
+    ]
+    marks = {"2026-02-01": {"A": 120.0, "SPY": 400.0}}
+    rec = score_ledger(entries, marks)
+    # A +20%, renormalised over invested (A only) -> 0.20 (NOT 0.10 from diluting by reserve)
+    assert rec.cumulative_return == pytest.approx(0.20)
+
+
 def test_score_empty_or_single_entry_is_zero_record():
     assert score_ledger([], {}).n_periods == 0
     single = [_entry("2026-01-01", {"A": 1.0}, {"A": 100.0}, 400.0)]
