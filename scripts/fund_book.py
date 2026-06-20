@@ -36,6 +36,19 @@ DEFAULT_SECTORS = ROOT / "data" / "sectors" / "sp400-600-current-sectors.csv"
 DEFAULT_DB = Path("/Users/jjuni/재무관리 모델/trader/data/store/trader.duckdb")
 
 
+def load_momentum_universe(path: Path | None) -> list[str]:
+    """Symbols for the momentum sleeve: a CSV/newline list (first column, header 'symbol'/'ticker'
+    skipped), uppercased; defaults to the validated MEGACAPS list when no path is given."""
+    if path is None:
+        return list(MEGACAPS)
+    out: list[str] = []
+    for line in path.read_text().splitlines():
+        sym = line.split(",")[0].strip().upper()
+        if sym and sym not in {"SYMBOL", "TICKER"}:
+            out.append(sym)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Fund book assembler (barbell: core + hunt + momentum)")
     p.add_argument("--as-of", type=str, default=None, help="YYYY-MM-DD PIT cutoff (default latest)")
@@ -62,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--momentum-top-n", type=int, default=7)
     p.add_argument("--momentum-cap", type=float, default=0.20)
+    p.add_argument(
+        "--momentum-universe",
+        type=Path,
+        default=None,
+        help="CSV/newline symbol list for the momentum sleeve (default: validated MEGACAPS)",
+    )
     args = p.parse_args(argv)
 
     as_of = datetime.fromisoformat(args.as_of).date() if args.as_of else None
@@ -98,18 +117,25 @@ def main(argv: list[str] | None = None) -> int:
         # Momentum/IDEAL sleeve (opt-in: needs a time-series price history + megacap fundamentals).
         # Same resolved `effective` cutoff; fundamentals PIT-filtered via lookup_pit before ranking.
         if args.price_history:
+            if args.momentum_snapshot is None:
+                print(
+                    "⚠️  momentum running off the LIVE catalog (NOT reproducible) — "
+                    "pass --momentum-snapshot to pin fundamentals",
+                    file=sys.stderr,
+                )
+            universe = load_momentum_universe(args.momentum_universe)
             prices = read_price_snapshot(args.price_history, verify=True)
             fund_cache = prefetch(MarketDataCatalog(args.db), snapshot_path=args.momentum_snapshot)
             as_of_dt = datetime.combine(effective, datetime.max.time())
             fund_by_sym = {}
-            for sym in MEGACAPS:
+            for sym in universe:
                 rec = lookup_pit(fund_cache.get(sym, []), as_of_dt)
                 if rec is not None:
                     fund_by_sym[sym.upper()] = rec
             momentum = select_momentum_basket(
                 prices,
                 fund_by_sym,
-                MEGACAPS,
+                universe,
                 as_of=effective,
                 top_n=args.momentum_top_n,
                 cap=args.momentum_cap,

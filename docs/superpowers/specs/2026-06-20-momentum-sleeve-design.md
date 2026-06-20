@@ -22,10 +22,11 @@ scripts→engine back-import.
 This sleeve **does** carry the project's one validated edge: 12-1 mega-cap momentum, **direction robust
 across regimes, +8.15%/yr walk-forward but +size fragile** (PBO 0.39; significant excess US-only — see
 the trader-fund memory). The sleeve is the *validated* config wired as a fund leg; it is NOT a new
-claim and NOT re-tuned here. The weighting is the deployed `weights_from_picks` (top-7, 20% cap →
-equal-weight since 7×0.20≈1.0; inverse-vol only when the cap is slack). The sleeve makes the SAME
-portfolio the validated walk-forward / paper-drill builds — fidelity is the whole point of extracting
-rather than reimplementing.
+claim and NOT re-tuned here. The weighting is the deployed `weights_from_picks`: the default top-7 ×
+20% cap = 1.4 > 1.0, so the cap is **slack and the path is inverse-vol** (per-name capped at 20%);
+equal-weight only when N × cap ≈ 1.0 (e.g. the top-5 candidate, 5 × 0.20 = 1.0). The sleeve makes the
+SAME portfolio the validated walk-forward / paper-drill builds — fidelity is the whole point of
+extracting rather than reimplementing.
 
 ## 2. Module 1 — `engine/momentum_weights.py` (extraction, no behavior change)
 
@@ -75,8 +76,8 @@ zero eligible names → empty basket (eligible_count 0), `momentum_sleeve_target
 with empty weights (all reserve). Down in `assemble_fund_book`, the momentum 0.25 sleeve raises the
 fund's Σ(fractions) to `core 0.35 + hunt 0.15 + momentum 0.25 = 0.75 ≤ 1.0` (still zero-leverage; the
 remaining 0.25 = bridge dry powder 0.15 + discretionary 0.10). The 8% per-name cap binds a momentum
-name only if its `weight×0.25 > 0.08` (i.e. sleeve weight `> 0.32`); with top-7 equal-weight (≈0.143)
-it never binds.
+name only if its `weight×0.25 > 0.08` (i.e. sleeve weight `> 0.32`); top-7 inverse-vol weights are
+each ≤ the 20% per-name cap, so the worst case is `0.20×0.25 = 0.05 < 0.08` — it never binds.
 
 ## 5. Tests
 

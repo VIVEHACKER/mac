@@ -33,7 +33,7 @@ from engine.fund_book_oos import (  # noqa: E402
 )
 from engine.hunt_basket import select_hunt_basket  # noqa: E402
 from engine.momentum_basket import momentum_sleeve_target, select_momentum_basket  # noqa: E402
-from scripts.aqr_ideal_walkforward import MEGACAPS, lookup_pit, prefetch  # noqa: E402
+from scripts.aqr_ideal_walkforward import lookup_pit, prefetch  # noqa: E402
 from scripts.core_basket import build_universe  # noqa: E402
 from scripts.fund_book import (  # noqa: E402
     DEFAULT_DB,
@@ -41,6 +41,7 @@ from scripts.fund_book import (  # noqa: E402
     DEFAULT_SECTORS,
     DEFAULT_SNAPSHOT,
     DEFAULT_UNIVERSE,
+    load_momentum_universe,
 )
 from scripts.hunt_basket import build_hunt_inputs  # noqa: E402
 
@@ -76,18 +77,25 @@ def assemble_book(args, *, as_of):
         SleeveTarget("hunt", args.hunt_fraction, hunt_weights),
     ]
     if args.price_history:
+        if args.momentum_snapshot is None:
+            print(
+                "⚠️  momentum running off the LIVE catalog (NOT reproducible) — "
+                "pass --momentum-snapshot to pin fundamentals",
+                file=sys.stderr,
+            )
+        universe = load_momentum_universe(args.momentum_universe)
         prices = read_price_snapshot(args.price_history, verify=True)
         fund_cache = prefetch(MarketDataCatalog(args.db), snapshot_path=args.momentum_snapshot)
         as_of_dt = datetime.combine(effective, datetime.max.time())
         fund_by_sym = {}
-        for sym in MEGACAPS:
+        for sym in universe:
             rec = lookup_pit(fund_cache.get(sym, []), as_of_dt)
             if rec is not None:
                 fund_by_sym[sym.upper()] = rec
         momentum = select_momentum_basket(
             prices,
             fund_by_sym,
-            MEGACAPS,
+            universe,
             as_of=effective,
             top_n=args.momentum_top_n,
             cap=args.momentum_cap,
@@ -126,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--momentum-snapshot", type=Path, default=None)
     p.add_argument("--momentum-top-n", type=int, default=7)
     p.add_argument("--momentum-cap", type=float, default=0.20)
+    p.add_argument("--momentum-universe", type=Path, default=None)
     args = p.parse_args(argv)
 
     try:

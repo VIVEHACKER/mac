@@ -61,6 +61,24 @@ def test_inverse_vol_path_respects_cap_and_sums_to_one():
     assert all(v <= 0.60 + 1e-9 for v in w.values())
 
 
+def test_weights_from_picks_matches_deployed_paper_drill():
+    """Fidelity: the extracted engine weighting must equal the deployed paper_drill copy bit-for-bit —
+    the whole point of extracting (vs reimplementing) is the SAME validated portfolio. Adversarial
+    review HIGH: this was the untested core justification. Exercises the inverse-vol path (slack cap),
+    where any vol/normalisation divergence would surface."""
+    from scripts.paper_drill import weights_from_picks as paper_drill_weights
+
+    picks = [_Pick(s) for s in ["A", "B", "C"]]
+    prices = _frame(["A", "B", "C"], 300)
+    rebal = pd.Timestamp("2024-09-01")
+    cap = 0.50  # 3 x 0.50 = 1.5 > 1.0 -> inverse-vol path
+    ours = weights_from_picks(picks, prices, rebal, cap=cap)
+    theirs = paper_drill_weights(picks, prices, rebal, cap=cap)
+    assert ours.keys() == theirs.keys()
+    for s in ours:
+        assert ours[s] == pytest.approx(theirs[s], abs=1e-12)
+
+
 # --------------------------------------------------------------------------- #
 # vol_estimate
 # --------------------------------------------------------------------------- #

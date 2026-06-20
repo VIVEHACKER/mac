@@ -69,6 +69,11 @@ def select_momentum_basket(
         raise ValueError(f"top_n must be >= 1 (got {top_n})")
     if not 0.0 < cap <= 1.0:
         raise ValueError(f"cap must be in (0, 1] (got {cap})")
+    # Normalize to uppercase: prices columns + fundamentals keys follow the yfinance/MEGACAPS
+    # uppercase convention. Without this, lowercase symbols silently miss prices.columns and
+    # vol_estimate falls back to 0.30 for EVERY name -> equal weights instead of the validated
+    # inverse-vol (a silent corruption in the default top-7 path). Found by adversarial review.
+    symbols = [s.upper() for s in symbols]
 
     excluded: list[tuple[str, str]] = []
     bars_by_symbol: dict[str, list] = {}

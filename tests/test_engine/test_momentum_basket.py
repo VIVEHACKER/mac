@@ -51,6 +51,79 @@ def test_basket_top_n_equals_universe_gives_equal_weight():
     assert basket.eligible_count == 5
 
 
+def _vol_prices(symbols: list[str], n: int = 300) -> pd.DataFrame:
+    # distinct ABOVE-FLOOR volatility per symbol: alternating +/- step_j daily returns
+    # (linear _prices have sub-0.05-floor vol -> vol_estimate floors all -> equal weights).
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    data = {}
+    for j, s in enumerate(symbols):
+        # moderate, distinct daily vol per symbol (annualized ~0.8, all > 0.05 floor); a tight spread
+        # so the 0.20 cap doesn't bind (extreme disparity wouldn't converge in the validated function's
+        # 10 cap iterations — realistic megacap vols are close), letting inverse-vol weights just vary.
+        step = 0.05 + 0.002 * j
+        px = [100.0]
+        for i in range(1, n):
+            px.append(px[-1] * (1 + (step if i % 2 else -step)))
+        data[s] = px
+    return pd.DataFrame(data, index=idx)
+
+
+def test_default_top_7_cap_20_uses_inverse_vol_not_equal_weight():
+    # the VALIDATED default: 7 x 0.20 = 1.4 > 1.0 -> inverse-vol (NOT equal-weight); weights vary,
+    # each <= cap, sum ~1.0. Adversarial-review HIGH (spec had claimed equal-weight).
+    syms = [f"S{i}" for i in range(8)]  # 8 eligible, take top 7
+    prices = _vol_prices(syms)
+    basket = select_momentum_basket(
+        prices, _fundamentals(syms), syms, as_of=date(2024, 10, 1), top_n=7, cap=0.20
+    )
+    assert len(basket.holdings) == 7
+    weights = [h.weight for h in basket.holdings]
+    assert sum(weights) == pytest.approx(1.0)
+    assert all(w <= 0.20 + 1e-9 for w in weights)
+    assert (
+        len({round(w, 6) for w in weights}) > 1
+    )  # inverse-vol -> not all identical (not equal-weight)
+
+
+def test_lowercase_symbols_are_normalized_not_dropped():
+    # adversarial-review HIGH: lowercase symbols must not silently miss uppercase price columns
+    # (which would make vol_estimate fall back to 0.30 for all -> wrong weights / exclusion).
+    prices = _prices(SYMS)  # columns AAA..EEE (uppercase)
+    lower = [s.lower() for s in SYMS]
+    basket = select_momentum_basket(
+        prices, _fundamentals(SYMS), lower, as_of=date(2024, 10, 1), top_n=5, cap=0.20
+    )
+    assert {h.symbol for h in basket.holdings} == set(SYMS)  # normalized, all selected
+    assert basket.excluded == ()
+
+
+def test_infeasible_cap_in_basket_raises():
+    # adversarial-review LOW: a degenerate universe (3 eligible) with top_n=7, cap=0.20 ->
+    # weights_from_picks sees 3 x 0.20 = 0.6 < 1.0 -> infeasible cap -> ValueError.
+    syms = ["AAA", "BBB", "CCC"]
+    prices = _prices(syms)
+    with pytest.raises(ValueError):
+        select_momentum_basket(
+            prices, _fundamentals(syms), syms, as_of=date(2024, 10, 1), top_n=7, cap=0.20
+        )
+
+
+def test_momentum_overlap_with_core_binds_8pct_cap():
+    # adversarial-review LOW: a name in BOTH momentum and core sums across sleeves -> 8% cap binds.
+    prices = _prices(SYMS)
+    basket = select_momentum_basket(
+        prices, _fundamentals(SYMS), SYMS, as_of=date(2024, 10, 1), top_n=5, cap=0.20
+    )  # each momentum name 0.20 sleeve-weight -> 0.20*0.25 = 0.05 fund
+    shared = next(iter(basket.holdings)).symbol
+    core = SleeveTarget("core", 0.35, {shared: 1.0})  # shared at 1.0*0.35 = 0.35 fund
+    momentum = momentum_sleeve_target(basket)
+    book = assemble_fund_book([core, momentum], max_name_weight=0.08)
+    pos = {p.symbol: p for p in book.positions}
+    # shared = 0.35 + 0.05 = 0.40 -> capped at 0.08
+    assert pos[shared].fund_weight == pytest.approx(0.08)
+    assert pos[shared].capped is True
+
+
 def test_top_n_smaller_than_universe_selects_best():
     # 5 eligible, top_n=3, cap=0.40 -> 3 * 0.40 = 1.2 > 1.0 -> inverse-vol, each <= 0.40, sum 1.0
     prices = _prices(SYMS)
