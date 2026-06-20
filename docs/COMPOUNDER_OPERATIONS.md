@@ -376,3 +376,49 @@ cd "/Users/jjuni/재무관리 모델/trader-fund"
 Momentum needs a **time-series** price history (distinct from the single-date `--prices` snapshot
 core/hunt use) and megacap fundamentals; both are gitignored like the other snapshots, so the full
 momentum data run is environment-local. The single resolved `effective` cutoff drives all legs.
+
+---
+
+## 전진 페이퍼-OOS 원장 (Forward Paper-OOS Ledger) — Phase 2 시간게이트
+
+The backtest evidence is exhausted; the only genuinely NEW evidence about whether the **assembled
+barbell** survives out of sample comes from recording it **forward** and scoring it on realised prices.
+Engine: `engine/fund_book_oos.py`; drill driver: `scripts/fund_book_oos.py`; tests:
+`tests/test_engine/test_fund_book_oos.py`. Spec:
+`docs/superpowers/specs/2026-06-20-fund-book-oos-design.md`. This mirrors the IDEAL line's
+`trader/engine/paper_oos.py` (kept as a separate trader-fund module, no cross-worktree import).
+
+### Honest framing (read before changing anything)
+
+Unlike the IDEAL line (a backtested +8.15%/yr to overfit-check against), the **assembled barbell has no
+single backtested edge** — core + hunt make no alpha claim, only momentum does. So this ledger is **pure
+forward observation**: realised fund return vs benchmark (SPY), accumulating a live track record.
+`vs_backtest` therefore **defaults to None** for the composite (a single barbell expectation would be a
+fabricated number); the momentum sleeve's own overfit check stays in the IDEAL ledger. The ledger is
+**append-only and immutable** — a forward record is only credible if history cannot be rewritten
+(`append_entry` refuses a duplicate `rebal_date`).
+
+### Mechanism
+
+`fund_book_to_entry(book, …)` converts an assembled `FundBook`'s positions into a pre-registered entry
+(`weights = {symbol: fund_weight}`, capped + validated; raises on a held symbol with no entry price).
+`score_ledger` walks consecutive `(entry_i, entry_{i+1})` pairs — `entry_i`'s book marked at
+`entry_{i+1}`'s date, the realised fund return (weight-renormalised over marked symbols, so idle reserve
+is treated flat) vs the benchmark over the same window; the still-open final entry is unscored.
+`mark_prices_at_dates` tracks freshness **per symbol** with a `max_staleness_days` bound so a stale price
+file can't silently score closed periods with frozen marks (a live-readiness integrity hazard).
+
+### Drill (the driver)
+
+```bash
+cd "/Users/jjuni/재무관리 모델/trader-fund"
+# record: assemble today's book + append an immutable T0 entry (entry prices from the marks CSV)
+.venv/bin/python scripts/fund_book_oos.py --as-of 2024-06-28 --marks data/snapshots/marks.csv --dry-run
+# score: mark the ledger on realised prices vs SPY
+.venv/bin/python scripts/fund_book_oos.py --score --marks data/snapshots/marks.csv
+```
+
+`--dry-run` prints the entry without appending (mechanical verification, like paper_drill); drop it to
+append to `out/fund-book-oos.jsonl`. The first append starts the Phase-2 clock; from there it is a
+time-gate — realised excess accumulates as periods close. A cadence cron and per-sleeve attribution are
+deferred until T0 is recorded and the cadence chosen.
