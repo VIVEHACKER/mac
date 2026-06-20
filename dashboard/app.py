@@ -122,8 +122,95 @@ def _ideal_universe() -> list[str]:
         return ["MSFT", "AAPL", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "TSLA"]
 
 
+@st.cache_data(show_spinner=False)
+def _validated_scan_rows() -> tuple[dict, list[dict]]:
+    """검증 정본 스캔 — `python -m scripts.scan_universe`와 동일한 핀드 스냅샷 경로.
+
+    유니버스 전체(106)를 AQR 횡단면으로 1패스 랭크하고, 각 종목의 액션/신뢰도/진입
+    플랜을 붙인다. ``in_top_n``(rank ≤ 전략 top_n)이 전략이 실제 매수하는 선정 종목.
+    반환은 모두 plain dict — st.cache_data 피클 안전.
+    """
+    from scripts.evaluate_ticker import (
+        DEFAULT_FUNDAMENTALS,
+        DEFAULT_PRICES,
+        load_universe,
+    )
+    from valuation.recommendation import load_validated_strategy, scan_universe
+
+    strat = load_validated_strategy()
+    bars, funds, asof = load_universe(DEFAULT_PRICES, DEFAULT_FUNDAMENTALS, None)
+    results = scan_universe(
+        bars_by_symbol=bars,
+        fundamentals_by_symbol=funds,
+        strategy=strat,
+        asof_ts=asof,
+    )
+    meta = {
+        "asof": asof.date().isoformat(),
+        "strategy": strat.strategy_id,
+        "top_n": int(strat.top_n),
+        "universe_size": int(results[0].universe_size) if results else 0,
+    }
+
+    def _row(r) -> dict:
+        ep = r.entry_plan
+        return {
+            "순위": r.rank,
+            "종목": r.ticker,
+            "액션": r.action,
+            "신뢰도": r.confidence.band,
+            "백분위": round(r.percentile),
+            "현재가": round(r.current_price, 2) if r.current_price is not None else None,
+            "진입": round(ep.target_entry, 2) if ep else None,
+            "손절": round(ep.stop_loss, 2) if ep else None,
+            "목표": round(ep.target_exit, 2) if ep else None,
+            "_pick": bool(r.in_top_n),
+        }
+
+    return meta, [_row(r) for r in results]
+
+
+def _render_validated_scan() -> None:
+    """전략이 실제 매수하는 검증 선정(상위 N)을 항상 먼저 보여준다 — '8개' 착시 해소."""
+    head = st.columns([5, 1])
+    head[0].markdown("#### 🎯 검증 선정 — 전략이 실제 매수하는 상위 N (재현 가능)")
+    if head[1].button("↻ 새로고침", key="vscan_refresh", help="스냅샷 갱신 후 재스캔"):
+        _validated_scan_rows.clear()
+    try:
+        meta, rows = _validated_scan_rows()
+    except Exception as e:  # 스냅샷 검증 실패 등 — 탭 전체를 죽이지 않음
+        st.warning(f"검증 스캔 불가 (핀드 스냅샷 확인 필요): {e}")
+        return
+    if not rows:
+        st.info("스캔 결과가 비어 있습니다.")
+        return
+    picks = [r for r in rows if r["_pick"]]
+    st.caption(
+        f"asof {meta['asof']} · 전략 {meta['strategy']} · 유니버스 {meta['universe_size']}개 "
+        f"→ 선정 {len(picks)}개 (top_n={meta['top_n']}) · 핀드 스냅샷 기반(재현 가능)"
+    )
+    pick_df = pd.DataFrame([{k: v for k, v in r.items() if k != "_pick"} for r in picks])
+    st.dataframe(pick_df, use_container_width=True, hide_index=True)
+    with st.expander(f"전체 랭킹 {meta['universe_size']}개 보기 (★ = 선정)"):
+        usize = max(meta["top_n"], len(rows))
+        n = st.slider("표시 개수", meta["top_n"], usize, min(20, usize), key="vscan_top")
+        full = []
+        for r in rows[:n]:
+            row = {k: v for k, v in r.items() if k != "_pick"}
+            row["순위"] = f"{r['순위']}★" if r["_pick"] else r["순위"]
+            full.append(row)
+        st.dataframe(pd.DataFrame(full), use_container_width=True, hide_index=True)
+    st.caption(
+        "★ = 전략의 top-N 보유(실제 매수 대상). 라이브 카탈로그가 아니라 검증 스냅샷을 "
+        "쓰므로 `python -m scripts.scan_universe`와 결과가 일치합니다."
+    )
+
+
 def _render_screener(catalog) -> None:
     st.subheader("종목 선정 — AQR 팩터 · 모멘텀 랭크")
+    _render_validated_scan()
+    st.markdown("---")
+    st.markdown("##### 커스텀 유니버스 랭킹 (탐색용 · 라이브/멀티마켓)")
     c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
     with c1:
         uni = st.text_input(
