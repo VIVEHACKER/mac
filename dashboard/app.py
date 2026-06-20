@@ -108,12 +108,32 @@ def _load_fundamentals(catalog, symbols, market):
 # ─────────────────────────────────────────────────────────────────────────────
 # 탭 1 — 종목선정 (AQR 팩터 + 모멘텀)
 # ─────────────────────────────────────────────────────────────────────────────
+def _ideal_universe() -> list[str]:
+    """검증 정본(IDEAL 메가캡) 유니버스 — evaluate_ticker·PBO 검증과 동일한 풀.
+
+    중복 정의를 피하려고 단일 출처(scripts.aqr_ideal_walkforward.MEGACAPS)에서 가져온다.
+    import 실패 시에만 대표 메가캡 8종으로 폴백한다(완전 실패 방지).
+    """
+    try:
+        from scripts.aqr_ideal_walkforward import MEGACAPS
+
+        return list(MEGACAPS)
+    except Exception:
+        return ["MSFT", "AAPL", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "TSLA"]
+
+
 def _render_screener(catalog) -> None:
     st.subheader("종목 선정 — AQR 팩터 · 모멘텀 랭크")
     c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
     with c1:
         uni = st.text_input(
-            "유니버스 (쉼표 구분)", "MSFT,AAPL,NVDA,AMZN,META,GOOGL,AVGO,TSLA", key="scr_uni"
+            "유니버스 (쉼표 구분 · US는 빈칸이면 검증 유니버스 전체)",
+            "",
+            key="scr_uni",
+            help=(
+                "비워두면 검증된 IDEAL 메가캡 유니버스 전체를 스크리닝합니다 "
+                "(evaluate_ticker·PBO 검증과 동일한 풀). 특정 종목만 보려면 쉼표로 입력."
+            ),
         )
     with c2:
         market = st.selectbox("시장", ["us", "kospi", "kosdaq", "crypto"], key="scr_mkt")
@@ -133,6 +153,13 @@ def _render_screener(catalog) -> None:
         return
 
     syms = [s.strip().upper() for s in uni.split(",") if s.strip()]
+    if not syms:
+        # 빈칸 → US는 검증 정본 유니버스 전체, 그 외 시장은 명시 입력 요구
+        syms = _ideal_universe() if market == "us" else []
+        if not syms:
+            st.info(f"'{market}' 시장은 기본 유니버스가 없습니다. 종목을 쉼표로 입력하세요.")
+            return
+        st.caption(f"검증 유니버스 전체 스크리닝: {len(syms)}개 종목")
     with st.spinner("바 데이터 로드 중…"):
         bars = _load_universe(catalog, syms, market, live=live)
     if not bars:
@@ -352,9 +379,14 @@ def _render_recommender(catalog) -> None:
         market = st.selectbox("시장", ["us", "kospi", "kosdaq", "crypto"], key="rec_mkt")
     with c3:
         uni = st.text_input(
-            "유니버스 컨텍스트 (횡단면 점수용)",
-            "MSFT,AAPL,NVDA,AMZN,META,GOOGL,AVGO,TSLA",
+            "유니버스 컨텍스트 (횡단면 점수용 · 빈칸이면 검증 유니버스 전체)",
+            "",
             key="rec_uni",
+            help=(
+                "비워두면 검증 정본 유니버스(evaluate_ticker와 동일한 풀)를 횡단면 "
+                "컨텍스트로 사용합니다. 카탈로그에 펀더멘털이 없으면 모멘텀만으로 점수. "
+                "좁히려면 쉼표로 입력."
+            ),
         )
     if not st.button("평가 실행", type="primary", key="rec_run"):
         st.info(
@@ -369,6 +401,9 @@ def _render_recommender(catalog) -> None:
         st.error(f"검증 전략 로드 실패: {e}")
         return
     syms = [s.strip().upper() for s in uni.split(",") if s.strip()]
+    if not syms and market == "us":
+        # 빈칸 → 검증 정본 유니버스 전체. 랭크·신뢰도가 evaluate_ticker 파이프라인과 일치.
+        syms = _ideal_universe()
     if ticker.strip().upper() not in syms:
         syms.append(ticker.strip().upper())
     with st.spinner("유니버스 로드 + 평가 중…"):
