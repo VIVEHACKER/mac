@@ -31,8 +31,9 @@ def test_off_peak_drawdown_is_peak_to_last():
     assert market_drawdown([80.0, 100.0, 75.0]) == pytest.approx(0.25)
 
 
-def test_deep_crash_clamps_to_one():
-    assert market_drawdown([100.0, 0.0]) == pytest.approx(1.0)
+def test_deep_but_valid_crash_stays_below_one():
+    # with positive prices dd = (peak-last)/peak < 1 always; the [0,1] clamp upper bound is defensive
+    assert market_drawdown([100.0, 1.0]) == pytest.approx(0.99)
 
 
 def test_empty_series_raises():
@@ -43,6 +44,28 @@ def test_empty_series_raises():
 def test_non_positive_peak_raises():
     with pytest.raises(ValueError):
         market_drawdown([0.0, 0.0])
+
+
+def test_nan_in_prices_raises():
+    # fail-closed: NaN must not silently mask as drawdown=0 (review CRITICAL/HIGH PIT-safety finding)
+    with pytest.raises(ValueError):
+        market_drawdown([100.0, float("nan"), 95.0])
+
+
+def test_inf_in_prices_raises():
+    with pytest.raises(ValueError):
+        market_drawdown([100.0, float("inf"), 95.0])
+
+
+def test_negative_price_raises():
+    # a negative last would give dd = (peak - neg)/peak > 1 -> clamp to 1 -> fail-OPEN full deploy; guard it
+    with pytest.raises(ValueError):
+        market_drawdown([100.0, -5.0])
+
+
+def test_zero_interior_price_raises():
+    with pytest.raises(ValueError):
+        market_drawdown([100.0, 0.0, 95.0])
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +148,21 @@ def test_threshold_out_of_unit_range_raises():
 def test_ladder_fraction_helper():
     assert ladder_fraction(0.05, DEFAULT_LADDER) == pytest.approx(0.0)
     assert ladder_fraction(0.25, DEFAULT_LADDER) == pytest.approx(2.0 / 3.0)
+
+
+def test_one_rung_ladder_deploys_full_budget_at_threshold():
+    d = compute_deployment(0.25, True, budget=0.15, ladder=((0.10, 1.0),))
+    assert d.tranche_index == 1
+    assert d.n_tranches == 1
+    assert d.deployed_fraction == pytest.approx(0.15)
+
+
+def test_under_deploy_ladder_caps_below_budget_by_design():
+    # last cumulative 0.75 < 1.0 -> a deliberately conservative ladder never reaches full budget
+    ladder = ((0.10, 0.5), (0.20, 0.75))
+    d = compute_deployment(0.30, True, budget=0.15, ladder=ladder)
+    assert d.deployed_fraction == pytest.approx(0.15 * 0.75)
+    assert d.tranche_index == 2
 
 
 # --------------------------------------------------------------------------- #

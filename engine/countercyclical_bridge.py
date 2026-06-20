@@ -16,6 +16,7 @@ fund fraction the bridge may ever deploy — an explicit, overridable parameter.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from statistics import median
@@ -50,13 +51,15 @@ class BridgeDeployment:
 def market_drawdown(prices: Sequence[float]) -> float:
     """Peak-to-last drawdown over the GIVEN series (caller passes a trailing, PIT-sliced slice).
 
-    (peak - last) / peak, clamped to [0, 1]. Empty series or non-positive peak -> ValueError
-    (a degenerate price history must not silently read as 'no drawdown')."""
+    (peak - last) / peak, clamped to [0, 1]. Fail-closed (a degenerate price history must not silently
+    read as 'no drawdown'): an empty series, or any non-finite / non-positive price (NaN, inf, <= 0),
+    raises ValueError instead of producing a NaN/garbage drawdown that downstream would mask as 0."""
     if not prices:
         raise ValueError("market_drawdown: empty price series")
-    peak = max(prices)
-    if peak <= 0.0:
-        raise ValueError(f"market_drawdown: non-positive peak {peak}")
+    for p in prices:
+        if not math.isfinite(p) or p <= 0.0:
+            raise ValueError(f"market_drawdown: prices must be finite and positive (got {p})")
+    peak = max(prices)  # guaranteed > 0 by the guard above
     dd = (peak - prices[-1]) / peak
     return min(max(dd, 0.0), 1.0)
 
@@ -156,6 +159,8 @@ def bridge_sleeve_target(
     """A SleeveTarget for fund_book whose fraction is the deployed dry powder and whose weights ARE the
     core's weights — the bridge scales the same anchor (no new names). Returned even at fraction 0
     ('armed, not deployed')."""
+    # Defensive copy: decouple the sleeve from the caller's dict (the spec pseudocode passes
+    # core_weights directly; the copy is the stricter, alias-free choice and is behaviourally identical).
     return SleeveTarget("bridge", deployment.deployed_fraction, dict(core_weights))
 
 
