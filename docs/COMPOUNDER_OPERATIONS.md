@@ -254,3 +254,68 @@ Snapshots are content-hash pinned (`verify=True` fails loud on drift); the CSVs 
 manifests tracked), so on a clean checkout regenerate via `scripts/snapshot_fundamentals.py` /
 `scripts/snapshot_prices.py` or pass `--snapshot` / `--prices`. Prints `format_core_basket` — a report
 whose header restates the honest framing so the no-alpha caveat travels with every run.
+
+---
+
+## 반순환 브릿지 (Countercyclical Bridge) — 폭락매수 dry-powder 슬리브
+
+The fund holds idle reserve cash (the discretionary half of the active 50% + any cap overflow). The
+**countercyclical bridge** turns a budget-capped slice of that dry powder into a *rule-based*
+deployment policy: when the market has fallen **and** the core anchor is cheap, it buys **more of the
+existing core basket** in tranches. Engine: `engine/countercyclical_bridge.py`; driver:
+`scripts/countercyclical_bridge.py`; tests: `tests/test_engine/test_countercyclical_bridge.py`
+(+ `tests/test_scripts/test_countercyclical_bridge_driver.py` for PIT). Spec:
+`docs/superpowers/specs/2026-06-20-countercyclical-bridge-design.md`.
+
+### Honest framing (read before changing anything)
+
+The bridge makes **NO market-timing alpha claim.** It does not predict bottoms. It invents no signal
+and picks **no new names** — it scales the *already-value-screened* core weights. Two guards keep it
+survival-first, not a leveraged bet:
+
+1. **The value gate is an AND, not an OR.** Drawdown alone (price fell) is a falling-knife trap —
+   earnings may have fallen further, leaving it still expensive. Deployment is **0 whenever the value
+   gate is closed**, regardless of drawdown depth.
+2. **It reuses fund_book's rails.** The bridge is just another `SleeveTarget` composed by
+   `assemble_fund_book` (see the fund-book spec). The fund-level **8% per-name hard cap** and
+   **Σ(fractions) ≤ 1.0 zero-leverage** guard bound the combined core+bridge exposure — a name already
+   at the cap overflows to reserve, never to leverage.
+
+### The barbell budget (user policy)
+
+long 50% = core 35% + hunt 15%; active 50% = momentum/IDEAL 25% + **bridge dry powder
+`bridge_budget` = 15%** + discretionary reserve 10%. `bridge_budget` is the **maximum** fund fraction
+the bridge may ever deploy — an explicit, overridable default.
+
+### Deployment (`compute_deployment`)
+
+- **Market drawdown** (`market_drawdown`): peak-to-last over a trailing, PIT-sliced price window
+  (`(peak − last) / peak`, clamped `[0,1]`; the driver passes the last `--window=252` closes ≤ `as_of`).
+- **Value gate** (`default_value_gate`): `True` iff the **median** of the core holdings' present
+  `cheapness_pct` ≥ `0.55` (None ignored; empty / all-None ⇒ closed, conservative). Approach B (a
+  market-P/E / earnings-yield macro gate) is a documented **deferred** additive AND-gate — kept out to
+  preserve the no-new-data, deterministic-test property.
+- **Step ladder** (`DEFAULT_LADDER`, deeper crash ⇒ more deployed): drawdown `<10%` → 0 (hold dry
+  powder); `[10,20%)` → `1/3`; `[20,30%)` → `2/3`; `≥30%` → `3/3` of `bridge_budget`.
+  `deployed_fraction = bridge_budget × ladder_fraction(drawdown) × [gate open]`, invariant
+  `0 ≤ deployed_fraction ≤ bridge_budget` (test-enforced over a 0→60% sweep). Fail-closed on
+  out-of-range `budget` or a non-ascending / non-monotone ladder.
+- **Output** (`bridge_sleeve_target`): `SleeveTarget("bridge", deployed_fraction, core_weights)` — the
+  bridge's sleeve-relative weights **are** the core's weights. A core name then sums
+  `core 0.35×w + bridge dep×w` in `assemble_fund_book`, capped at 8% (overflow → reserve, no
+  redistribution). Returned even at `deployed_fraction = 0` ("armed, not deployed").
+
+### Driver (PIT)
+
+```bash
+cd "/Users/jjuni/재무관리 모델/trader-fund"
+.venv/bin/python scripts/countercyclical_bridge.py --as-of 2024-06-28 --book
+# defaults: --bridge-budget 0.15 --value-threshold 0.55 --window 252
+#           --market-csv data/snapshots/spy-history.csv  (date,close; gitignored like the other snapshots)
+# Prints format_deployment (drawdown / gate / tranche / deployed); --book also assembles
+# [core(0.35), hunt(0.15), bridge(dep)] via fund_book and prints format_fund_book.
+```
+
+Single `as_of` for all legs; the market series is PIT-sliced (`> as_of` rows dropped) and the core/hunt
+assemblers enforce their own cutoff. The report header restates the honest framing so the no-alpha
+caveat travels with every run.
