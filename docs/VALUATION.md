@@ -222,6 +222,15 @@ python -m scripts.scan_universe --output out/universe-scan.md
 검증된 IDEAL 라인과 동일한 pinned 스냅샷(`data/snapshots/prices-ideal-*.csv` +
 `fundamentals-*-gp.csv`)을 읽어 재현 가능.
 
+### 대시보드 노출 — 종목선정 탭
+`dashboard/app.py`의 **종목선정** 탭 상단 "🎯 검증 선정" 패널이 동일한 `scan_universe`
+(핀드 스냅샷)를 호출해 106종 랭킹과 top-N(★) 실제 매수 후보를 액션·신뢰도·진입/손절/목표와
+함께 표시한다(CLI `python -m scripts.scan_universe`와 결과 일치, `st.cache_data` 캐시 +
+새로고침 + 전체 랭킹 expander). 같은 탭 하단 "커스텀 유니버스 랭킹"은 탐색용 라이브 랭커로,
+US에서 입력을 비우면 검증 유니버스(106) 전체를 채운다(이전의 메가캡 8종 하드코딩 기본값 제거).
+추천기 탭의 횡단면 컨텍스트도 빈칸이면 동일한 106 풀을 써 랭크·신뢰도가 `evaluate_ticker`와
+정합한다.
+
 ## DuckDB 스키마
 
 ```sql

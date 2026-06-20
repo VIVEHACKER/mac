@@ -165,6 +165,8 @@ uv run trader live-submit QQQ --side buy --qty 2 --price 100 --order-type limit 
 uv run streamlit run dashboard/app.py --server.port 8501
 ```
 
+**대시보드 종목선정 탭**은 상단 "🎯 검증 선정" 패널에서 `scan_universe`(핀드 스냅샷)로 검증 유니버스 106종을 랭크해 전략이 실제 매수하는 top-N(★)을 진입/손절/목표와 함께 보여준다(`python -m scripts.scan_universe`와 동일·재현 가능). 하단 "커스텀 유니버스 랭킹"은 탐색용 라이브 랭커이며 US에서 입력을 비우면 검증 유니버스(106) 전체로 채운다(이전 8종 하드코딩 기본값 제거). 추천기 탭도 동일하게 빈칸이면 106 풀로 횡단면 점수를 계산한다.
+
 `trader backtest`와 `trader portfolio`는 `--benchmark SPY --benchmark-market us`처럼 외부 벤치마크를 지정하면
 전략 수익률, 벤치마크 수익률, 초과수익률을 같은 기간으로 비교한다.
 `trader portfolio` 리포트는 벤치마크 Sharpe/MDD와 연도별 초과수익률을 함께 보여준다.
