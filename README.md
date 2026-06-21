@@ -164,6 +164,8 @@ uv run trader live-submit QQQ --side buy --qty 2 --price 100 --order-type limit 
 uv run streamlit run dashboard/app.py --server.port 8501
 ```
 
+대시보드 `💹 펀드 포트폴리오` 탭은 `build_fund_book`(검증 조립기, `scripts/fund_book.py`)으로 50/50 바벨을 조립해 슬리브 비중(core/hunt/momentum/reserve) · 종목별 펀드비중+출처슬리브 · 섹터 익스포저 · 포워드 OOS 성과(원장 `out/fund-book-oos.jsonl`)를 한 화면에 보여준다. 스냅샷 CSV는 trader-fund에서 gitignore되므로 `../trader/data/snapshots`로 폴백 로드하고 모멘텀 슬리브는 기본 ON(재현 가능). 정직성: momentum만 검증 엣지(+8.15%/yr walk-forward, US 한정), core/hunt는 알파 주장 없음.
+
 `trader backtest`와 `trader portfolio`는 `--benchmark SPY --benchmark-market us`처럼 외부 벤치마크를 지정하면
 전략 수익률, 벤치마크 수익률, 초과수익률을 같은 기간으로 비교한다.
 `trader portfolio` 리포트는 벤치마크 Sharpe/MDD와 연도별 초과수익률을 함께 보여준다.
