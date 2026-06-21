@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from engine.fund_book import SleeveTarget, assemble_fund_book
+from engine.fund_book import FundBook, FundPosition, SleeveTarget, assemble_fund_book
 from engine.fund_exposure import compute_exposure, format_exposure
 
 
@@ -58,7 +58,7 @@ def test_sleeve_attribution_sums_to_invested():
 
 
 def test_capped_overlapping_name_attribution_scaled_to_invested():
-    # A in both core (0.35*0.5=0.175) and bridge (0.15*0.5=0.075) -> raw 0.25 capped to 0.08.
+    # A in both core (0.35*0.5=0.175) and bridge (0.15*1.0=0.15) -> raw 0.325 capped to 0.08.
     # attribution must scale the contributions to the capped 0.08, split proportionally, and the
     # whole book's sleeve attribution must still sum to invested.
     book = _book(
@@ -131,6 +131,26 @@ def test_empty_book_is_zero_report():
     assert rep.n_positions == 0
     assert rep.effective_n == pytest.approx(0.0)
     assert any("빈" in f for f in rep.flags)
+
+
+def test_zero_contribution_position_skipped_without_divide_by_zero():
+    # adversarial-review LOW: a degenerate position with no contributions must be skipped in
+    # attribution (no ZeroDivisionError). Built directly (assemble_fund_book never emits this).
+    book = FundBook(
+        positions=(
+            FundPosition("A", 0.10, (("core", 0.10),), False),
+            FundPosition("Z", 0.0, (), False),  # no contributions -> raw 0 -> skip
+        ),
+        sleeve_fractions=(("core", 0.35),),
+        invested=0.10,
+        reserve_cash=0.90,
+        max_name_weight=0.08,
+        top_name_weight=0.10,
+        n_positions=2,
+    )
+    rep = compute_exposure(book, {})  # must not raise
+    attr = {a.sleeve: a.weight for a in rep.sleeve_attribution}
+    assert attr == {"core": pytest.approx(0.10)}
 
 
 def test_invalid_params_raise():
