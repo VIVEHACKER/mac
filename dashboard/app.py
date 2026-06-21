@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from dashboard.fund_portfolio import render_fund_portfolio
 from data.catalog import DEFAULT_CATALOG_PATH, MarketDataCatalog
 from engine.portfolio import screen_momentum
 
@@ -18,7 +19,9 @@ def main() -> None:
     catalog = MarketDataCatalog(CATALOG_PATH)
 
     coverage = catalog.coverage()
-    overview, screen, valuation = st.tabs(["Catalog", "Momentum", "Valuation"])
+    overview, screen, valuation, fund = st.tabs(
+        ["Catalog", "Momentum", "Valuation", "💹 펀드 포트폴리오"]
+    )
 
     with overview:
         st.dataframe(
@@ -33,10 +36,7 @@ def main() -> None:
         lookback = st.number_input("Lookback", min_value=5, max_value=504, value=126)
         if st.button("Run Screen", type="primary"):
             requested = [item.strip().upper() for item in symbols.split(",") if item.strip()]
-            bars = {
-                symbol: catalog.get_bars(symbol, market=market)
-                for symbol in requested
-            }
+            bars = {symbol: catalog.get_bars(symbol, market=market) for symbol in requested}
             rows = screen_momentum(bars, lookback=int(lookback))
             st.dataframe(pd.DataFrame([row.__dict__ for row in rows]), use_container_width=True)
 
@@ -50,6 +50,9 @@ def main() -> None:
             )
         else:
             st.info("No valuation scores stored yet.")
+
+    with fund:
+        render_fund_portfolio(ROOT)
 
 
 if __name__ == "__main__":
