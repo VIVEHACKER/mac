@@ -19,8 +19,8 @@ from __future__ import annotations
 import csv
 import json
 import math
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -37,6 +37,9 @@ class FundBookOOSEntry:
     sleeve_fractions: dict[str, float]  # provenance: which barbell policy produced this book
     reserve_cash: float
     invested: float
+    # sleeve -> {symbol -> cap-clipped fund-weight contribution}; Σ over all == invested.
+    # Default {} keeps legacy ledger lines (no per-sleeve attribution) loadable.
+    sleeve_weights: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,16 @@ def fund_book_to_entry(
     missing = [s for s in weights if s not in entry_prices or entry_prices[s] <= 0.0]
     if missing:
         raise ValueError(f"no positive entry price for held symbols: {sorted(missing)}")
+    # Per-sleeve attribution: scale each position's PRE-cap contributions to its actual (capped)
+    # fund_weight so Σ(sleeve_weights) == invested (same reconciliation as the exposure report).
+    sleeve_weights: dict[str, dict[str, float]] = {}
+    for p in book.positions:  # type: ignore[attr-defined]
+        raw = sum(c for _name, c in p.contributions)
+        if raw <= 0.0:
+            continue
+        scale = p.fund_weight / raw
+        for name, c in p.contributions:
+            sleeve_weights.setdefault(name, {})[p.symbol] = c * scale
     return FundBookOOSEntry(
         rebal_date=rebal_date,
         weights=weights,
@@ -108,6 +121,7 @@ def fund_book_to_entry(
         sleeve_fractions=dict(book.sleeve_fractions),  # type: ignore[attr-defined]
         reserve_cash=book.reserve_cash,  # type: ignore[attr-defined]
         invested=book.invested,  # type: ignore[attr-defined]
+        sleeve_weights=sleeve_weights,
     )
 
 
@@ -177,14 +191,16 @@ def _detect_date_column(fieldnames: Sequence[str]) -> str:
     return fieldnames[0]
 
 
-def _period_return(entry: FundBookOOSEntry, marks: dict[str, float]) -> float | None:
-    """Weighted realised return of one entry's invested book, renormalised over symbols with marks
-    (idle reserve cash is implicitly flat — it neither helps nor hurts the invested book's excess)."""
+def _period_return_for(
+    weights: dict[str, float], entry_prices: dict[str, float], marks: dict[str, float]
+) -> float | None:
+    """Weighted realised return of a weight slice, renormalised over the symbols that have marks (idle
+    reserve / unmarked names are implicitly flat — they neither help nor hurt the slice's excess)."""
     total_weight = 0.0
     weighted = 0.0
-    for symbol, weight in entry.weights.items():
+    for symbol, weight in weights.items():
         mark = marks.get(symbol)
-        buy = entry.entry_prices.get(symbol)
+        buy = entry_prices.get(symbol)
         if mark is None or buy is None or buy <= 0:
             continue
         weighted += weight * (mark / buy - 1.0)
@@ -194,36 +210,18 @@ def _period_return(entry: FundBookOOSEntry, marks: dict[str, float]) -> float | 
     return weighted / total_weight
 
 
-def score_ledger(
-    entries: list[FundBookOOSEntry],
-    mark_prices: dict[str, dict[str, float]],
-    *,
-    periods_per_year: float = 12.0,
-    backtest_excess_ann: float | None = None,
+def _period_return(entry: FundBookOOSEntry, marks: dict[str, float]) -> float | None:
+    """The whole invested book's realised period return (thin wrapper over _period_return_for)."""
+    return _period_return_for(entry.weights, entry.entry_prices, marks)
+
+
+def _build_record(
+    excesses: list[float],
+    port_factors: list[float],
+    bench_factors: list[float],
+    periods_per_year: float,
+    backtest_excess_ann: float | None,
 ) -> FundBookOOSRecord:
-    """Score realised forward excess over the CLOSED periods of the ledger. Each consecutive pair
-    (entry_i, entry_{i+1}) is one realised holding period: entry_i's book is marked at entry_{i+1}'s
-    date and compared to the benchmark over the same window. The still-open final entry is not scored.
-    ``vs_backtest`` is computed only when ``backtest_excess_ann`` is explicitly given (None for the
-    composite barbell, which has no single backtested edge)."""
-    excesses: list[float] = []
-    port_factors: list[float] = []
-    bench_factors: list[float] = []
-
-    for i in range(len(entries) - 1):
-        cur = entries[i]
-        marks = mark_prices.get(entries[i + 1].rebal_date)
-        if not marks:
-            continue
-        port_ret = _period_return(cur, marks)
-        bench_mark = marks.get(cur.benchmark_symbol)
-        if port_ret is None or bench_mark is None or cur.benchmark_price <= 0:
-            continue
-        bench_ret = bench_mark / cur.benchmark_price - 1.0
-        excesses.append(port_ret - bench_ret)
-        port_factors.append(1.0 + port_ret)
-        bench_factors.append(1.0 + bench_ret)
-
     n = len(excesses)
     if n == 0:
         return FundBookOOSRecord(
@@ -237,7 +235,6 @@ def score_ledger(
             periods_per_year=periods_per_year,
             vs_backtest=None,
         )
-
     cumulative_return = math.prod(port_factors) - 1.0
     cumulative_benchmark = math.prod(bench_factors) - 1.0
     annualized_excess = (sum(excesses) / n) * periods_per_year
@@ -248,7 +245,6 @@ def score_ledger(
         if backtest_excess_ann is not None and backtest_excess_ann != 0.0
         else None
     )
-
     return FundBookOOSRecord(
         n_periods=n,
         cumulative_return=cumulative_return,
@@ -260,3 +256,85 @@ def score_ledger(
         periods_per_year=periods_per_year,
         vs_backtest=vs_backtest,
     )
+
+
+def _score_periods(
+    entries: list[FundBookOOSEntry],
+    mark_prices: dict[str, dict[str, float]],
+    weights_of: Callable[[FundBookOOSEntry], dict[str, float]],
+    *,
+    periods_per_year: float,
+    backtest_excess_ann: float | None = None,
+) -> FundBookOOSRecord:
+    """Score consecutive (entry_i, entry_{i+1}) periods using the weight slice `weights_of(entry_i)`,
+    marked at entry_{i+1}'s date vs the entry's benchmark. Shared by score_ledger (whole book) and
+    score_by_sleeve (per-sleeve slice)."""
+    excesses: list[float] = []
+    port_factors: list[float] = []
+    bench_factors: list[float] = []
+    for i in range(len(entries) - 1):
+        cur = entries[i]
+        marks = mark_prices.get(entries[i + 1].rebal_date)
+        if not marks:
+            continue
+        port_ret = _period_return_for(weights_of(cur), cur.entry_prices, marks)
+        bench_mark = marks.get(cur.benchmark_symbol)
+        if port_ret is None or bench_mark is None or cur.benchmark_price <= 0:
+            continue
+        bench_ret = bench_mark / cur.benchmark_price - 1.0
+        excesses.append(port_ret - bench_ret)
+        port_factors.append(1.0 + port_ret)
+        bench_factors.append(1.0 + bench_ret)
+    return _build_record(
+        excesses, port_factors, bench_factors, periods_per_year, backtest_excess_ann
+    )
+
+
+def score_ledger(
+    entries: list[FundBookOOSEntry],
+    mark_prices: dict[str, dict[str, float]],
+    *,
+    periods_per_year: float = 12.0,
+    backtest_excess_ann: float | None = None,
+) -> FundBookOOSRecord:
+    """Score realised forward excess over the CLOSED periods of the whole invested book. Each
+    consecutive pair (entry_i, entry_{i+1}) is one realised holding period: entry_i's book is marked at
+    entry_{i+1}'s date and compared to the benchmark over the same window. The still-open final entry is
+    not scored. ``vs_backtest`` is computed only when ``backtest_excess_ann`` is given (None for the
+    composite barbell, which has no single backtested edge)."""
+    return _score_periods(
+        entries,
+        mark_prices,
+        lambda e: e.weights,
+        periods_per_year=periods_per_year,
+        backtest_excess_ann=backtest_excess_ann,
+    )
+
+
+def score_by_sleeve(
+    entries: list[FundBookOOSEntry],
+    mark_prices: dict[str, dict[str, float]],
+    *,
+    periods_per_year: float = 12.0,
+) -> dict[str, FundBookOOSRecord]:
+    """Attribute realised forward excess to each sleeve: score each sleeve's per-entry weight slice
+    (from `sleeve_weights`) vs the SAME benchmark, over the same closed periods — answering which sleeve
+    earns the live edge. Legacy entries with no `sleeve_weights` contribute nothing (empty result)."""
+    sleeves: list[str] = []
+    for e in entries:
+        for s in e.sleeve_weights:
+            if s not in sleeves:
+                sleeves.append(s)
+
+    def sleeve_weights_of(sleeve: str) -> Callable[[FundBookOOSEntry], dict[str, float]]:
+        def _of(entry: FundBookOOSEntry) -> dict[str, float]:
+            return entry.sleeve_weights.get(sleeve, {})
+
+        return _of
+
+    return {
+        s: _score_periods(
+            entries, mark_prices, sleeve_weights_of(s), periods_per_year=periods_per_year
+        )
+        for s in sleeves
+    }

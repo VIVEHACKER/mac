@@ -29,6 +29,7 @@ from engine.fund_book_oos import (  # noqa: E402
     load_ledger,
     load_mark_price_history_csv,
     mark_prices_at_dates,
+    score_by_sleeve,
     score_ledger,
 )
 from engine.hunt_basket import select_hunt_basket  # noqa: E402
@@ -115,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--benchmark", type=str, default="SPY")
     p.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
     p.add_argument("--score", action="store_true", help="score the ledger instead of recording")
+    p.add_argument(
+        "--by-sleeve", action="store_true", help="with --score, also print per-sleeve attribution"
+    )
     p.add_argument("--dry-run", action="store_true", help="print the entry without appending")
     p.add_argument("--periods-per-year", type=float, default=12.0)
     p.add_argument(
@@ -151,6 +155,14 @@ def main(argv: list[str] | None = None) -> int:
             marks = mark_prices_at_dates(history, dates, max_staleness_days=args.max_staleness_days)
             record = score_ledger(entries, marks, periods_per_year=args.periods_per_year)
             print(record)
+            if args.by_sleeve:
+                print("\nper-sleeve attribution (realised excess vs benchmark):")
+                by = score_by_sleeve(entries, marks, periods_per_year=args.periods_per_year)
+                for sleeve, rec in sorted(by.items(), key=lambda kv: -kv[1].cumulative_excess):
+                    print(
+                        f"  {sleeve:<10} n={rec.n_periods}  "
+                        f"excess={rec.cumulative_excess:+.2%}  hit={rec.hit_rate:.0%}"
+                    )
             return 0
 
         as_of = datetime.fromisoformat(args.as_of).date() if args.as_of else None

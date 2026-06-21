@@ -11,6 +11,7 @@ from engine.fund_book_oos import (
     fund_book_to_entry,
     load_ledger,
     mark_prices_at_dates,
+    score_by_sleeve,
     score_ledger,
 )
 
@@ -227,3 +228,111 @@ def test_mark_prices_respects_max_staleness():
     # unbounded keeps it
     out2 = mark_prices_at_dates(history, ["2026-02-01"], max_staleness_days=None)
     assert out2["2026-02-01"]["A"] == pytest.approx(100.0)
+
+
+# --------------------------------------------------------------------------- #
+# per-sleeve attribution
+# --------------------------------------------------------------------------- #
+
+
+def _sw_entry(
+    rebal_date: str,
+    sleeve_weights: dict[str, dict[str, float]],
+    prices: dict[str, float],
+    bench_price: float = 400.0,
+) -> FundBookOOSEntry:
+    weights: dict[str, float] = {}
+    for sw in sleeve_weights.values():
+        for sym, w in sw.items():
+            weights[sym] = weights.get(sym, 0.0) + w
+    invested = sum(weights.values())
+    return FundBookOOSEntry(
+        rebal_date=rebal_date,
+        weights=weights,
+        entry_prices=prices,
+        benchmark_symbol="SPY",
+        benchmark_price=bench_price,
+        sleeve_fractions={s: sum(w.values()) for s, w in sleeve_weights.items()},
+        reserve_cash=1.0 - invested,
+        invested=invested,
+        sleeve_weights=sleeve_weights,
+    )
+
+
+def test_fund_book_to_entry_populates_sleeve_weights_summing_to_invested():
+    book = assemble_fund_book(
+        [
+            SleeveTarget("core", 0.35, {"A": 0.5, "B": 0.5}),
+            SleeveTarget("bridge", 0.15, {"A": 1.0}),
+        ],
+        max_name_weight=0.08,
+    )
+    entry = fund_book_to_entry(
+        book,
+        rebal_date="2026-06-22",
+        entry_prices={"A": 10.0, "B": 20.0},
+        benchmark_symbol="SPY",
+        benchmark_price=500.0,
+    )
+    total = sum(w for sw in entry.sleeve_weights.values() for w in sw.values())
+    assert total == pytest.approx(book.invested)
+    # A is in both sleeves (cap-clipped split); B is core-only
+    assert "A" in entry.sleeve_weights["core"] and "A" in entry.sleeve_weights["bridge"]
+    assert "B" in entry.sleeve_weights["core"]
+
+
+def test_legacy_entry_without_sleeve_weights_loads_as_empty(tmp_path: Path):
+    import json
+
+    path = tmp_path / "led.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "rebal_date": "2026-01-01",
+                "weights": {"A": 1.0},
+                "entry_prices": {"A": 100.0},
+                "benchmark_symbol": "SPY",
+                "benchmark_price": 400.0,
+                "sleeve_fractions": {"core": 0.35},
+                "reserve_cash": 0.0,
+                "invested": 1.0,
+            }
+        )
+        + "\n"
+    )
+    assert load_ledger(path)[0].sleeve_weights == {}
+
+
+def test_score_by_sleeve_attributes_excess_per_sleeve():
+    # core slice = A, momentum slice = B. period: A +20%, B -10%, SPY +1%.
+    sw = {"core": {"A": 0.3}, "momentum": {"B": 0.2}}
+    entries = [
+        _sw_entry("2026-01-01", sw, {"A": 100.0, "B": 100.0}),
+        _sw_entry("2026-02-01", sw, {"A": 100.0, "B": 100.0}, bench_price=404.0),
+    ]
+    marks = {"2026-02-01": {"A": 120.0, "B": 90.0, "SPY": 404.0}}
+    by = score_by_sleeve(entries, marks)
+    assert set(by) == {"core", "momentum"}
+    assert by["core"].cumulative_excess == pytest.approx(0.20 - 0.01)  # +19%
+    assert by["momentum"].cumulative_excess == pytest.approx(-0.10 - 0.01)  # -11%
+
+
+def test_score_by_sleeve_empty_for_legacy_entries():
+    entries = [
+        _entry("2026-01-01", {"A": 1.0}, {"A": 100.0}, 400.0),  # no sleeve_weights
+        _entry("2026-02-01", {"A": 1.0}, {"A": 100.0}, 400.0),
+    ]
+    assert score_by_sleeve(entries, {"2026-02-01": {"A": 110.0, "SPY": 404.0}}) == {}
+
+
+def test_score_by_sleeve_skips_sleeve_period_without_marks():
+    # momentum slice (B) has no mark at exit -> momentum scores 0 periods; core (A) still scores.
+    sw = {"core": {"A": 0.3}, "momentum": {"B": 0.2}}
+    entries = [
+        _sw_entry("2026-01-01", sw, {"A": 100.0, "B": 100.0}),
+        _sw_entry("2026-02-01", sw, {"A": 100.0, "B": 100.0}, bench_price=404.0),
+    ]
+    marks = {"2026-02-01": {"A": 120.0, "SPY": 404.0}}  # no B
+    by = score_by_sleeve(entries, marks)
+    assert by["core"].n_periods == 1
+    assert by["momentum"].n_periods == 0
