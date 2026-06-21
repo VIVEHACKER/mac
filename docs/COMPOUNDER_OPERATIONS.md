@@ -420,8 +420,15 @@ cd "/Users/jjuni/재무관리 모델/trader-fund"
 
 `--dry-run` prints the entry without appending (mechanical verification, like paper_drill); drop it to
 append to `out/fund-book-oos.jsonl`. The first append starts the Phase-2 clock; from there it is a
-time-gate — realised excess accumulates as periods close. A cadence cron and per-sleeve attribution are
-deferred until T0 is recorded and the cadence chosen.
+time-gate — realised excess accumulates as periods close. A cadence cron is deferred until T0 is recorded
+and the cadence chosen.
+
+**Per-sleeve attribution.** Each entry also records `sleeve_weights` (cap-clipped per-sleeve fund-weight
+contributions, Σ == invested — the same reconciliation as the exposure report). `score_by_sleeve` scores
+each sleeve's slice vs the **same** benchmark over the closed periods, so once the clock runs you can ask
+**which sleeve earns the live edge** (core / hunt / momentum / bridge), not just whether the whole fund
+beats SPY — `scripts/fund_book_oos.py --score --by-sleeve`. Legacy entries without `sleeve_weights`
+attribute nothing (backward-compatible). Still pure forward observation (no per-sleeve backtest claim).
 
 ---
 
