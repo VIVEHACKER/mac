@@ -7,6 +7,8 @@ import pytest
 from engine.fund_book import SleeveTarget, assemble_fund_book
 from engine.fund_book_oos import (
     FundBookOOSEntry,
+    _period_return,  # private: refactor-parity pin
+    _period_return_for,  # private: refactor-parity pin
     append_entry,
     fund_book_to_entry,
     load_ledger,
@@ -336,3 +338,62 @@ def test_score_by_sleeve_skips_sleeve_period_without_marks():
     by = score_by_sleeve(entries, marks)
     assert by["core"].n_periods == 1
     assert by["momentum"].n_periods == 0
+
+
+# --------------------------------------------------------------------------- #
+# refactor-parity + round-trip + edge cases (adversarial-review MEDIUM/LOW, spec §5)
+# --------------------------------------------------------------------------- #
+
+
+def test_period_return_for_equals_period_return():
+    # refactor parity: the thin wrapper must equal the generalised helper on entry.weights
+    e = _entry("2026-01-01", {"A": 0.5, "B": 0.5}, {"A": 100.0, "B": 100.0}, 400.0)
+    marks = {"A": 120.0, "B": 90.0}
+    assert _period_return(e, marks) == _period_return_for(e.weights, e.entry_prices, marks)
+
+
+def test_append_entry_roundtrip_with_sleeve_weights(tmp_path: Path):
+    # round-trip a NON-empty sleeve_weights through append_entry + load_ledger (not just the legacy {})
+    path = tmp_path / "led.jsonl"
+    entry = _sw_entry("2026-01-01", {"core": {"A": 0.3, "B": 0.2}, "hunt": {"C": 0.1}}, {})
+    append_entry(path, entry)
+    loaded = load_ledger(path)[0]
+    assert loaded.sleeve_weights == {"core": {"A": 0.3, "B": 0.2}, "hunt": {"C": 0.1}}
+
+
+def test_score_ledger_refactor_parity_fixed_values():
+    # pin every record field on a hand-computed ledger so the _score_periods refactor can't drift
+    entries = [
+        _entry("2026-01-01", {"A": 0.6, "B": 0.4}, {"A": 100.0, "B": 100.0}, 400.0),
+        _entry("2026-02-01", {"A": 0.6, "B": 0.4}, {"A": 100.0, "B": 100.0}, 408.0),
+    ]
+    marks = {"2026-02-01": {"A": 110.0, "B": 105.0, "SPY": 404.0}}
+    rec = score_ledger(entries, marks)
+    # port = 0.6*0.10 + 0.4*0.05 = 0.08 (renorm over invested 1.0); SPY 404/400-1 = 0.01
+    assert rec.n_periods == 1
+    assert rec.cumulative_return == pytest.approx(0.08)
+    assert rec.cumulative_benchmark == pytest.approx(0.01)
+    assert rec.cumulative_excess == pytest.approx(0.07)
+    assert rec.annualized_excess == pytest.approx(0.07 * 12)
+    assert rec.hit_rate == pytest.approx(1.0)
+
+
+def test_score_by_sleeve_skips_empty_weight_period():
+    # entry_0's hunt slice is empty -> _period_return_for returns None -> hunt period skipped; core scores
+    e0 = _sw_entry("2026-01-01", {"core": {"A": 0.3}, "hunt": {}}, {"A": 100.0})
+    e1 = _sw_entry(
+        "2026-02-01",
+        {"core": {"A": 0.3}, "hunt": {"B": 0.2}},
+        {"A": 100.0, "B": 100.0},
+        bench_price=404.0,
+    )
+    marks = {"2026-02-01": {"A": 120.0, "B": 110.0, "SPY": 404.0}}
+    by = score_by_sleeve([e0, e1], marks)
+    assert by["core"].n_periods == 1
+    assert by["hunt"].n_periods == 0
+
+
+def test_score_by_sleeve_single_entry_is_zero_record():
+    e = _sw_entry("2026-01-01", {"core": {"A": 0.3}}, {"A": 100.0})
+    by = score_by_sleeve([e], {})
+    assert by["core"].n_periods == 0
