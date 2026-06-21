@@ -23,6 +23,7 @@ from data.catalog import MarketDataCatalog  # noqa: E402
 from data.price_snapshot import read_price_snapshot  # noqa: E402
 from engine.core_basket import select_core_basket  # noqa: E402
 from engine.fund_book import SleeveTarget, assemble_fund_book, format_fund_book  # noqa: E402
+from engine.fund_exposure import compute_exposure, format_exposure  # noqa: E402
 from engine.hunt_basket import select_hunt_basket  # noqa: E402
 from engine.momentum_basket import momentum_sleeve_target, select_momentum_basket  # noqa: E402
 from scripts.aqr_ideal_walkforward import MEGACAPS, lookup_pit, prefetch  # noqa: E402
@@ -80,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="CSV/newline symbol list for the momentum sleeve (default: validated MEGACAPS)",
+    )
+    p.add_argument(
+        "--exposure",
+        action="store_true",
+        help="also print the fund exposure report (sector/sleeve/concentration)",
     )
     args = p.parse_args(argv)
 
@@ -146,6 +152,9 @@ def main(argv: list[str] | None = None) -> int:
 
     book = assemble_fund_book(sleeves, max_name_weight=args.max_name_weight)
     print(format_fund_book(book))
+    if args.exposure:
+        print()
+        print(format_exposure(compute_exposure(book, sectors)))
     return 0
 
 
