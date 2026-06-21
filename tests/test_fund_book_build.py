@@ -1,9 +1,18 @@
 from pathlib import Path
 
+import pytest
+
 from engine.fund_book import FundBook
 from scripts.fund_book import build_fund_book
 
-TRADER_SNAP = Path("/Users/jjuni/재무관리 모델/trader/data/snapshots")
+# 검증 스냅샷 CSV 는 gitignore 되어 sibling ../trader 에만 있음(절대경로 하드코딩 금지).
+TRADER_SNAP = Path(__file__).resolve().parents[2] / "trader" / "data" / "snapshots"
+
+# 데이터 없는 환경(CI/클린클론)에서는 스킵 — 데이터 의존 테스트가 코드 도달 전에 실패하지 않도록.
+pytestmark = pytest.mark.skipif(
+    not (TRADER_SNAP / "fundamentals-2026-06-01-gp2.csv").exists(),
+    reason="검증 스냅샷(../trader/data/snapshots, gitignore) 부재 — 로컬 데이터 있을 때만 실행",
+)
 
 
 def test_build_fund_book_core_hunt_only():

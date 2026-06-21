@@ -1,10 +1,22 @@
 from pathlib import Path
 
+import pytest
+
 from dashboard.fund_portfolio import fund_book_payload, resolve_snapshot
 
-ROOT = Path("/Users/jjuni/재무관리 모델/trader-fund")
+ROOT = Path(__file__).resolve().parents[1]  # trader-fund
+
+# 검증 스냅샷(../trader/data/snapshots)은 gitignore — 없으면 데이터 의존 테스트만 스킵.
+# graceful-path 테스트(missing/none)는 데이터 없이도 동작하므로 CI 에서도 실행한다.
+_HAS_DATA = (
+    ROOT.parent / "trader" / "data" / "snapshots" / "fundamentals-2026-06-01-gp2.csv"
+).exists()
+_needs_data = pytest.mark.skipif(
+    not _HAS_DATA, reason="검증 스냅샷(../trader/data/snapshots, gitignore) 부재 — 로컬 한정"
+)
 
 
+@_needs_data
 def test_resolve_snapshot_falls_back_to_trader():
     # trader-fund 로컬엔 gitignore로 없음 → ../trader/data/snapshots 폴백
     p = resolve_snapshot(["fundamentals-*-gp2.csv"], ROOT)
@@ -17,6 +29,7 @@ def test_resolve_snapshot_missing_returns_none():
     assert resolve_snapshot(["zzz-does-not-exist-*.csv"], ROOT) is None
 
 
+@_needs_data
 def test_fund_book_payload_shape_with_momentum():
     payload = fund_book_payload(ROOT, momentum_on=True)
     meta = payload["meta"]
