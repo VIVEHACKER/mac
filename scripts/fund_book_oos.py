@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from data.catalog import MarketDataCatalog  # noqa: E402
 from data.price_snapshot import read_price_snapshot  # noqa: E402
+from engine.cadence import cadence_status  # noqa: E402
 from engine.core_basket import select_core_basket  # noqa: E402
 from engine.fund_book import SleeveTarget, assemble_fund_book, format_fund_book  # noqa: E402
 from engine.fund_book_oos import (  # noqa: E402
@@ -122,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="print the entry without appending")
     p.add_argument("--periods-per-year", type=float, default=12.0)
     p.add_argument(
+        "--cadence-days",
+        type=int,
+        default=None,
+        help="on --record, skip if fewer than N business days since the last entry (default: no gate)",
+    )
+    p.add_argument(
         "--max-staleness-days",
         type=int,
         default=None,
@@ -168,6 +175,17 @@ def main(argv: list[str] | None = None) -> int:
         as_of = datetime.fromisoformat(args.as_of).date() if args.as_of else None
         book, effective = assemble_book(args, as_of=as_of)
         rebal_date = effective.isoformat()
+        # Cadence gate: skip recording if too soon since the last entry (disciplined ~monthly cadence).
+        if args.cadence_days is not None:
+            existing = load_ledger(args.ledger)
+            last = date.fromisoformat(existing[-1].rebal_date) if existing else None
+            st = cadence_status(last, effective, cadence_business_days=args.cadence_days)
+            if not st.due:
+                print(
+                    f"cadence: not due — {st.business_days_elapsed}/{args.cadence_days} business days "
+                    f"since {last}; {st.business_days_until_due} to go. Skipping record."
+                )
+                return 0
         # Same staleness bound as scoring (line above) — else a stale entry price would be recorded
         # then dropped at score time, silently recomposing the book (adversarial-review HIGH).
         marks_at = mark_prices_at_dates(
