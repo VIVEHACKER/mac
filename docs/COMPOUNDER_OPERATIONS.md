@@ -422,3 +422,40 @@ cd "/Users/jjuni/재무관리 모델/trader-fund"
 append to `out/fund-book-oos.jsonl`. The first append starts the Phase-2 clock; from there it is a
 time-gate — realised excess accumulates as periods close. A cadence cron and per-sleeve attribution are
 deferred until T0 is recorded and the cadence chosen.
+
+---
+
+## 펀드 익스포저 리포트 (Fund Exposure Report) — 조립된 북의 리스크 뷰
+
+Before deploying capital to the assembled barbell you need to SEE what it actually holds. Engine:
+`engine/fund_exposure.py`; wired as `scripts/fund_book.py --exposure`; tests:
+`tests/test_engine/test_fund_exposure.py`. Spec:
+`docs/superpowers/specs/2026-06-21-fund-exposure-design.md`.
+
+### Honest framing (read before changing anything)
+
+This is a **descriptive diagnostic, NOT a risk model** — it aggregates the already-assembled fund weights
+(no covariance, no VaR, no factor model, no forward claim). It reports the sector mix, which sleeve drove
+each name, and how concentrated the book is, and flags simple thresholds. Factor (value/momentum/quality)
+exposure is deferred (needs per-name loadings unified across the three sleeve engines).
+
+### Metrics (`compute_exposure(book, sectors)`)
+
+- **Sector exposure**: Σ `fund_weight` per `sectors.get(symbol, "Unknown")`, with name counts; `max_sector`
+  is the largest.
+- **Sleeve attribution**: aggregates each `FundPosition.contributions` (fund_book records the *pre-cap*
+  per-sleeve provenance) **scaled by `fund_weight / Σ(raw contributions)`** so a cap-clipped name's
+  haircut is split proportionally across its sleeves and Σ(attribution) == `invested` exactly. A name in
+  two sleeves (e.g. core + bridge both holding it) splits here.
+- **Concentration** (weights as-is — reserve is real cash, not renormalised): `herfindahl = Σ wᵢ²`,
+  `effective_n = invested² / herfindahl` (Herfindahl effective number of names), `top_name`, `top_n_weight`.
+- **Flags** (descriptive): sector > `sector_warn` (default 40%), any name at the 8% cap, `effective_n < 5`
+  (degenerate breadth), empty book.
+
+### Driver
+
+```bash
+.venv/bin/python scripts/fund_book.py --exposure   # prints the book, then the exposure report under it
+```
+
+Reuses the `--sectors-csv` already loaded for core/hunt — no new data dependency.
