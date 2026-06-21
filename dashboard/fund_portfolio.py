@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 # 모멘텀 기본 ON 에 필요한 스냅샷 (글롭 패턴 — 날짜 변경에 견고)
@@ -109,3 +110,73 @@ def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
             "latest_rebal": entries[-1].rebal_date if entries else None,
         },
     }
+
+
+_HONESTY = (
+    "정직성: 알파 주장 없음 · core/hunt 검증 엣지 없음 · momentum 만 검증"
+    "(+8.15%/yr walk-forward, US 한정) · 리스크 모델 아님(서술적 진단)."
+)
+
+
+def render_fund_portfolio(root: Path) -> None:
+    st.subheader("펀드 포트폴리오 — 조립된 50/50 바벨")
+    c1, c2 = st.columns([1, 4])
+    momentum_on = c1.checkbox("모멘텀 슬리브 포함", value=True, key="fund_mom")
+    if c2.button("↻ 새로고침", key="fund_refresh"):
+        fund_book_payload.clear()
+
+    try:
+        payload = fund_book_payload(root, momentum_on=momentum_on)
+    except Exception as e:  # 조립 실패 — 탭만 죽고 앱은 유지
+        st.error(f"펀드 북 조립 실패: {e}")
+        return
+
+    meta = payload["meta"]
+    if not meta["available"]:
+        st.warning(meta["message"])
+        return
+
+    st.caption(_HONESTY)
+
+    # 상단 — 슬리브 배분 (정책 타겟 vs 실현)
+    fracs = dict(meta["sleeve_fractions"])
+    reserve_policy = round(1.0 - sum(fracs.values()), 4)
+    bar = {**fracs, "reserve": reserve_policy}
+    st.markdown("**정책 타겟 (슬리브 비중)**")
+    st.bar_chart(pd.DataFrame({"비중": bar}))
+    m = st.columns(5)
+    m[0].metric("invested(실현)", f"{meta['invested'] * 100:.1f}%")
+    m[1].metric("reserve(실현)", f"{meta['reserve_cash'] * 100:.1f}%")
+    m[2].metric("종목수", meta["n_positions"])
+    m[3].metric("유효종목수", meta["effective_n"])
+    top = meta["top_name"] or "—"
+    m[4].metric("top", f"{top} {meta['top_name_weight'] * 100:.1f}%")
+    if not meta["momentum_on"]:
+        st.info("모멘텀 슬리브 제외(토글 OFF 또는 시계열 스냅샷 없음) — core+hunt 만 표시.")
+
+    # 중단 — 종목 / 섹터
+    cols = st.columns([3, 2])
+    with cols[0]:
+        st.markdown("**종목 (펀드 비중 · 출처 슬리브)**")
+        st.dataframe(pd.DataFrame(payload["positions"]), use_container_width=True, hide_index=True)
+    with cols[1]:
+        st.markdown("**섹터 익스포저**")
+        st.dataframe(pd.DataFrame(payload["sectors"]), use_container_width=True, hide_index=True)
+        st.markdown("**슬리브 기여**")
+        st.dataframe(
+            pd.DataFrame(payload["sleeve_attr"]), use_container_width=True, hide_index=True
+        )
+
+    # 하단 — OOS 성과
+    st.markdown("**포워드 OOS 성과**")
+    oos = payload["oos"]
+    if oos["n_entries"] == 0:
+        st.info(
+            "포워드 OOS 원장 미가동(표본 0). PIT 기록을 시작하려면 "
+            "`scripts/fund_book_oos.py` 로 리밸 시점 펀드 북을 등록하세요."
+        )
+    else:
+        st.caption(
+            f"원장 {oos['n_entries']}건 · 최근 리밸 {oos['latest_rebal']} "
+            "(누적/연환산 초과·적중률·excess Sharpe 채점은 mark price history 필요 — 후속)"
+        )
