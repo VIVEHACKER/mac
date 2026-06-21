@@ -40,7 +40,9 @@ def test_fund_book_payload_shape_with_momentum():
     row = payload["positions"][0]
     assert set(row) >= {"종목", "펀드%", "캡", "출처슬리브"}
     assert isinstance(payload["sectors"], list)
-    assert payload["oos"]["n_entries"] == 0  # 원장 미생성
+    # OOS 원장은 gitignore 로컬 상태 — 존재 여부 무관히 shape 만 검증(개발자가 OOS 돌렸을 수 있음).
+    assert isinstance(payload["oos"]["n_entries"], int)
+    assert "latest_rebal" in payload["oos"]
 
 
 def test_fund_book_payload_missing_snapshots_graceful(tmp_path):

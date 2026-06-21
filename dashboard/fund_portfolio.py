@@ -34,6 +34,14 @@ def _provenance(contributions: tuple[tuple[str, float], ...]) -> str:
     return "+".join(name for name, _ in contributions) or "—"
 
 
+def _resolve_db(root: Path) -> Path:
+    """trader 카탈로그 DuckDB 를 root 기준으로 해석(워크스테이션 절대경로 폴백 회피)."""
+    local = root / "data" / "store" / "trader.duckdb"
+    if local.exists():
+        return local
+    return root.parent / "trader" / "data" / "store" / "trader.duckdb"
+
+
 @st.cache_data(show_spinner=False)
 def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
     """조립된 FundBook 을 plain dict 로 (st.cache_data 피클 안전). 스냅샷 없으면 available=False."""
@@ -59,7 +67,7 @@ def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
             "oos": {"n_entries": 0, "latest_rebal": None},
         }
 
-    kwargs: dict = {"snapshot": snapshot, "prices": prices}
+    kwargs: dict = {"snapshot": snapshot, "prices": prices, "db": _resolve_db(root)}
     mom_hist = resolve_snapshot(_MOM_HISTORY, root) if momentum_on else None
     mom_snap = resolve_snapshot(_MOM_SNAPSHOT, root) if momentum_on else None
     if mom_hist is not None and mom_snap is not None:
