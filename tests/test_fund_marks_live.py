@@ -1,7 +1,14 @@
 from datetime import date
 
+import pytest
+
 from engine.fund_book_oos import FundBookOOSEntry
-from scripts.fund_marks_live import build_live_marks, ledger_symbols, open_book_mtm
+from scripts.fund_marks_live import (
+    build_live_marks,
+    ledger_symbols,
+    open_book_mtm,
+    open_book_mtm_by_sleeve,
+)
 
 
 def _entry(rebal="2026-05-29", weights=None, prices=None, bench_price=700.0):
@@ -68,3 +75,28 @@ def test_open_book_mtm_unrealized_excess_vs_spy():
 def test_open_book_mtm_none_when_no_marks():
     e = _entry()
     assert open_book_mtm(e, {"SPY": 735.0}) is None  # 보유종목 마크 0 → None
+
+
+def test_open_book_mtm_by_sleeve_attributes_excess():
+    # momentum=MU(+20%), core=AAL(flat), SPY +5% → 슬리브별 미실현 초과 귀속
+    e = FundBookOOSEntry(
+        rebal_date="2026-05-29",
+        weights={"MU": 0.5, "AAL": 0.5},
+        entry_prices={"MU": 100.0, "AAL": 50.0},
+        benchmark_symbol="SPY",
+        benchmark_price=700.0,
+        sleeve_fractions={"momentum": 0.25, "core": 0.35},
+        reserve_cash=0.0,
+        invested=1.0,
+        sleeve_weights={"momentum": {"MU": 0.5}, "core": {"AAL": 0.5}},
+    )
+    marks = {"MU": 120.0, "AAL": 50.0, "SPY": 735.0}
+    by = open_book_mtm_by_sleeve(e, marks)
+    assert by["momentum"]["unrealized_excess"] == pytest.approx(0.20 - 0.05)
+    assert by["core"]["unrealized_excess"] == pytest.approx(0.0 - 0.05)
+    assert by["momentum"]["marked"] == 1
+
+
+def test_open_book_mtm_by_sleeve_empty_without_sleeve_weights():
+    # sleeve_weights 없는(레거시) 엔트리 → 빈 dict (하위호환)
+    assert open_book_mtm_by_sleeve(_entry(), {"MU": 110.0, "AAL": 55.0, "SPY": 735.0}) == {}

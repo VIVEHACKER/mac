@@ -63,16 +63,16 @@ def build_live_marks(
     return sorted(table), table
 
 
-def open_book_mtm(entry, marks: dict[str, float]) -> dict | None:
-    """열린(마지막) 엔트리의 미실현 mark-to-market vs 벤치마크.
-
-    보유 가중을 마크된 종목으로 renormalise(미마크는 flat). 보유 마크가 하나도 없으면 None."""
+def _weighted_return(
+    weights: dict[str, float], entry_prices: dict[str, float], marks: dict[str, float]
+) -> tuple[float, int] | None:
+    """마크된 종목으로 renormalise 한 가중 미실현 수익률 + 마크된 종목 수. 마크 0개면 None."""
     total_w = 0.0
     weighted = 0.0
     marked = 0
-    for sym, w in entry.weights.items():
+    for sym, w in weights.items():
         mark = marks.get(sym)
-        buy = entry.entry_prices.get(sym)
+        buy = entry_prices.get(sym)
         if mark is None or buy is None or buy <= 0:
             continue
         weighted += w * (mark / buy - 1.0)
@@ -80,17 +80,51 @@ def open_book_mtm(entry, marks: dict[str, float]) -> dict | None:
         marked += 1
     if total_w <= 0.0:
         return None
-    port = weighted / total_w
+    return weighted / total_w, marked
+
+
+def _benchmark_return(entry, marks: dict[str, float]) -> float | None:
     bench_mark = marks.get(entry.benchmark_symbol)
     if bench_mark is None or entry.benchmark_price <= 0:
         return None
-    bench = bench_mark / entry.benchmark_price - 1.0
+    return bench_mark / entry.benchmark_price - 1.0
+
+
+def open_book_mtm(entry, marks: dict[str, float]) -> dict | None:
+    """열린(마지막) 엔트리의 미실현 mark-to-market vs 벤치마크. 보유 마크 0개/벤치 마크 없으면 None."""
+    r = _weighted_return(entry.weights, entry.entry_prices, marks)
+    bench = _benchmark_return(entry, marks)
+    if r is None or bench is None:
+        return None
+    port, marked = r
     return {
         "port_return": port,
         "benchmark_return": bench,
         "unrealized_excess": port - bench,
         "marked": marked,
     }
+
+
+def open_book_mtm_by_sleeve(entry, marks: dict[str, float]) -> dict[str, dict]:
+    """슬리브별 미실현 MTM(entry.sleeve_weights 기준) vs 동일 벤치마크 — 미실현 초과를 슬리브로 귀속.
+
+    realized `score_by_sleeve` 의 미실현 버전. sleeve_weights 없는(레거시) 엔트리/벤치 마크 없으면 {}."""
+    sleeve_weights = getattr(entry, "sleeve_weights", None) or {}
+    bench = _benchmark_return(entry, marks)
+    if not sleeve_weights or bench is None:
+        return {}
+    out: dict[str, dict] = {}
+    for sleeve, weights in sleeve_weights.items():
+        r = _weighted_return(weights, entry.entry_prices, marks)
+        if r is None:
+            continue
+        port, marked = r
+        out[sleeve] = {
+            "port_return": port,
+            "unrealized_excess": port - bench,
+            "marked": marked,
+        }
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

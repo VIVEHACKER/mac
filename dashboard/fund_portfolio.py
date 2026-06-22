@@ -53,7 +53,7 @@ def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
     )
     from engine.fund_exposure import compute_exposure
     from scripts.fund_book import build_fund_book  # 무거운 import(yfinance) 지연
-    from scripts.fund_marks_live import open_book_mtm
+    from scripts.fund_marks_live import open_book_mtm, open_book_mtm_by_sleeve
 
     snapshot = resolve_snapshot(_FUND_SNAPSHOT, root)
     prices = resolve_snapshot(_FUND_PRICES, root)
@@ -107,6 +107,7 @@ def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
         "latest_rebal": entries[-1].rebal_date if entries else None,
         "marks_available": False,
         "unrealized": None,  # 열린 북 T0 이후 미실현 MTM
+        "unrealized_by_sleeve": [],  # 슬리브별 미실현 초과 귀속
         "realized": None,  # closed-period 실현(엔트리 2개+ 필요)
     }
     marks_path = root / "out" / "fund-marks.csv"
@@ -126,6 +127,16 @@ def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
                     "n_holdings": len(entries[-1].weights),
                     "asof": asof,
                 }
+            by_sleeve = open_book_mtm_by_sleeve(entries[-1], marks_now)
+            oos["unrealized_by_sleeve"] = [
+                {
+                    "sleeve": s,
+                    "excess": round(v["unrealized_excess"], 4),
+                    "ret": round(v["port_return"], 4),
+                    "marked": v["marked"],
+                }
+                for s, v in sorted(by_sleeve.items(), key=lambda kv: -kv[1]["unrealized_excess"])
+            ]
             scored = score_ledger(
                 entries,
                 mark_prices_at_dates(
@@ -240,6 +251,12 @@ def render_fund_portfolio(root: Path) -> None:
                 f"{u['port_return'] * 100:+.2f}% / {u['benchmark_return'] * 100:+.2f}%",
             )
             cc[2].metric("마크", f"{u['marked']}/{u['n_holdings']} · asof {u['asof']}")
+        bs = oos["unrealized_by_sleeve"]
+        if bs:
+            st.caption(
+                "슬리브별 미실현 초과: "
+                + " · ".join(f"{s['sleeve']} {s['excess'] * 100:+.2f}%" for s in bs)
+            )
         r = oos["realized"]
         if r and r["n_periods"] > 0:
             st.caption(
