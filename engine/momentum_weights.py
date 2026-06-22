@@ -59,7 +59,8 @@ def weights_from_picks(picks, prices, rebal, cap=0.20):
     total_cap = n * cap
     if total_cap < 1.0 - 1e-6:
         raise ValueError(
-            f"infeasible cap: {n} names x cap {cap:.4f} = {total_cap:.4f} < 1.0 (raise cap)."
+            f"infeasible cap: {n} names x cap {cap:.4f} = {total_cap:.4f} < 1.0; cannot fully "
+            f"invest within the per-symbol cap (raise cap to >= {1.0 / n:.4f} or hold fewer names)."
         )
     # Cap binds for every name (e.g. top5: 5 * 0.20 ≈ 1.0) → equal weight is the unique feasible
     # split and exactly respects the cap. Mirrors paper_drill.weights_from_picks so the model-gate
