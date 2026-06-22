@@ -65,18 +65,29 @@ def revision_signals(
     weights: Mapping[str, float] | None = None,
     min_coverage: int = 3,
     up_threshold: float = 0.0,
+    max_downgrades: int | None = None,
 ) -> list[StrategySignal]:
-    """Score each name's consensus-revision momentum. Screen thin coverage (noise); blend target-price,
-    EPS-estimate, and up/down-breadth changes (each guarded against div-by-zero / None). Returns
-    StrategySignals sorted by score desc — a CANDIDATE signal, gated by forward_ic (see module header)."""
+    """Score each name's consensus-revision momentum. Screen thin coverage (noise); optionally apply the
+    method's signature DOWNGRADE FILTER (`max_downgrades`); blend target-price, EPS-estimate, and
+    up/down-breadth changes (each guarded against div-by-zero / None). Returns StrategySignals sorted by
+    score desc — a CANDIDATE signal, gated by forward_ic (see module header).
+
+    `max_downgrades` is the video's signature rule ("파란색[하향] 하나라도 보이면 거른다"): set 0 to drop
+    any name with a target-price/estimate downgrade in the window (more defensive than a continuous score
+    given target-price optimism bias — a downgrade off an optimistic baseline is a stronger signal).
+    Default None disables the filter (continuous breadth score only)."""
     if min_coverage < 1:
         raise ValueError(f"min_coverage must be >= 1 (got {min_coverage})")
+    if max_downgrades is not None and max_downgrades < 0:
+        raise ValueError(f"max_downgrades must be >= 0 or None (got {max_downgrades})")
     w = weights or DEFAULT_WEIGHTS
 
     out: list[StrategySignal] = []
     for r in revisions:
         if (r.n_total or 0) < min_coverage:
             continue  # thin coverage -> noise, screened out (not scored)
+        if max_downgrades is not None and r.n_down > max_downgrades:
+            continue  # downgrade filter (the video's "any 파란색 -> 거른다" rule)
         tp_chg = _tp_chg(r)
         eps_chg = _eps_chg(r)
         breadth = _breadth(r)

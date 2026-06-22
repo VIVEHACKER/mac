@@ -139,6 +139,23 @@ def test_invalid_min_coverage_raises():
         revision_signals([_rev("A")], min_coverage=0)
 
 
+def test_downgrade_filter_rejects_any_downgrade():
+    # the video's signature rule: any target-price downgrade (n_down>0) -> drop with max_downgrades=0
+    revs = [
+        _rev("CLEAN", n_up=3, n_down=0, n_total=5),  # all up/flat -> kept
+        _rev("BLUE", n_up=4, n_down=1, n_total=5),  # one downgrade -> dropped
+    ]
+    kept = {s.symbol for s in revision_signals(revs, max_downgrades=0)}
+    assert kept == {"CLEAN"}
+    # default (None) keeps both (continuous score only)
+    assert {s.symbol for s in revision_signals(revs)} == {"CLEAN", "BLUE"}
+
+
+def test_invalid_max_downgrades_raises():
+    with pytest.raises(ValueError):
+        revision_signals([_rev("A")], max_downgrades=-1)
+
+
 # --------------------------------------------------------------------------- #
 # forward_ic (validate-before-trust gate)
 # --------------------------------------------------------------------------- #
