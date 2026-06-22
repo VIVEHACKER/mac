@@ -166,6 +166,17 @@ uv run streamlit run dashboard/app.py --server.port 8501
 
 대시보드 `💹 펀드 포트폴리오` 탭은 `build_fund_book`(검증 조립기, `scripts/fund_book.py`)으로 50/50 바벨을 조립해 슬리브 비중(core/hunt/momentum/reserve) · 종목별 펀드비중+출처슬리브 · 섹터 익스포저 · 포워드 OOS 성과(원장 `out/fund-book-oos.jsonl`)를 한 화면에 보여준다. 스냅샷 CSV는 trader-fund에서 gitignore되므로 `../trader/data/snapshots`로 폴백 로드하고 모멘텀 슬리브는 기본 ON(재현 가능). 정직성: momentum만 검증 엣지(+8.15%/yr walk-forward, US 한정), core/hunt는 알파 주장 없음.
 
+### 현재 데이터로 동작 (실사용) — 가격 리프레시
+
+기본 핀 스냅샷은 2026-06-01(검증/백테스트용)이라 그대로 두면 펀드가 그 시점으로 조립된다. **실사용(오늘 기준 픽)**은 가격 스냅샷만 오늘로 갱신하면 된다 — `build_universe`가 PIT 기준일(`effective`)을 **가격 스냅샷의 최신일**에서 잡고 펀더멘털은 PIT 룩업(`asof_ts ≤ effective`)하므로, 가격만 fresh 면 core·hunt·momentum 전부 오늘로 advance하고 펀더멘털은 기존 카탈로그 스냅샷에서 PIT-정확하게 조회된다(API 키 불필요).
+
+```bash
+# yfinance(키 무)로 두 가격 패밀리를 오늘까지 생성 — prices-<today> + prices-ideal-<today>
+uv run python scripts/refresh_prices.py            # start 2018-01-01 (기본)
+```
+
+대시보드 `💹 펀드 포트폴리오` 탭은 각 패밀리의 **최신 날짜 스냅샷을 자동 선택**하므로, 리프레시 후 새로고침(↻)하면 **오늘 기준 펀드**가 뜬다. 핀 2026-06-01 스냅샷은 건드리지 않으므로 검증 파이프라인은 그대로 재현된다(검증=핀, 실사용=최신 분리). 펀더멘털 자체를 새로 받으려면 카탈로그 재인제스트(FMP/SEC 키)가 필요하며 이는 별도 단계 — 가격 리프레시만으로도 momentum(가격 주도)·valuation 가격은 당일치가 된다.
+
 ### 펀드북 forward-OOS cadence
 
 ```bash
