@@ -42,7 +42,14 @@ class EstimateRevision:
 
 
 def _tp_chg(r: EstimateRevision) -> float:
-    if r.target_price is None or r.target_price_prev is None or r.target_price_prev <= 0:
+    # tp 컴포넌트는 현재·이전 타겟이 모두 양수일 때만 정의됨 — 0/누락 타겟이 거짓 다운그레이드를
+    # 만들지 않게 현재 타겟도 <=0 이면 미정의 처리(Codex).
+    if (
+        r.target_price is None
+        or r.target_price_prev is None
+        or r.target_price <= 0
+        or r.target_price_prev <= 0
+    ):
         return 0.0
     return (r.target_price - r.target_price_prev) / r.target_price_prev
 

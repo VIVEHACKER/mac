@@ -80,6 +80,12 @@ def test_zero_prev_target_price_contributes_zero():
     assert sigs[0].score == pytest.approx(0.0)
 
 
+def test_zero_current_target_price_contributes_zero():
+    # 현재 타겟이 0/누락(피드 인코딩)일 때 tp 컴포넌트 미정의 — 거짓 다운그레이드 방지(Codex P2)
+    sigs = revision_signals([_rev("A", tp=0.0, tp_prev=100.0)])
+    assert sigs[0].score == pytest.approx(0.0)
+
+
 def test_zero_prev_eps_contributes_zero():
     sigs = revision_signals([_rev("A", eps=1.1, eps_prev=0.0)])
     assert sigs[0].score == pytest.approx(0.0)

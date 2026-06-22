@@ -47,7 +47,8 @@ def test_cap_binding_gives_equal_weight():
 def test_infeasible_cap_raises():
     # 3 names x 0.20 = 0.60 < 1.0 -> cannot reach full investment, must raise
     picks = [_Pick(s) for s in ["A", "B", "C"]]
-    with pytest.raises(ValueError):
+    # 메시지는 종목을 더 늘리도록 안내해야 한다(줄이면 capacity 더 작아짐, Codex P3)
+    with pytest.raises(ValueError, match="at least"):
         weights_from_picks(
             picks, _frame(["A", "B", "C"], 300), pd.Timestamp("2024-06-01"), cap=0.20
         )
