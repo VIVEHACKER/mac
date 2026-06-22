@@ -197,7 +197,8 @@ def _render_validated_scan() -> None:
         full = []
         for r in rows[:n]:
             row = {k: v for k, v in r.items() if k != "_pick"}
-            row["순위"] = f"{r['순위']}★" if r["_pick"] else r["순위"]
+            # 컬럼 타입을 문자열로 통일(★ 유무로 int/str 혼합 → pyarrow 직렬화 경고 방지)
+            row["순위"] = f"{r['순위']}★" if r["_pick"] else str(r["순위"])
             full.append(row)
         st.dataframe(pd.DataFrame(full), use_container_width=True, hide_index=True)
     st.caption(
