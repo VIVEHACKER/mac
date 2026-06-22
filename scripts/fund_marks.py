@@ -6,8 +6,9 @@ every other column = a symbol's close. Our pinned price snapshots are LONG (`sym
 and split across two universes (megacaps + SPY in prices-ideal, sp400-600 in prices-*), so this
 driver merges them and pivots to WIDE — covering every held name + benchmark in one file.
 
-Pinned-snapshot note: snapshots are frozen at one date, so the WIDE file only advances when the
-snapshots are regenerated (scripts/snapshot_prices.py). Forward scoring accumulates as that happens.
+Integrity: default pinned inputs are read through `read_price_snapshot(verify=True)`, which enforces
+the `.manifest.json` sha256 check (fail-closed on tampered/mismatched snapshots). Pinned snapshots are
+frozen at one date, so the WIDE file only advances when snapshots are regenerated.
 """
 
 from __future__ import annotations
@@ -41,36 +42,28 @@ def _resolve_default_prices() -> list[Path]:
 
 
 def build_wide_marks(
-    long_paths: list[Path], *, since: date | None = None
+    long_paths: list[Path], *, since: date | None = None, verify: bool = True
 ) -> tuple[list[str], dict[str, dict[str, float]]]:
-    """LONG (symbol,date,close) CSV 들을 읽어 (정렬된 ISO date 목록, {date: {symbol: close}}) 반환.
+    """LONG 스냅샷들을 (정렬된 ISO date 목록, {date: {symbol: close}}) 로 병합.
 
-    ``since`` 이전 날짜는 제외. 동일 (date, symbol) 충돌 시 마지막 파일 값이 우선(megacap/sp400-600은
-    심볼이 겹치지 않으므로 실제 충돌은 드뭄)."""
+    ``read_price_snapshot(verify=...)`` 로 읽어 manifest 해시 검증을 통과한 데이터만 사용한다
+    (verify=True 면 manifest 불일치/누락 시 fail-closed). ``since`` 이전 날짜는 제외. 심볼이
+    겹치면 뒤 파일이 우선(megacap/sp400-600 은 실제로 겹치지 않음)."""
+    import pandas as pd
+
+    from data.price_snapshot import read_price_snapshot
+
     table: dict[str, dict[str, float]] = {}
     for path in long_paths:
-        with Path(path).open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            cols = {c.lower(): c for c in (reader.fieldnames or [])}
-            sym_c = cols.get("symbol") or (reader.fieldnames or ["symbol"])[0]
-            date_c = cols.get("date") or (reader.fieldnames or ["", "date"])[1]
-            close_c = cols.get("close") or (reader.fieldnames or ["", "", "close"])[2]
-            for row in reader:
-                raw_date = (row.get(date_c) or "").strip()
-                if not raw_date:
-                    continue
-                iso = raw_date[:10]
-                if since is not None and date.fromisoformat(iso) < since:
-                    continue
-                sym = (row.get(sym_c) or "").strip().upper()
-                raw_close = (row.get(close_c) or "").strip()
-                if not sym or not raw_close:
-                    continue
-                try:
-                    close = float(raw_close)
-                except ValueError:
-                    continue
-                table.setdefault(iso, {})[sym] = close
+        wide = read_price_snapshot(Path(path), verify=verify)  # date index × symbol cols, 해시검증
+        if since is not None:
+            wide = wide.loc[wide.index >= pd.Timestamp(since)]
+        for ts, row in wide.iterrows():
+            iso = ts.date().isoformat()
+            dest = table.setdefault(iso, {})
+            for sym, val in row.items():
+                if pd.notna(val):
+                    dest[str(sym).upper()] = float(val)
     return sorted(table), table
 
 
@@ -101,15 +94,29 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="LONG (symbol,date,close) CSVs; default: latest prices-ideal-* + prices-2* (trader fallback)",
     )
+    p.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="skip manifest hash verification (only for explicit --prices without manifests)",
+    )
     args = p.parse_args(argv)
 
+    using_defaults = args.prices is None
     paths = args.prices or _resolve_default_prices()
     if not paths:
         raise SystemExit(
             "LONG 가격 스냅샷을 못 찾음(prices-ideal-*/prices-2*). --prices 로 직접 지정하세요."
         )
+    # 기본 스냅샷은 두 패밀리(SPY/megacap + sp400-600)가 모두 있어야 marks 가 완전하다.
+    if using_defaults and len(paths) < len(_LONG_PATTERNS):
+        raise SystemExit(
+            f"기본 스냅샷 패밀리 일부만 찾음({[p.name for p in paths]}) — "
+            "prices-ideal-*(SPY/megacap)·prices-2*(sp400-600) 둘 다 필요. --prices 로 명시 지정하세요."
+        )
+    # 기본(핀) 입력은 manifest 검증 강제; 명시 --prices 는 의도적이므로 --no-verify 허용.
+    verify = not args.no_verify if not using_defaults else True
     since = date.fromisoformat(args.since) if args.since else None
-    dates, table = build_wide_marks(list(paths), since=since)
+    dates, table = build_wide_marks(list(paths), since=since, verify=verify)
     if not dates:
         raise SystemExit(f"마크가 비어 있음(since={args.since}, paths={[str(p) for p in paths]})")
     n_syms = len({sym for d in dates for sym in table[d]})
