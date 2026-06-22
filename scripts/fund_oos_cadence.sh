@@ -37,7 +37,14 @@ echo "[fund-oos-cadence] $(date '+%F %T') 마크 갱신"
 # 원장이 있으면 라이브 마크(yfinance, forward 누적 + 열린북 미실현 MTM). 비어있으면(부트스트랩)
 # 스냅샷 마크로 T0 를 만들 수 있게 한다 — T0 기록 후엔 라이브가 entry 와 소스 일관.
 if [ -s out/fund-book-oos.jsonl ]; then
-  "$PY" scripts/fund_marks_live.py --out out/fund-marks.csv
+  # --with-book: 현재 조립 북 보유종목도 마크에 포함(다음 리밸이 신규 종목 선택해도 record 가능).
+  if [ -n "$PHIST" ] && [ -n "$MOMSNAP" ]; then
+    "$PY" scripts/fund_marks_live.py --out out/fund-marks.csv --with-book \
+      --snapshot "$SNAPSHOT" --prices "$PRICES" --price-history "$PHIST" --momentum-snapshot "$MOMSNAP"
+  else
+    "$PY" scripts/fund_marks_live.py --out out/fund-marks.csv --with-book \
+      --snapshot "$SNAPSHOT" --prices "$PRICES"
+  fi
 else
   echo "[fund-oos-cadence] 원장 비어있음 — 스냅샷 마크로 부트스트랩" >&2
   "$PY" scripts/fund_marks.py --since 2026-01-01 --out out/fund-marks.csv

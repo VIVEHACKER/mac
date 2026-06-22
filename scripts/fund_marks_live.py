@@ -51,12 +51,13 @@ def fetch_closes_yf(symbols: list[str], start: str, end) -> dict[str, dict[str, 
 
 
 def build_live_marks(
-    entries: list, *, end: date, fetch=fetch_closes_yf
+    entries: list, *, end: date, fetch=fetch_closes_yf, extra_symbols=()
 ) -> tuple[list[str], dict[str, dict[str, float]]]:
-    """원장 종목+벤치의 라이브 종가를 가장 이른 rebal_date 부터 end 까지 가져와 (dates, table) 반환.
+    """원장 종목+벤치(+extra_symbols)의 라이브 종가를 가장 이른 rebal_date 부터 end 까지 → (dates, table).
 
-    ``fetch`` 주입 가능(테스트는 네트워크 없이 가짜 fetch 사용)."""
-    syms = ledger_symbols(entries)
+    ``extra_symbols`` = 현재 조립 북의 보유종목 — 미래 리밸이 신규 종목을 선택해도 record 시 entry
+    price 가 marks 에 있도록 미리 포함시킨다(Codex P1). ``fetch`` 주입 가능(테스트=네트워크 무관)."""
+    syms = sorted(set(ledger_symbols(entries)) | {s.upper() for s in extra_symbols})
     start = min(e.rebal_date for e in entries)  # ISO 문자열 = 사전순 최소
     table = fetch(syms, start, end)
     return sorted(table), table
@@ -99,13 +100,36 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Live marks (yfinance) for the fund-book OOS ledger")
     p.add_argument("--ledger", type=Path, default=ROOT / "out" / "fund-book-oos.jsonl")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    p.add_argument(
+        "--with-book",
+        action="store_true",
+        help="현재 조립 북의 보유종목도 마크에 포함(미래 리밸 신규 종목 entry price 보장)",
+    )
+    # --with-book 시 build_fund_book 에 넘길 스냅샷 경로(미지정 시 build_fund_book 디폴트)
+    p.add_argument("--snapshot", type=Path, default=None)
+    p.add_argument("--prices", type=Path, default=None)
+    p.add_argument("--price-history", type=Path, default=None)
+    p.add_argument("--momentum-snapshot", type=Path, default=None)
     args = p.parse_args(argv)
 
     entries = load_ledger(args.ledger)
     if not entries:
         raise SystemExit(f"원장이 비어 있음({args.ledger}) — 먼저 fund_book_oos.py 로 T0 기록")
+
+    extra: list[str] = []
+    if args.with_book:
+        from scripts.fund_book import build_fund_book
+
+        bf_kwargs = {
+            k: getattr(args, k)
+            for k in ("snapshot", "prices", "price_history", "momentum_snapshot")
+            if getattr(args, k) is not None
+        }
+        book, _ = build_fund_book(**bf_kwargs)
+        extra = [pos.symbol for pos in book.positions]
+
     end = date.today() + timedelta(days=1)  # yfinance end exclusive → 오늘 포함
-    dates, table = build_live_marks(entries, end=end)
+    dates, table = build_live_marks(entries, end=end, extra_symbols=extra)
     if not dates:
         raise SystemExit("라이브 종가를 못 가져옴(네트워크/심볼 확인)")
     rows = write_wide_marks(args.out, dates, table)

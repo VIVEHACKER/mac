@@ -42,6 +42,18 @@ def test_build_live_marks_uses_injected_fetch_no_network():
     assert table["2026-06-10"]["SPY"] == 110.0
 
 
+def test_build_live_marks_includes_extra_book_symbols():
+    def fake_fetch(symbols, start, end):
+        return {"2026-06-10": dict.fromkeys(symbols, 100.0)}
+
+    _dates, table = build_live_marks(
+        [_entry()], end=date(2026, 6, 11), fetch=fake_fetch, extra_symbols=["NVDA", "mu"]
+    )
+    row = table["2026-06-10"]
+    assert "NVDA" in row  # 신규 북 종목 포함
+    assert "MU" in row  # 기존 + 대문자 정규화(중복 제거)
+
+
 def test_open_book_mtm_unrealized_excess_vs_spy():
     # port +10% (MU 100→110, AAL 50→55), bench +5% (SPY 700→735) → 미실현 초과 +5%
     e = _entry()
