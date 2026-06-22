@@ -3,8 +3,8 @@
 #
 # ⚠️ 핀 스냅샷 한계: 스냅샷이 갱신되지 않으면 record 는 동일 rebal_date 라 cadence-gate 가
 #    skip 하고, score 도 forward 마크가 없어 0 이다. 새 진입/실현 성과가 쌓이려면 먼저
-#    `scripts/snapshot_prices.py` / `scripts/snapshot_fundamentals.py` 로 데이터를 갱신해야 한다.
-#    (아래 REFRESH=1 로 켤 수 있게 자리만 둔다 — 데이터 소스/키 구성된 환경에서만.)
+#    스냅샷 재생성(gp2/gp/prices-ideal 정확한 파일명·유니버스 필요)은 환경/키 의존이라
+#    이 래퍼에서 자동화하지 않는다 — 데이터 갱신은 별도 수동 단계로 둔다.
 #
 # 등록 예 (평일 13:15):
 #   15 13 * * 1-5  cd "/Users/jjuni/재무관리 모델/trader-fund" && bash scripts/fund_oos_cadence.sh >> out/fund-oos-cadence.log 2>&1
@@ -32,21 +32,25 @@ if [ -z "$SNAPSHOT" ] || [ -z "$PRICES" ]; then
   exit 1
 fi
 
-# (선택) 데이터 갱신: 소스/키 구성된 환경에서만. 기본 OFF.
-if [ "${REFRESH:-0}" = "1" ]; then
-  "$PY" scripts/snapshot_prices.py || echo "[fund-oos-cadence] snapshot_prices 실패(무시)" >&2
-  "$PY" scripts/snapshot_fundamentals.py || echo "[fund-oos-cadence] snapshot_fundamentals 실패(무시)" >&2
-fi
-
 echo "[fund-oos-cadence] $(date '+%F %T') marks 재생성"
 "$PY" scripts/fund_marks.py --since 2026-01-01 --out out/fund-marks.csv
 
 echo "[fund-oos-cadence] record-if-due (cadence 21 business days)"
-"$PY" scripts/fund_book_oos.py \
-  --marks out/fund-marks.csv \
-  --snapshot "$SNAPSHOT" --prices "$PRICES" \
-  --price-history "$PHIST" --momentum-snapshot "$MOMSNAP" \
-  --benchmark SPY --max-staleness-days 7 --cadence-days 21
+# 모멘텀 입력(prices-ideal 시계열 + megacap fundamentals)이 둘 다 있을 때만 모멘텀 옵션을
+# 넘긴다 — 빈 문자열을 넘기면 argparse 가 Path('.') 로 바꿔 로딩에서 크래시(Codex P2).
+if [ -n "$PHIST" ] && [ -n "$MOMSNAP" ]; then
+  "$PY" scripts/fund_book_oos.py \
+    --marks out/fund-marks.csv \
+    --snapshot "$SNAPSHOT" --prices "$PRICES" \
+    --price-history "$PHIST" --momentum-snapshot "$MOMSNAP" \
+    --benchmark SPY --max-staleness-days 7 --cadence-days 21
+else
+  echo "[fund-oos-cadence] 모멘텀 입력 없음 — core+hunt 만 기록" >&2
+  "$PY" scripts/fund_book_oos.py \
+    --marks out/fund-marks.csv \
+    --snapshot "$SNAPSHOT" --prices "$PRICES" \
+    --benchmark SPY --max-staleness-days 7 --cadence-days 21
+fi
 
 echo "[fund-oos-cadence] score (realised vs SPY, per-sleeve)"
 "$PY" scripts/fund_book_oos.py --score --by-sleeve \
