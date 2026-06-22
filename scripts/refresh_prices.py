@@ -60,30 +60,45 @@ def _download_closes(symbols: list[str], start: str, end: str):
 
 
 def refresh(start: str, *, today: date) -> list[str]:
-    """오늘 날짜의 두 가격 패밀리를 yfinance 로 생성. 작성한 파일 경로 목록 반환."""
+    """오늘 날짜의 두 가격 패밀리를 yfinance 로 생성. 작성한 파일 경로 목록 반환.
+
+    원자성: 두 패밀리를 **먼저 모두 다운로드·검증**(coverage 비어있지 않음 + 종료일 일치)한 뒤에만
+    파일을 게시한다 — 한쪽만 게시돼 대시보드가 fresh/stale 을 섞어 조립하는 일을 막는다(Codex P2)."""
     end = (today + timedelta(days=1)).isoformat()  # yfinance end exclusive → 오늘 포함
-    written: list[str] = []
 
     broad = _load_csv_symbols(*BROAD_UNIVERSES)
-    print(f"[refresh] prices (sp400-600 + megacap-gp): {len(broad)} symbols {start}..{today}")
-    m1 = write_price_snapshot(_download_closes(broad, start, end), SNAP_DIR, name=f"prices-{today}")
-    written.append(str(SNAP_DIR / f"prices-{today}.csv"))
+    print(
+        f"[refresh] downloading prices (sp400-600 + megacap-gp): {len(broad)} symbols {start}..{today}"
+    )
+    broad_closes = _download_closes(broad, start, end)
+    ideal = sorted(set(MEGACAPS) | {"SPY"})
+    print(
+        f"[refresh] downloading prices-ideal (MEGACAPS + SPY): {len(ideal)} symbols {start}..{today}"
+    )
+    ideal_closes = _download_closes(ideal, start, end)
+
+    # 게시 전 검증: 둘 다 데이터가 있고 종료일이 일치해야 한다(단일-cutoff 정합).
+    if broad_closes.dropna(how="all").empty or ideal_closes.dropna(how="all").empty:
+        raise SystemExit("다운로드 결과가 비어 있음(네트워크/심볼) — 아무 것도 게시하지 않음")
+    bd = broad_closes.index.max().date()
+    idd = ideal_closes.index.max().date()
+    if bd != idd:
+        raise SystemExit(
+            f"두 패밀리 종료일 불일치(broad={bd}, ideal={idd}) — 섞인 조립 방지 위해 게시 안 함"
+        )
+
+    # 둘 다 성공 → 이제 게시(쓰기).
+    m1 = write_price_snapshot(broad_closes, SNAP_DIR, name=f"prices-{today}")
+    m2 = write_price_snapshot(ideal_closes, SNAP_DIR, name=f"prices-ideal-{today}")
     print(
         f"  -> prices-{today}.csv  rows={m1.row_count} symbols={m1.symbol_count} "
         f"dates {m1.date_start}..{m1.date_end}"
     )
-
-    ideal = sorted(set(MEGACAPS) | {"SPY"})
-    print(f"[refresh] prices-ideal (MEGACAPS + SPY): {len(ideal)} symbols {start}..{today}")
-    m2 = write_price_snapshot(
-        _download_closes(ideal, start, end), SNAP_DIR, name=f"prices-ideal-{today}"
-    )
-    written.append(str(SNAP_DIR / f"prices-ideal-{today}.csv"))
     print(
         f"  -> prices-ideal-{today}.csv  rows={m2.row_count} symbols={m2.symbol_count} "
         f"dates {m2.date_start}..{m2.date_end}"
     )
-    return written
+    return [str(SNAP_DIR / f"prices-{today}.csv"), str(SNAP_DIR / f"prices-ideal-{today}.csv")]
 
 
 def main(argv: list[str] | None = None) -> int:
