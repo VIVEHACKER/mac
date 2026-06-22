@@ -166,6 +166,18 @@ uv run streamlit run dashboard/app.py --server.port 8501
 
 대시보드 `💹 펀드 포트폴리오` 탭은 `build_fund_book`(검증 조립기, `scripts/fund_book.py`)으로 50/50 바벨을 조립해 슬리브 비중(core/hunt/momentum/reserve) · 종목별 펀드비중+출처슬리브 · 섹터 익스포저 · 포워드 OOS 성과(원장 `out/fund-book-oos.jsonl`)를 한 화면에 보여준다. 스냅샷 CSV는 trader-fund에서 gitignore되므로 `../trader/data/snapshots`로 폴백 로드하고 모멘텀 슬리브는 기본 ON(재현 가능). 정직성: momentum만 검증 엣지(+8.15%/yr walk-forward, US 한정), core/hunt는 알파 주장 없음.
 
+### 펀드북 forward-OOS cadence
+
+```bash
+# LONG 스냅샷 → WIDE marks 생성, 펀드북 조립·기록·채점을 한 번에 (cron 용)
+bash scripts/fund_oos_cadence.sh
+
+# 평일 13:30 cron 등록 (직접 실행 — crontab 수정은 사용자 권한 필요)
+( crontab -l; echo '30 13 * * 1-5 cd "/Users/jjuni/재무관리 모델/trader-fund" && bash scripts/fund_oos_cadence.sh >> out/fund-oos-cadence.log 2>&1' ) | crontab -
+```
+
+`scripts/fund_marks.py`가 LONG 스냅샷(prices-ideal=megacap+SPY, prices-2*=sp400-600)을 WIDE marks(date+종목)로 합쳐 `scripts/fund_book_oos.py`가 요구하는 포맷을 만든다. cadence 드릴은 marks 재생성 → `--cadence-days 21`로 21영업일 미만이면 기록 skip → 실현 vs SPY 채점(슬리브별 귀속). **핀 스냅샷 한계**: 스냅샷이 갱신되지 않으면 rebal_date가 고정이라 record는 cadence-skip, score는 forward 마크가 없어 0이다 — 새 진입/실현 성과는 `snapshot_prices.py`/`snapshot_fundamentals.py`로 데이터를 갱신해야 쌓인다(IDEAL 원장은 fresh 데이터로 전진, 바벨은 핀 스냅샷이라 갱신 의존).
+
 `trader backtest`와 `trader portfolio`는 `--benchmark SPY --benchmark-market us`처럼 외부 벤치마크를 지정하면
 전략 수익률, 벤치마크 수익률, 초과수익률을 같은 기간으로 비교한다.
 `trader portfolio` 리포트는 벤치마크 Sharpe/MDD와 연도별 초과수익률을 함께 보여준다.
