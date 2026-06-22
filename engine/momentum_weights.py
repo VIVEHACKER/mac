@@ -56,6 +56,8 @@ def weights_from_picks(picks, prices, rebal, cap=0.20):
     n = len(picks)
     if n == 0:
         return {}
+    if cap <= 0:
+        raise ValueError(f"cap must be positive, got {cap}")
     total_cap = n * cap
     if total_cap < 1.0 - 1e-6:
         raise ValueError(

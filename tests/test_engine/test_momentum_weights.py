@@ -54,6 +54,13 @@ def test_infeasible_cap_raises():
         )
 
 
+def test_zero_cap_raises_valueerror_not_zerodiv():
+    # cap=0 은 actionable ValueError 여야 한다(메시지의 1/cap 이 ZeroDivisionError 내지 않게, Codex P3)
+    picks = [_Pick(s) for s in ["A", "B", "C"]]
+    with pytest.raises(ValueError, match="positive"):
+        weights_from_picks(picks, _frame(["A", "B", "C"], 300), pd.Timestamp("2024-06-01"), cap=0.0)
+
+
 def test_inverse_vol_path_respects_cap_and_sums_to_one():
     # slack cap (2 names x 0.60 = 1.2 > 1.0) -> inverse-vol weighting, each <= cap, sum ~1.0
     picks = [_Pick("A"), _Pick("B")]
