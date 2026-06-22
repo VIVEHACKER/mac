@@ -33,8 +33,15 @@ if [ -z "$SNAPSHOT" ] || [ -z "$PRICES" ]; then
   exit 1
 fi
 
-echo "[fund-oos-cadence] $(date '+%F %T') marks 재생성"
-"$PY" scripts/fund_marks.py --since 2026-01-01 --out out/fund-marks.csv
+echo "[fund-oos-cadence] $(date '+%F %T') 마크 갱신"
+# 원장이 있으면 라이브 마크(yfinance, forward 누적 + 열린북 미실현 MTM). 비어있으면(부트스트랩)
+# 스냅샷 마크로 T0 를 만들 수 있게 한다 — T0 기록 후엔 라이브가 entry 와 소스 일관.
+if [ -s out/fund-book-oos.jsonl ]; then
+  "$PY" scripts/fund_marks_live.py --out out/fund-marks.csv
+else
+  echo "[fund-oos-cadence] 원장 비어있음 — 스냅샷 마크로 부트스트랩" >&2
+  "$PY" scripts/fund_marks.py --since 2026-01-01 --out out/fund-marks.csv
+fi
 
 echo "[fund-oos-cadence] record-if-due (cadence 21 business days)"
 # 모멘텀 입력(prices-ideal 시계열 + megacap fundamentals)이 둘 다 있을 때만 모멘텀 옵션을

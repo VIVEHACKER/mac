@@ -176,7 +176,9 @@ bash scripts/fund_oos_cadence.sh
 ( crontab -l; echo '30 13 * * 1-5 cd "/Users/jjuni/재무관리 모델/trader-fund" && bash scripts/fund_oos_cadence.sh >> out/fund-oos-cadence.log 2>&1' ) | crontab -
 ```
 
-`scripts/fund_marks.py`가 LONG 스냅샷(prices-ideal=megacap+SPY, prices-2*=sp400-600)을 WIDE marks(date+종목)로 합쳐 `scripts/fund_book_oos.py`가 요구하는 포맷을 만든다. cadence 드릴은 marks 재생성 → `--cadence-days 21`로 21영업일 미만이면 기록 skip → 실현 vs SPY 채점(슬리브별 귀속). **핀 스냅샷 한계**: 스냅샷이 갱신되지 않으면 rebal_date가 고정이라 record는 cadence-skip, score는 forward 마크가 없어 0이다 — 새 진입/실현 성과는 `snapshot_prices.py`/`snapshot_fundamentals.py`로 데이터를 갱신해야 쌓인다(IDEAL 원장은 fresh 데이터로 전진, 바벨은 핀 스냅샷이라 갱신 의존).
+마크 소스는 두 가지다. **라이브(권장, 원장 있을 때)** `scripts/fund_marks_live.py`는 원장 보유종목+SPY의 yfinance 종가(T0~today)를 WIDE marks로 받아 forward로 누적하고, **열린 북의 T0 이후 미실현 초과(MTM)**를 출력한다(엔트리 1개로도 산출). **스냅샷(부트스트랩)** `scripts/fund_marks.py`는 LONG 핀 스냅샷(prices-ideal=megacap+SPY, prices-2*=sp400-600)을 WIDE로 합쳐 T0를 만들 때 쓴다. cadence 드릴(`fund_oos_cadence.sh`)은 마크 갱신 → `--cadence-days 21` 게이트로 record-if-due → 실현 vs SPY 채점(슬리브별 귀속).
+
+대시보드 `💹 펀드 포트폴리오` 탭의 OOS 패널은 라이브 마크 기준 **미실현 초과**(펀드/벤치/마크수/asof)를 보여주고, **실현(closed-period) 성과**는 score_ledger가 연속 엔트리 쌍을 채점하므로 **2번째 리밸 기록 후** 산출된다. **핀 스냅샷 한계**: 스냅샷이 갱신되지 않으면 rebal_date가 고정이라 2번째 엔트리가 생기지 않아 record는 cadence-skip·실현 score는 0이다(미실현 MTM은 라이브 마크로 계속 갱신). 새 진입/실현 성과는 `snapshot_prices.py`/`snapshot_fundamentals.py`로 데이터를 갱신해야 쌓인다(IDEAL 원장은 fresh 데이터로 전진, 바벨은 핀 스냅샷이라 갱신 의존).
 
 `trader backtest`와 `trader portfolio`는 `--benchmark SPY --benchmark-market us`처럼 외부 벤치마크를 지정하면
 전략 수익률, 벤치마크 수익률, 초과수익률을 같은 기간으로 비교한다.

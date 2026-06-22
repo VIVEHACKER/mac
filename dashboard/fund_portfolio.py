@@ -45,9 +45,15 @@ def _resolve_db(root: Path) -> Path:
 @st.cache_data(show_spinner=False)
 def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
     """조립된 FundBook 을 plain dict 로 (st.cache_data 피클 안전). 스냅샷 없으면 available=False."""
-    from engine.fund_book_oos import load_ledger
+    from engine.fund_book_oos import (
+        load_ledger,
+        load_mark_price_history_csv,
+        mark_prices_at_dates,
+        score_ledger,
+    )
     from engine.fund_exposure import compute_exposure
     from scripts.fund_book import build_fund_book  # 무거운 import(yfinance) 지연
+    from scripts.fund_marks_live import open_book_mtm
 
     snapshot = resolve_snapshot(_FUND_SNAPSHOT, root)
     prices = resolve_snapshot(_FUND_PRICES, root)
@@ -96,6 +102,42 @@ def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
 
     ledger_path = root / "out" / _OOS_LEDGER
     entries = load_ledger(ledger_path) if ledger_path.exists() else []
+    oos: dict = {
+        "n_entries": len(entries),
+        "latest_rebal": entries[-1].rebal_date if entries else None,
+        "marks_available": False,
+        "unrealized": None,  # 열린 북 T0 이후 미실현 MTM
+        "realized": None,  # closed-period 실현(엔트리 2개+ 필요)
+    }
+    marks_path = root / "out" / "fund-marks.csv"
+    if entries and marks_path.exists():
+        history = load_mark_price_history_csv(marks_path)
+        if history:
+            oos["marks_available"] = True
+            asof = max(history)
+            marks_now = mark_prices_at_dates(history, [asof], max_staleness_days=7).get(asof, {})
+            mtm = open_book_mtm(entries[-1], marks_now)
+            if mtm:
+                oos["unrealized"] = {
+                    "unrealized_excess": round(mtm["unrealized_excess"], 4),
+                    "port_return": round(mtm["port_return"], 4),
+                    "benchmark_return": round(mtm["benchmark_return"], 4),
+                    "marked": mtm["marked"],
+                    "n_holdings": len(entries[-1].weights),
+                    "asof": asof,
+                }
+            scored = score_ledger(
+                entries,
+                mark_prices_at_dates(
+                    history, [e.rebal_date for e in entries], max_staleness_days=7
+                ),
+            )
+            oos["realized"] = {
+                "n_periods": scored.n_periods,
+                "cumulative_excess": round(scored.cumulative_excess, 4),
+                "hit_rate": round(scored.hit_rate, 4),
+                "excess_sharpe": round(scored.excess_sharpe, 4),
+            }
 
     return {
         "meta": {
@@ -113,10 +155,7 @@ def fund_book_payload(root: Path, *, momentum_on: bool = True) -> dict:
         "positions": positions,
         "sectors": sector_rows,
         "sleeve_attr": sleeve_attr,
-        "oos": {
-            "n_entries": len(entries),
-            "latest_rebal": entries[-1].rebal_date if entries else None,
-        },
+        "oos": oos,
     }
 
 
@@ -183,8 +222,32 @@ def render_fund_portfolio(root: Path) -> None:
             "포워드 OOS 원장 미가동(표본 0). PIT 기록을 시작하려면 "
             "`scripts/fund_book_oos.py` 로 리밸 시점 펀드 북을 등록하세요."
         )
-    else:
+    elif not oos["marks_available"]:
         st.caption(
-            f"원장 {oos['n_entries']}건 · 최근 리밸 {oos['latest_rebal']} "
-            "(누적/연환산 초과·적중률·excess Sharpe 채점은 mark price history 필요 — 후속)"
+            f"원장 {oos['n_entries']}건 · 최근 리밸 {oos['latest_rebal']} — 라이브 마크 없음. "
+            "`scripts/fund_marks_live.py` 실행(또는 cadence cron) 후 성과 표시."
         )
+    else:
+        u = oos["unrealized"]
+        if u:
+            cc = st.columns(3)
+            cc[0].metric(
+                f"미실현 초과 (T0 {oos['latest_rebal']} 이후)",
+                f"{u['unrealized_excess'] * 100:+.2f}%",
+            )
+            cc[1].metric(
+                "펀드 / 벤치",
+                f"{u['port_return'] * 100:+.2f}% / {u['benchmark_return'] * 100:+.2f}%",
+            )
+            cc[2].metric("마크", f"{u['marked']}/{u['n_holdings']} · asof {u['asof']}")
+        r = oos["realized"]
+        if r and r["n_periods"] > 0:
+            st.caption(
+                f"실현(closed-period) n={r['n_periods']} · 누적초과 {r['cumulative_excess'] * 100:+.2f}% "
+                f"· 적중률 {r['hit_rate'] * 100:.0f}% · excess Sharpe {r['excess_sharpe']:.2f}"
+            )
+        else:
+            st.caption(
+                "위는 열린 단일 엔트리의 **미실현** MTM. 실현(closed-period) 성과는 2번째 리밸 "
+                "기록 후 산출(스냅샷 갱신 필요)."
+            )
