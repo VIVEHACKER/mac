@@ -19,8 +19,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
-from engine.ic import spearman
+from engine.ic import ICStats, ic_stats, spearman
 from strategies._base import StrategySignal
 
 DEFAULT_WEIGHTS: dict[str, float] = {"tp": 0.35, "eps": 0.40, "breadth": 0.25}
@@ -138,3 +139,41 @@ def forward_ic(scores: Mapping[str, float], forward_returns: Mapping[str, float]
     xs = [scores[s] for s in syms]
     ys = [forward_returns[s] for s in syms]
     return spearman(xs, ys)
+
+
+# Validation variants (the H1–H3 hypotheses from the learning note). Each maps a name -> kwargs for
+# revision_signals; running the forward-IC of each on the SAME data tests whether the edge is real and
+# which formulation is strongest. Data-source-agnostic — feed EstimateRevision from any source.
+DEFAULT_VARIANTS: dict[str, dict[str, Any]] = {
+    "full": {},  # H1: the blended revision score predicts forward returns
+    "eps_only": {"weights": {"eps": 1.0}},  # H3: EPS revision is the cleanest component
+    "tp_only": {"weights": {"tp": 1.0}},  # H3: target price is weaker (optimism bias)
+    "no_downgrade": {"max_downgrades": 0},  # H2: the downgrade filter is more robust
+}
+
+
+def revision_ic_report(
+    snapshots: Mapping[date, Sequence[EstimateRevision]],
+    forward_returns: Mapping[date, Mapping[str, float]],
+    *,
+    variants: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, ICStats]:
+    """Forward-IC validation harness (validate-before-trust). For each variant (signal config), compute
+    the per-date cross-sectional rank-IC of the signal vs the N-day forward returns and aggregate across
+    dates via engine.ic.ic_stats. Returns {variant -> ICStats}. The live data feed (FMP / 와이즈리포트
+    consensus -> EstimateRevision, and forward returns from prices) is the deferred seam — this harness is
+    source-agnostic so any feed (or a backfill export) drives it. A variant whose mean IC is ~0 / negative
+    is NOT trusted regardless of the source anecdote."""
+    vmap = variants if variants is not None else DEFAULT_VARIANTS
+    dates = sorted(set(snapshots) & set(forward_returns))
+    report: dict[str, ICStats] = {}
+    for name, kwargs in vmap.items():
+        ics: list[float] = []
+        for d in dates:
+            sigs = revision_signals(snapshots[d], **kwargs)
+            scores = {s.symbol: s.score for s in sigs}
+            ic = forward_ic(scores, forward_returns[d])
+            if ic is not None:
+                ics.append(ic)
+        report[name] = ic_stats(ics)
+    return report

@@ -4,7 +4,13 @@ from datetime import date
 
 import pytest
 
-from signals.revisions import EstimateRevision, forward_ic, revision_signals
+from engine.ic import ICStats
+from signals.revisions import (
+    EstimateRevision,
+    forward_ic,
+    revision_ic_report,
+    revision_signals,
+)
 from strategies._base import StrategySignal
 
 AS_OF = date(2026, 6, 22)
@@ -182,3 +188,37 @@ def test_forward_ic_inverted_is_negative():
 def test_forward_ic_too_few_overlap_is_none():
     assert forward_ic({"A": 0.1, "B": 0.2}, {"A": 0.01, "B": 0.02}) is None  # n<3
     assert forward_ic({"A": 0.1}, {"Z": 0.01}) is None  # no overlap
+
+
+# --------------------------------------------------------------------------- #
+# revision_ic_report (H1-H3 validation harness)
+# --------------------------------------------------------------------------- #
+
+
+def _snap() -> list[EstimateRevision]:
+    # revisions increasing A<B<C<D (eps + breadth); designed to rank-align with forward returns
+    return [
+        _rev("A", eps=1.0, eps_prev=1.0, n_up=0, n_total=5),
+        _rev("B", eps=1.1, eps_prev=1.0, n_up=1, n_total=5),
+        _rev("C", eps=1.2, eps_prev=1.0, n_up=2, n_total=5),
+        _rev("D", eps=1.3, eps_prev=1.0, n_up=3, n_total=5),
+    ]
+
+
+def test_revision_ic_report_positive_when_revisions_predict():
+    d1, d2 = date(2026, 1, 31), date(2026, 2, 28)
+    snaps = {d1: _snap(), d2: _snap()}
+    fwd = {d: {"A": 0.00, "B": 0.02, "C": 0.03, "D": 0.04} for d in (d1, d2)}  # rank-aligned
+    rep = revision_ic_report(snaps, fwd)
+    assert set(rep) == {"full", "eps_only", "tp_only", "no_downgrade"}
+    assert isinstance(rep["full"], ICStats)
+    assert rep["full"].n == 2
+    assert rep["full"].mean is not None and rep["full"].mean > 0.9  # near +1
+    assert rep["eps_only"].mean is not None and rep["eps_only"].mean > 0.9
+    # tp flat in this synthetic -> constant scores -> no IC computable
+    assert rep["tp_only"].n == 0
+
+
+def test_revision_ic_report_empty_when_no_overlapping_dates():
+    rep = revision_ic_report({date(2026, 1, 31): _snap()}, {date(2026, 2, 28): {}})
+    assert rep["full"].n == 0
