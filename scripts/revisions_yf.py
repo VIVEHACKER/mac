@@ -152,7 +152,10 @@ def append_revisions_csv(path: Path, revs: list[EstimateRevision]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Free yfinance estimate-revision signal (no API key)")
-    p.add_argument("symbols", nargs="+", help="tickers, e.g. CL HD INTC LRCX MU QCOM TGT")
+    p.add_argument("symbols", nargs="*", help="tickers, e.g. CL HD INTC LRCX MU QCOM TGT")
+    p.add_argument(
+        "--megacaps", action="store_true", help="use the validated MEGACAPS universe (for cron)"
+    )
     p.add_argument("--period", default="0y", choices=["0q", "+1q", "0y", "+1y"])
     p.add_argument("--window", default="30d", choices=["30d", "7d"])
     p.add_argument("--min-coverage", type=int, default=3)
@@ -167,8 +170,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
 
+    symbols = list(args.symbols)
+    if args.megacaps:
+        from scripts.aqr_ideal_walkforward import MEGACAPS  # lazy: pulls heavy deps only when used
+
+        symbols = list(MEGACAPS)
+    if not symbols:
+        p.error("pass tickers or --megacaps")
+
     as_of = datetime.now().date()  # noqa: DTZ005 — local date is fine for a snapshot label
-    revs = fetch_yf_revisions(args.symbols, as_of=as_of, period=args.period, window=args.window)
+    revs = fetch_yf_revisions(symbols, as_of=as_of, period=args.period, window=args.window)
     if args.record is not None:
         try:
             n = append_revisions_csv(args.record, revs)
