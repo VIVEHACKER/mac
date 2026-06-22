@@ -18,9 +18,10 @@ PY="${PYTHON:-$ROOT/.venv/bin/python}"
 LOCAL="$ROOT/data/snapshots"
 SIB="$ROOT/../trader/data/snapshots"
 # 최신 날짜(ISO 사전순) 파일을 로컬→sibling 순으로 고른다.
-pick()  { local f; f="$(ls -1 "$LOCAL"/$1 2>/dev/null | sort | tail -1)"; [ -n "$f" ] || f="$(ls -1 "$SIB"/$1 2>/dev/null | sort | tail -1)"; echo "$f"; }
+# `|| true`: 무매치 시 ls/grep 가 non-zero 라도(set -e+pipefail) 폴백 전에 종료되지 않게.
+pick()  { local f; f="$(ls -1 "$LOCAL"/$1 2>/dev/null | sort | tail -1 || true)"; [ -n "$f" ] || f="$(ls -1 "$SIB"/$1 2>/dev/null | sort | tail -1 || true)"; echo "$f"; }
 # gp(megacap) 는 gp2(횡단) 와 접미사가 겹치므로 -gp2.csv 제외.
-pickm() { local f; f="$(ls -1 "$LOCAL"/$1 2>/dev/null | grep -v -- '-gp2.csv' | sort | tail -1)"; [ -n "$f" ] || f="$(ls -1 "$SIB"/$1 2>/dev/null | grep -v -- '-gp2.csv' | sort | tail -1)"; echo "$f"; }
+pickm() { local f; f="$(ls -1 "$LOCAL"/$1 2>/dev/null | grep -v -- '-gp2.csv' | sort | tail -1 || true)"; [ -n "$f" ] || f="$(ls -1 "$SIB"/$1 2>/dev/null | grep -v -- '-gp2.csv' | sort | tail -1 || true)"; echo "$f"; }
 
 SNAPSHOT="$(pick 'fundamentals-*-gp2.csv')"
 PRICES="$(pick 'prices-2*.csv')"
