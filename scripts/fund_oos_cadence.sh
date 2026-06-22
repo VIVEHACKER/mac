@@ -13,20 +13,22 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PY="${PYTHON:-$ROOT/.venv/bin/python}"
 
-# 스냅샷 디렉토리: 로컬(gitignore) → sibling ../trader 폴백
-SNAP="$ROOT/data/snapshots"
-if [ -z "$(ls "$SNAP"/prices-ideal-*.csv 2>/dev/null)" ]; then
-  SNAP="$ROOT/../trader/data/snapshots"
-fi
+# 스냅샷 디렉토리: 로컬(gitignore) + sibling ../trader. 각 파일을 독립적으로 해석한다 —
+# 부분 스냅샷(로컬에 일부 패밀리만)이어도 누락분은 sibling 폴백에서 채운다.
+LOCAL="$ROOT/data/snapshots"
+SIB="$ROOT/../trader/data/snapshots"
+# 최신 날짜(ISO 사전순) 파일을 로컬→sibling 순으로 고른다.
+pick()  { local f; f="$(ls -1 "$LOCAL"/$1 2>/dev/null | sort | tail -1)"; [ -n "$f" ] || f="$(ls -1 "$SIB"/$1 2>/dev/null | sort | tail -1)"; echo "$f"; }
+# gp(megacap) 는 gp2(횡단) 와 접미사가 겹치므로 -gp2.csv 제외.
+pickm() { local f; f="$(ls -1 "$LOCAL"/$1 2>/dev/null | grep -v -- '-gp2.csv' | sort | tail -1)"; [ -n "$f" ] || f="$(ls -1 "$SIB"/$1 2>/dev/null | grep -v -- '-gp2.csv' | sort | tail -1)"; echo "$f"; }
 
-# 최신 날짜의 핀 스냅샷 선택 (ISO 날짜명 = 사전순 최신)
-SNAPSHOT="$(ls -1 "$SNAP"/fundamentals-*-gp2.csv 2>/dev/null | sort | tail -1)"
-PRICES="$(ls -1 "$SNAP"/prices-2*.csv 2>/dev/null | sort | tail -1)"
-PHIST="$(ls -1 "$SNAP"/prices-ideal-*.csv 2>/dev/null | sort | tail -1)"
-MOMSNAP="$(ls -1 "$SNAP"/fundamentals-*-gp.csv 2>/dev/null | grep -v -- '-gp2.csv' | sort | tail -1)"
+SNAPSHOT="$(pick 'fundamentals-*-gp2.csv')"
+PRICES="$(pick 'prices-2*.csv')"
+PHIST="$(pick 'prices-ideal-*.csv')"
+MOMSNAP="$(pickm 'fundamentals-*-gp.csv')"
 
 if [ -z "$SNAPSHOT" ] || [ -z "$PRICES" ]; then
-  echo "[fund-oos-cadence] 스냅샷을 못 찾음 ($SNAP) — snapshot_*.py 로 생성 후 재시도" >&2
+  echo "[fund-oos-cadence] 스냅샷을 못 찾음 ($LOCAL, $SIB) — snapshot_*.py 로 생성 후 재시도" >&2
   exit 1
 fi
 

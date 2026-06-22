@@ -27,14 +27,16 @@ _LONG_PATTERNS = ["prices-ideal-*.csv", "prices-2*.csv"]
 
 
 def _resolve_default_prices() -> list[Path]:
+    # 각 가격 패밀리를 독립적으로 로컬→sibling 순 해석 — 로컬에 한 패밀리만 있어도
+    # 누락 패밀리(예: SPY/megacap)는 ../trader 폴백에서 채운다(부분 스냅샷 대응).
+    bases = (ROOT / "data" / "snapshots", ROOT.parent / "trader" / "data" / "snapshots")
     out: list[Path] = []
-    for base in (ROOT / "data" / "snapshots", ROOT.parent / "trader" / "data" / "snapshots"):
-        for pat in _LONG_PATTERNS:
+    for pat in _LONG_PATTERNS:
+        for base in bases:
             hits = sorted(base.glob(pat))
             if hits:
                 out.append(hits[-1])  # 최신 날짜
-        if out:
-            return out
+                break  # 이 패밀리 해결 → 다음 패턴
     return out
 
 
