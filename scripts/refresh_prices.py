@@ -80,8 +80,10 @@ def refresh(start: str, *, today: date) -> list[str]:
     # 게시 전 검증: 둘 다 데이터가 있고 종료일이 일치해야 한다(단일-cutoff 정합).
     if broad_closes.dropna(how="all").empty or ideal_closes.dropna(how="all").empty:
         raise SystemExit("다운로드 결과가 비어 있음(네트워크/심볼) — 아무 것도 게시하지 않음")
-    bd = broad_closes.index.max().date()
-    idd = ideal_closes.index.max().date()
+    # write_price_snapshot 가 all-NaN 셀을 버리므로, 게시 종료일과 일치하도록 realized(데이터 있는)
+    # 마지막 날짜로 비교한다 — raw index max 는 당일 all-NaN 행이 있으면 어긋남(Codex P2).
+    bd = broad_closes.dropna(how="all").index.max().date()
+    idd = ideal_closes.dropna(how="all").index.max().date()
     if bd != idd:
         raise SystemExit(
             f"두 패밀리 종료일 불일치(broad={bd}, ideal={idd}) — 섞인 조립 방지 위해 게시 안 함"
