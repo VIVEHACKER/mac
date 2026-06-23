@@ -31,14 +31,28 @@ def main() -> None:
         )
 
     with screen:
-        symbols = st.text_input("Universe", "MSFT,AAPL,NVDA,AMZN,META,GOOGL,AVGO")
+        symbols = st.text_input(
+            "Universe (쉼표 구분 · US는 빈칸이면 검증 유니버스 106개)",
+            "",
+            help="비워두면 검증된 MEGACAPS 유니버스 전체를 랭킹. 특정 종목만 보려면 쉼표로 입력.",
+        )
         market = st.selectbox("Market", ["us", "kospi", "kosdaq", "crypto"])
         lookback = st.number_input("Lookback", min_value=5, max_value=504, value=126)
         if st.button("Run Screen", type="primary"):
             requested = [item.strip().upper() for item in symbols.split(",") if item.strip()]
-            bars = {symbol: catalog.get_bars(symbol, market=market) for symbol in requested}
-            rows = screen_momentum(bars, lookback=int(lookback))
-            st.dataframe(pd.DataFrame([row.__dict__ for row in rows]), use_container_width=True)
+            if not requested and market == "us":
+                try:
+                    from scripts.aqr_ideal_walkforward import MEGACAPS
+
+                    requested = list(MEGACAPS)
+                except Exception:
+                    requested = ["MSFT", "AAPL", "NVDA", "AMZN", "META", "GOOGL", "AVGO"]
+            if not requested:
+                st.info(f"'{market}' 시장은 종목을 쉼표로 입력하세요.")
+            else:
+                bars = {symbol: catalog.get_bars(symbol, market=market) for symbol in requested}
+                rows = screen_momentum(bars, lookback=int(lookback))
+                st.dataframe(pd.DataFrame([row.__dict__ for row in rows]), use_container_width=True)
 
     with valuation:
         valuations = catalog.get_valuations(limit=100)
