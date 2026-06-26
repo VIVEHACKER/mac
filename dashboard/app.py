@@ -499,7 +499,7 @@ def _render_recommender(catalog) -> None:
         funds = _load_fundamentals(catalog, list(bars), market)
         try:
             ev = evaluate_ticker(
-                ticker.strip().upper(),
+                ticker=ticker.strip().upper(),
                 bars_by_symbol=bars,
                 fundamentals_by_symbol=funds,
                 strategy=strategy,
@@ -510,7 +510,10 @@ def _render_recommender(catalog) -> None:
             return
     st.markdown(f"## {ev.ticker} {_badge(ev.action)}", unsafe_allow_html=True)
     m = st.columns(4)
-    m[0].metric("신뢰도", f"{ev.confidence}%")
+    # ev.confidence 는 ConfidenceBreakdown(score/band) 객체 — 객체 repr 출력 방지.
+    _conf = ev.confidence
+    _conf_str = f"{_conf.score:.0f}% · {_conf.band}" if hasattr(_conf, "score") else f"{_conf}%"
+    m[0].metric("신뢰도", _conf_str)
     m[1].metric("랭크", f"{ev.rank}/{ev.universe_size}" if ev.rank else "—")
     m[2].metric("적정가", f"{ev.fair_value:,.2f}" if ev.fair_value else "—")
     cur = ev.current_price or 0
@@ -582,19 +585,56 @@ def _render_validation() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 탭 5 — 예측 (금리/CPI)
 # ─────────────────────────────────────────────────────────────────────────────
+def _latest_rate_forecast(region: str) -> dict | None:
+    """포워드-OOS 원장에 사전 기록된 최신 금리 예측을 읽어 표시용 dict 로 변환.
+
+    라이브 재계산(collect_signals)은 FRED/ECOS 키·네트워크가 필요하므로, 대시보드는
+    cron(`rate-record`)이 회의 전에 기록해 둔 원장 값을 보여준다(오프라인·재현 가능).
+    """
+    led = ROOT / "trading-copilot" / "out" / "rate_ledger.jsonl"
+    if not led.exists():
+        led = OUT_DIR / "rate_ledger.jsonl"
+    if not led.exists():
+        return None
+    try:
+        rows = [json.loads(x) for x in led.read_text().splitlines() if x.strip()]
+    except Exception:
+        return None
+    # '다음 회의'로 보일 자격이 없는 행을 제외한다:
+    #   (1) 이미 채점된 (region, meeting) — rate_forecast 행은 채점 후에도 남음(_scored_keys 미러링)
+    #   (2) 회의일이 오늘 이전 — 채점 지연 중인 과거 회의(ISO 날짜는 사전식=시간순 비교)
+    today_iso = datetime.now(tz=UTC).date().isoformat()
+    scored = {(r.get("region"), r.get("meeting")) for r in rows if r.get("kind") == "rate_score"}
+    for row in reversed(rows):  # 최신 기록 우선
+        if row.get("kind") != "rate_forecast" or row.get("region") != region:
+            continue
+        meeting = row.get("meeting", "")
+        if (region, meeting) in scored or meeting < today_iso:
+            continue
+        p = row.get("probs", {}) or {}
+        return {
+            "date": row.get("meeting", "—"),
+            "modal_decision": row.get("modal", "—"),
+            "cut_prob": p.get("cut", 0),
+            "hold_prob": p.get("hold", 0),
+            "hike_prob": p.get("hike", 0),
+            "recorded_at": row.get("recorded_at", "—"),
+            "status": row.get("status", "—"),
+        }
+    return None
+
+
 def _render_forecast() -> None:
     st.subheader("예측 — 기준금리 결정 / 물가")
     region = st.radio("지역", ["us", "kr"], horizontal=True, key="fc_region")
     if st.button("금리 결정 예측 실행", type="primary", key="fc_rate"):
-        try:
-            import sys
-
-            cp = ROOT / "trading-copilot"
-            if str(cp) not in sys.path:
-                sys.path.insert(0, str(cp))
-            from trading_copilot.rate_forecast import rate_forecast
-
-            r = rate_forecast(region=region)
+        r = _latest_rate_forecast(region)
+        if not r:
+            st.warning(
+                f"'{region.upper()}' 기록된 금리 예측이 없습니다 — "
+                "cron(`rate-record`)이 적재 중이거나 trading-copilot 에서 생성하세요."
+            )
+        else:
             import plotly.graph_objects as go
 
             probs = {
@@ -621,8 +661,10 @@ def _render_forecast() -> None:
                 title=f"{region.upper()} 기준금리 결정 확률",
             )
             c2.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.error(f"금리 예측 실패: {e}")
+            st.caption(
+                f"기록일 {r.get('recorded_at', '—')} · 상태 {r.get('status', '—')} "
+                "— 포워드-OOS 원장에 회의 전 사전 기록된 예측(재현 가능)."
+            )
     st.divider()
     # 원장 트랙레코드
     led = ROOT / "trading-copilot" / "out" / "rate_ledger.jsonl"
