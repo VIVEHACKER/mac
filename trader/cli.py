@@ -109,8 +109,12 @@ from trader.execution.adapters.fake import FakeBrokerAdapter
 from trader.execution.broker import AccountSnapshot, BrokerAdapter, PositionSnapshot
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore
-from trader.execution.reconciler import expected_positions_from_store, reconcile_positions
-from trader.execution.runner import process_order_intents
+from trader.execution.reconciler import (
+    expected_positions_from_store,
+    reconcile_in_flight,
+    reconcile_positions,
+)
+from trader.execution.runner import FillPoll, process_order_intents
 from trader.operations.drills import DrillLog, DrillRecord, DrillSummary
 from trader.research_registry import (
     PromotionGate,
@@ -2671,9 +2675,15 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
     if args.from_store and args.expected:
         print("Pass either --expected or --from-store, not both.")
         return 2
+    recoveries: list = []
     if args.from_store:
         # Auto-reconcile: baseline = the system's own recorded net fills, not operator memory.
-        expected = expected_positions_from_store(JsonlOrderStore(args.order_log))
+        store = JsonlOrderStore(args.order_log)
+        # Self-heal first: bring any in-flight orders (process crashed after submit, or an
+        # uncertain submit) back into the ledger via get_order BEFORE deriving the baseline, so a
+        # real fill the ledger simply had not recorded does not read as drift (live-readiness P0).
+        recoveries = reconcile_in_flight(store, broker)
+        expected = expected_positions_from_store(store)
         baseline = f"order-log:{args.order_log}"
     elif args.expected:
         expected = _parse_expected_positions(args.expected)
@@ -2696,6 +2706,13 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
         f"| Expected Positions | {len(expected)} |",
         f"| Mismatches | {len(issues)} |",
     ]
+    if recoveries:
+        uncertain = [r for r in recoveries if r.outcome == "uncertain"]
+        lines.append(f"| In-Flight Recovered | {len(recoveries)} |")
+        if uncertain:
+            # An order whose state could not be confirmed leaves the baseline incomplete — flag
+            # it loudly so the operator does not trust a "no mismatch" result built on guesswork.
+            lines.append(f"| In-Flight Unresolved | {len(uncertain)} |")
     if issues:
         if not args.no_halt_on_mismatch:
             HaltStateStore(args.halt_state).activate(
@@ -3068,16 +3085,24 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         asof_ts=datetime.now(UTC),
     ).normalized()
     reference_equity, peak_equity = _live_equity_refs(broker, args.equity_state, broker_name)
+    store = JsonlOrderStore(args.order_log)
+    # Self-heal before sending: resolve any prior in-flight order (crash after submit, or an
+    # uncertain submit) against the broker so the ledger reflects real fills before this order
+    # is sized/checked and so the next reconcile is honest (live-readiness P0).
+    reconcile_in_flight(store, broker)
     results = process_order_intents(
         [intent],
         broker=broker,
-        store=JsonlOrderStore(args.order_log),
+        store=store,
         halt_store=HaltStateStore(args.halt_state),
         policy=live_risk_policy(policy),
         marks={symbol: args.price},
         dry_run=not args.submit,
         reference_equity=reference_equity,
         peak_equity=peak_equity,
+        # Poll an async accepted/filled_qty=0 submit to its real terminal fill instead of
+        # leaving a stale non-terminal snapshot in the ledger (live-readiness P0 Gap A).
+        fill_poll=FillPoll(),
     )
     result = results[0]
     lines = [
