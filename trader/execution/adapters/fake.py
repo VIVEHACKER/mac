@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from trader.execution.broker import (
     AccountSnapshot,
+    BrokerClock,
     BrokerOrder,
     BrokerRejectedError,
     BrokerTemporaryError,
@@ -21,6 +22,7 @@ class FakeBrokerAdapter:
         positions: list[PositionSnapshot] | None = None,
         mode: str = "fill",
         fill_ratio: float = 1.0,
+        clock: BrokerClock | None = None,
     ):
         self.account = account or AccountSnapshot(
             account_id="fake",
@@ -31,6 +33,7 @@ class FakeBrokerAdapter:
         self.positions = {(item.symbol.upper(), item.market.lower()): item for item in positions or []}
         self.mode = mode
         self.fill_ratio = fill_ratio
+        self.clock = clock or BrokerClock(is_open=True, timestamp=datetime.now(UTC))
         self.orders: dict[str, BrokerOrder] = {}
 
     def get_account(self) -> AccountSnapshot:
@@ -38,6 +41,9 @@ class FakeBrokerAdapter:
 
     def list_positions(self) -> list[PositionSnapshot]:
         return list(self.positions.values())
+
+    def get_clock(self) -> BrokerClock:
+        return self.clock
 
     def submit_order(self, intent: OrderIntent) -> BrokerOrder:
         normalized = intent.normalized()
@@ -65,4 +71,3 @@ class FakeBrokerAdapter:
 
     def get_order(self, client_order_id: str) -> BrokerOrder | None:
         return self.orders.get(client_order_id)
-

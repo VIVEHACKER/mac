@@ -42,7 +42,7 @@ from engine.significance import (  # noqa: E402
 from scripts.aqr_ideal_grid import GRID  # noqa: E402
 from scripts.aqr_ideal_walkforward import BENCHMARK, MEGACAPS, prefetch, run_window  # noqa: E402
 
-DEFAULT_PRICES = ROOT / "data" / "snapshots" / "prices-ideal-2026-06-01.csv"
+DEFAULT_PRICES = ROOT / "data" / "snapshots" / "prices-ideal-2026-06-27.csv"
 DEFAULT_SNAPSHOT = ROOT / "data" / "snapshots" / "fundamentals-2026-06-01-gp2.csv"
 DEFAULT_OUT = ROOT / "out" / "aqr-ideal-robustness.md"
 FULL_START = pd.Timestamp("2009-01-01")

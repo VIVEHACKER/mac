@@ -18,7 +18,7 @@ broker keys, live kill-switch test) that code cannot satisfy.
 | Backtest↔order-gen parity | ✅ backtest and order generation can pin matching snapshots |
 | Pre-trade risk path / kill switch | ✅ drilled end-to-end vs BrokerAdapter stand-in (CI-enforced); fail-closed arming guard; ⚠️ real-Alpaca drill pending keys |
 | Paper-trading OOS | 🔄 accruing — 2 tracks (IDEAL T0 06-05, combined-80/20 T0 06-10) on automated daily cadence crons; first closed period ~07-06 |
-| Live env + broker keys | ❌ keys pending; ✅ live-prices DB populated (keyless yahoo EOD fallback) |
+| Live env + broker keys | ❌ keys pending; readiness now reports broker preflight and operational confidence |
 | Independent (Codex) code review | ⚠️ blocked by usage limit (resets 2026-05-31) |
 
 ## What this means
@@ -51,16 +51,20 @@ is not.
 
 - Full-sample monthly Sharpe **1.40**, annualized return ~24%, MDD 18.5%.
 - PSR(SR>0) **100%**; bootstrap 95% CI **[0.92, 1.92]**, recentered null p < 1e-4.
-- Walk-forward 15 windows: **86.7% positive (13/15), +8.15%/yr avg excess**, avg
+- Walk-forward 15 windows: **93.3% positive (14/15), +8.21%/yr avg excess**, avg
   Sharpe 1.41, worst-window MDD 19.19% — reproducible from the pinned snapshots
-  `prices-ideal-2026-06-01` (sha `cff8205…`) + `fundamentals-2026-06-01-gp2`:
+  `prices-ideal-2026-06-27` (sha `620086…`) + `fundamentals-2026-06-01-gp2`:
   `TRADER_REQUIRE_PINNED=1 uv run python scripts/aqr_ideal_walkforward.py --prices
-  data/snapshots/prices-ideal-2026-06-01.csv --snapshot
+  data/snapshots/prices-ideal-2026-06-27.csv --snapshot
   data/snapshots/fundamentals-2026-06-01-gp2.csv` (= `out/aqr-ideal-walkforward.md`).
-  Supersedes the earlier "93.3% / +7.67%" figure, which traced to a registry record
-  with an empty `command` field and was not reproducible.
-- **After-cost (fee-stressed, same pinned inputs)**: 5 bps one-way → **+7.87%/yr**
-  (86.7% positive, Sharpe 1.39); 10 bps one-way → **+7.40%/yr** (86.7% positive,
+  Prices refreshed to the 2026-06-27 pin (full re-download); fundamentals stay on
+  the 2026-06-01-gp2 pin. The prior canonical run on `prices-ideal-2026-06-01`
+  (sha `cff8205…`) gave 86.7% / +8.15%/yr — the edge reproduces on fresh prices
+  (the lone flip is the marginal 2010-12 window crossing 0; it reverts to negative
+  under fees). Both supersede the earlier "93.3% / +7.67%" figure, which traced to a
+  registry record with an empty `command` field and was not reproducible.
+- **After-cost (fee-stressed, same pinned inputs)**: 5 bps one-way → **+7.93%/yr**
+  (86.7% positive, Sharpe 1.39); 10 bps one-way → **+7.46%/yr** (86.7% positive,
   Sharpe 1.37). Decay ≈ 0.075 pp per bps; the positive-rate is unchanged, so the
   edge is not a costs artifact. Reports: `out/aqr-ideal-walkforward-fee{5,10}.md`
   (same `TRADER_REQUIRE_PINNED=1` command with `--fee-bps 5|10`).
@@ -78,7 +82,7 @@ is not.
 - Survivorship: the 106-name universe is PIT-sourced but `pit-2008-backfill`, not
   a true historical membership feed. Real alpha is estimated at +5–8%/yr after
   this and fees.
-- Prices are now pinned for canonical validation (`prices-ideal-2026-06-01`), but
+- Prices are now pinned for canonical validation (`prices-ideal-2026-06-27`), but
   live operation still depends on a fresh mark source for execution sizing. Treat
   stale or missing marks as a hard pre-trade block.
 
@@ -112,7 +116,8 @@ original gaps; closures cite their evidence)
    header must read `Fundamentals: snapshot:<name>` (never `LIVE-CATALOG`).
 4. Run the `live-dry-run` block; confirm pre-trade gates pass.
 5. Paper-trade ≥30 days; reconcile fills (`trader live-reconcile`).
-6. Confirm `trader live-readiness` passes; for `alpaca-live` this includes the
+6. Confirm `trader live-readiness --require-order-submission --require-broker-preflight`
+   passes with `Operational Confidence | 100%`; for `alpaca-live` this includes the
    current paper OOS ledger meeting `LIVE_MIN_PAPER_OOS_PERIODS` scoreable closed
    periods and `LIVE_MIN_PAPER_OOS_VS_BACKTEST` using `LIVE_PAPER_OOS_PRICES`.
 7. Set `LIVE_*` gates (see `LIVE_OPERATIONS.md`), start at ≤5% capital, Kelly ≤0.25.

@@ -7,6 +7,7 @@ from uuid import uuid4
 from risk.slippage import SlippageModel
 from trader.execution.broker import (
     AccountSnapshot,
+    BrokerClock,
     BrokerOrder,
     BrokerRejectedError,
     PositionSnapshot,
@@ -137,6 +138,9 @@ class PaperBroker:
             )
             for position in self.positions.values()
         ]
+
+    def get_clock(self) -> BrokerClock:
+        return BrokerClock(is_open=True, timestamp=datetime.now(UTC))
 
     def submit_order(self, intent: OrderIntent) -> BrokerOrder:
         order = intent.normalized()

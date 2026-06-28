@@ -174,6 +174,7 @@ Before any live submit path can be used, run:
 ```bash
 uv run trader live-readiness \
   --require-order-submission \
+  --require-broker-preflight \
   --require-price QQQ:us,TLT:us,QID:us,SDS:us \
   --max-price-age-days 2 \
   --registry data/store/research-registry.jsonl \
@@ -185,6 +186,10 @@ This fails closed unless all of these are true:
 
 - live environment variables are complete
 - `LIVE_ORDER_SUBMISSION_ENABLED=true` when real submission is required
+- `--require-broker-preflight` can read the broker account, positions, and market
+  clock without placing orders; Alpaca keys, account block flags, positive
+  equity, USD currency, minimum buying power, and open-market state are checked
+  before readiness can pass
 - the latest registry decision for `LIVE_STRATEGY_ID` is approved
 - live-grade strategy evidence includes passing stress windows and +30% worst
   stress-window return
@@ -192,6 +197,17 @@ This fails closed unless all of these are true:
 - persistent halt latch is clear
 - required prices exist, are fresh, have a source, and are not research-grade
   sources in live mode
+
+The report includes `Operational Confidence` and `Confidence Deductions`. This
+score is an execution-readiness score only; it is not a profit forecast. Any
+`blocked-*` band means real order submission remains a no-go regardless of the
+numeric score. The report also prints `Next Actions` for each blocking class so
+the operator can move from a blocked state to the next concrete remediation
+without guessing.
+
+The live execution runner also checks the broker market clock immediately before
+real submission (`dry_run=False`). If the market is closed, the batch is blocked
+without recording intents, so the same orders remain retryable at the next open.
 
 The current crash-sleeve candidate intentionally fails full promotion. Do not set
 `LIVE_STRATEGY_ID` to that candidate for real-money submission until
@@ -226,6 +242,21 @@ Stored bars use a source such as `alpaca:iex:latest_bar`, which the live quality
 gate treats as broker-grade. Yahoo, manual, fixture, test, and missing sources
 remain blockers.
 
+For intraday/live operation, run the WebSocket stream instead of relying on a
+one-shot latest-bar poll:
+
+```bash
+uv run trader live-price-stream QQQ,TLT,QID,SDS \
+  --feed sip \
+  --timeout-seconds 90 \
+  --catalog-db data/store/live-prices.duckdb
+```
+
+Use `--feed sip` when the account has SIP market-data entitlement; `--feed iex`
+is acceptable for paper drills but is not a full-market NBBO substitute. Use
+`--timeout-seconds` for smoke tests and credential drills; omit it for the
+long-running production stream supervisor.
+
 ## Order Gate Dry Run
 
 Use `live-dry-run` to exercise idempotency, halt, and pre-trade checks without
@@ -251,6 +282,13 @@ uv run trader live-dry-run QQQ --side buy --qty 2 --price 100 --submit-fake --fa
 ```
 
 `--fake-mode timeout` latches halt because order state is uncertain.
+
+Expected local drill evidence:
+
+- normal `live-dry-run`: `Status | accepted`
+- `--submit-fake --fake-mode timeout`: exit code 3, CRITICAL
+  `broker_uncertain_submit` event, and persistent halt latch
+- no real broker credentials are required for these mechanical checks
 
 ## Live Submit Path
 
@@ -447,8 +485,10 @@ Live is gated by the env vars in "Live Gates" above plus `live-readiness`. For
    `LIVE_MIN_PAPER_DAYS` (default 30) and at least
    `LIVE_MIN_PAPER_OOS_PERIODS` scoreable closed ledger periods (default 6) —
    really 3-6 months for this strategy.
-2. Validate fills reconcile (`trader live-reconcile`).
-3. Only then consider `alpaca-live` with ≤5% of capital and Kelly ≤ 0.25.
+2. Validate broker reachability with
+   `trader live-readiness --require-order-submission --require-broker-preflight ...`.
+3. Validate fills reconcile (`trader live-reconcile`).
+4. Only then consider `alpaca-live` with ≤5% of capital and Kelly ≤ 0.25.
 
 ### Pre-deployment reproducibility re-validation
 

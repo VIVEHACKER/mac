@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,7 +14,11 @@ from dotenv import load_dotenv
 from data.catalog import DEFAULT_CATALOG_PATH, MarketDataCatalog
 from data.delistings import load_delisting_returns_csv
 from data.fundamentals_csv import load_fundamentals_csv
-from data.ingest.alpaca_live import fetch_alpaca_latest_stock_bars
+from data.ingest.alpaca_live import (
+    AlpacaStreamTimeoutError,
+    fetch_alpaca_latest_stock_bars,
+    stream_alpaca_stock_bars,
+)
 from data.ingest.ccxt_crypto import fetch_ccxt_bars, normalize_crypto_symbol
 from data.ingest.crypto_microstructure import fetch_funding_history
 from data.ingest.crypto_open_interest import fetch_open_interest_history, to_perp_symbol
@@ -175,6 +180,7 @@ CORE_COMMANDS = {
     "live-drill",
     "live-reconcile",
     "live-price-ingest",
+    "live-price-stream",
     "live-dry-run",
     "live-submit",
     "model-gate",
@@ -261,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_live_reconcile(parsed)
     if parsed.command == "live-price-ingest":
         return _run_live_price_ingest(parsed)
+    if parsed.command == "live-price-stream":
+        return _run_live_price_stream(parsed)
     if parsed.command == "live-dry-run":
         return _run_live_dry_run(parsed)
     if parsed.command == "live-submit":
@@ -819,6 +827,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also require LIVE_ORDER_SUBMISSION_ENABLED=true.",
     )
+    live_readiness.add_argument(
+        "--require-broker-preflight",
+        action="store_true",
+        help="Read broker account/positions before declaring live readiness.",
+    )
 
     live_halt = sub.add_parser("live-halt", help="View or update the persistent live halt latch.")
     live_halt.add_argument("action", choices=["status", "activate", "clear"])
@@ -892,6 +905,26 @@ def build_parser() -> argparse.ArgumentParser:
         "daily bars — good enough for paper-loop marks, NOT execution-grade.",
     )
     live_price_ingest.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
+
+    live_price_stream = sub.add_parser(
+        "live-price-stream",
+        help="Stream Alpaca real-time US stock bars into the live catalog.",
+    )
+    live_price_stream.add_argument("symbols")
+    live_price_stream.add_argument("--feed", default="iex")
+    live_price_stream.add_argument(
+        "--max-bars",
+        type=int,
+        default=0,
+        help="Stop after N streamed bars. 0 streams until interrupted.",
+    )
+    live_price_stream.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=0.0,
+        help="Abort if the stream does not finish within N seconds. 0 disables the timeout.",
+    )
+    live_price_stream.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
 
     live_dry_run = sub.add_parser(
         "live-dry-run",
@@ -2590,6 +2623,7 @@ def _run_live_readiness(args: argparse.Namespace) -> int:
         as_of=_parse_date(args.as_of),
         max_price_age_days=args.max_price_age_days,
         require_order_submission=args.require_order_submission,
+        require_broker_preflight=args.require_broker_preflight,
     )
     print(
         _format_live_readiness(
@@ -2597,6 +2631,7 @@ def _run_live_readiness(args: argparse.Namespace) -> int:
             issues,
             required_prices=required_prices,
             require_order_submission=args.require_order_submission,
+            require_broker_preflight=args.require_broker_preflight,
             paper_oos_prices=args.paper_oos_prices,
         )
     )
@@ -2860,12 +2895,16 @@ def _run_live_price_ingest(args: argparse.Namespace) -> int:
                 "(or use --source yahoo for the keyless EOD fallback)"
             )
             return 2
-        bars = fetch_alpaca_latest_stock_bars(
-            symbols,
-            api_key=api_key,
-            secret_key=secret_key,
-            feed=args.feed,
-        )
+        try:
+            bars = fetch_alpaca_latest_stock_bars(
+                symbols,
+                api_key=api_key,
+                secret_key=secret_key,
+                feed=args.feed,
+            )
+        except Exception as exc:  # noqa: BLE001 - external SDK errors vary by auth/feed state.
+            print(f"alpaca latest-bar fetch failed: {_compact_external_error(exc)}")
+            return 2
     stored = MarketDataCatalog(args.catalog_db).put_bars(bars)
     lines = [
         "# Live Price Ingest",
@@ -2890,6 +2929,63 @@ def _run_live_price_ingest(args: argparse.Namespace) -> int:
             lines.append(f"| {bar.symbol} | {bar.ts} | {bar.close:,.4f} | {bar.source} |")
     print("\n".join(lines))
     return 0 if stored == len(symbols) else 2
+
+
+def _compact_external_error(exc: Exception) -> str:
+    message = " ".join(str(exc).strip().split())
+    if not message:
+        return exc.__class__.__name__
+    lowered = message.lower()
+    if "status=401" in lowered or ("401" in message and "unauthorized" in lowered):
+        return "401 Unauthorized"
+    if "<html" in lowered or "<body" in lowered or "<h1>" in lowered:
+        if "401" in message and "authorization required" in lowered:
+            return "401 Authorization Required"
+        return "upstream returned an HTML error page"
+    return message
+
+
+def _run_live_price_stream(args: argparse.Namespace) -> int:
+    symbols = _parse_symbols(args.symbols)
+    api_key = os.getenv("ALPACA_API_KEY", "").strip()
+    secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
+    if not api_key or not secret_key:
+        print("ALPACA_API_KEY and ALPACA_SECRET_KEY are required for live-price-stream")
+        return 2
+    catalog = MarketDataCatalog(args.catalog_db)
+
+    def persist_bar(bar) -> None:
+        catalog.put_bars([bar])
+        print(
+            f"{datetime.now(UTC).isoformat()} stored {bar.symbol} {bar.ts} "
+            f"close={bar.close:.4f} source={bar.source}",
+            flush=True,
+        )
+
+    max_bars = args.max_bars if args.max_bars > 0 else None
+    timeout_s = args.timeout_seconds if args.timeout_seconds > 0 else None
+    print(
+        f"Streaming {', '.join(symbols)} bars from Alpaca feed={args.feed} "
+        f"into {args.catalog_db} (max-bars={max_bars or 'until interrupted'}, "
+        f"timeout={timeout_s or 'disabled'})",
+        flush=True,
+    )
+    try:
+        stream_alpaca_stock_bars(
+            symbols,
+            api_key=api_key,
+            secret_key=secret_key,
+            feed=args.feed,
+            on_bar=persist_bar,
+            max_bars=max_bars,
+            timeout_s=timeout_s,
+        )
+    except AlpacaStreamTimeoutError as exc:
+        print(str(exc))
+        return 2
+    except KeyboardInterrupt:
+        print("stream interrupted")
+    return 0
 
 
 # The fund trades US equities, so the daily-loss latch must roll on the US market-session date.
@@ -3018,6 +3114,7 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         as_of=_parse_date(args.as_of),
         max_price_age_days=args.max_price_age_days,
         require_order_submission=args.submit,
+        require_broker_preflight=False,
     )
     catalog_mark = _latest_catalog_mark(catalog, symbol, args.market)
     if catalog_mark is not None and args.max_mark_deviation >= 0:
@@ -3058,6 +3155,7 @@ def _run_live_submit(args: argparse.Namespace) -> int:
                 issues,
                 required_prices=required_prices,
                 require_order_submission=args.submit,
+                require_broker_preflight=False,
                 paper_oos_prices=args.paper_oos_prices,
             )
         )
@@ -3187,6 +3285,24 @@ def _run_model_gate(args: argparse.Namespace) -> int:
     return 0 if decision.passed else 2
 
 
+@dataclass(frozen=True)
+class LiveReadinessConfidence:
+    score: int
+    band: str
+    deductions: tuple[tuple[str, int, str], ...]
+
+
+_READINESS_AREA_PENALTIES = {
+    "live-policy": 35,
+    "broker-preflight": 30,
+    "halt": 30,
+    "price": 25,
+    "model-gate": 20,
+    "paper-oos": 20,
+    "live-drill": 15,
+}
+
+
 def _live_readiness_issues(
     *,
     policy: LiveTradingPolicy,
@@ -3200,6 +3316,7 @@ def _live_readiness_issues(
     as_of: date,
     max_price_age_days: int,
     require_order_submission: bool,
+    require_broker_preflight: bool,
 ) -> list[DataQualityIssue]:
     issues: list[DataQualityIssue] = []
     try:
@@ -3209,6 +3326,8 @@ def _live_readiness_issues(
             assert_live_trading_enabled(policy)
     except LiveTradingBlockedError as exc:
         issues.append(DataQualityIssue("error", "live-policy", "environment", str(exc)))
+    if require_broker_preflight:
+        issues.extend(_live_broker_preflight_issues(policy))
     if policy.strategy_id:
         for reason in registry.live_approval_issues(policy.strategy_id):
             issues.append(DataQualityIssue("error", "model-gate", policy.strategy_id, reason))
@@ -3341,6 +3460,138 @@ def _live_readiness_issues(
     return issues
 
 
+def _live_broker_preflight_issues(policy: LiveTradingPolicy) -> list[DataQualityIssue]:
+    broker_name = policy.broker.strip().lower()
+    if not broker_name:
+        return [
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                "environment",
+                "LIVE_BROKER is required for broker preflight",
+            )
+        ]
+    if broker_name == "fake":
+        return []
+    if broker_name not in {"alpaca-paper", "alpaca-live"}:
+        return [
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                broker_name,
+                f"unsupported broker for preflight: {policy.broker}",
+            )
+        ]
+    api_key = os.getenv("ALPACA_API_KEY", "").strip()
+    secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
+    if not api_key or not secret_key:
+        return [
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                broker_name,
+                "ALPACA_API_KEY and ALPACA_SECRET_KEY are required for broker preflight",
+            )
+        ]
+    try:
+        broker = AlpacaBrokerAdapter(
+            api_key,
+            secret_key,
+            paper=broker_name == "alpaca-paper",
+        )
+        account = broker.get_account()
+        broker.list_positions()
+        clock = broker.get_clock()
+    except Exception as exc:  # noqa: BLE001 - SDK/network/auth errors are normalized for operators.
+        return [
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                broker_name,
+                f"broker account/positions preflight failed: {_compact_external_error(exc)}",
+            )
+        ]
+    issues: list[DataQualityIssue] = []
+    if account.account_blocked:
+        issues.append(
+            DataQualityIssue("error", "broker-preflight", broker_name, "account is blocked")
+        )
+    if account.trading_blocked:
+        issues.append(
+            DataQualityIssue("error", "broker-preflight", broker_name, "trading is blocked")
+        )
+    if account.equity <= 0:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                broker_name,
+                f"account equity must be positive; got {account.equity:,.2f}",
+            )
+        )
+    min_buying_power = live_risk_policy(policy).max_order_notional
+    if account.buying_power < min_buying_power:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                broker_name,
+                f"buying power {account.buying_power:,.2f} < max order notional "
+                f"{min_buying_power:,.2f}",
+            )
+        )
+    if account.currency.upper() != "USD":
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                broker_name,
+                f"account currency must be USD; got {account.currency}",
+            )
+        )
+    if not clock.is_open:
+        next_open = clock.next_open.isoformat() if clock.next_open else "unknown"
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "broker-preflight",
+                broker_name,
+                f"market is closed at {clock.timestamp.isoformat()}; next_open={next_open}",
+            )
+        )
+    return issues
+
+
+def _live_readiness_confidence(issues: list[DataQualityIssue]) -> LiveReadinessConfidence:
+    by_area: dict[str, list[DataQualityIssue]] = {}
+    for issue in issues:
+        if issue.severity == "info":
+            continue
+        by_area.setdefault(issue.area, []).append(issue)
+
+    deductions: list[tuple[str, int, str]] = []
+    for area in sorted(by_area):
+        penalty = _READINESS_AREA_PENALTIES.get(area, 10)
+        messages = "; ".join(issue.message for issue in by_area[area])
+        deductions.append((area, penalty, messages))
+
+    score = max(0, 100 - sum(penalty for _, penalty, _ in deductions))
+    if issues:
+        if score >= 70:
+            band = "blocked-medium"
+        elif score >= 40:
+            band = "blocked-low"
+        else:
+            band = "blocked-critical"
+    elif score >= 95:
+        band = "high"
+    elif score >= 80:
+        band = "medium"
+    else:
+        band = "low"
+    return LiveReadinessConfidence(score, band, tuple(deductions))
+
+
 def _paper_oos_ledger_path(paper_oos_dir: Path, strategy_id: str) -> Path:
     return Path(paper_oos_dir) / f"paper-oos-ledger-{strategy_id}.jsonl"
 
@@ -3377,18 +3628,24 @@ def _format_live_readiness(
     *,
     required_prices: tuple[tuple[str, str], ...],
     require_order_submission: bool,
+    require_broker_preflight: bool,
     paper_oos_prices: Path | None,
 ) -> str:
     latest_prices = ", ".join(f"{market}:{symbol}" for symbol, market in required_prices) or "none"
+    confidence = _live_readiness_confidence(issues)
     lines = [
         "# Live Readiness",
         "",
         "| Gate | Value |",
         "|---|---:|",
         f"| Ready | {'yes' if not issues else 'no'} |",
+        f"| Operational Confidence | {confidence.score}% |",
+        f"| Confidence Band | {confidence.band} |",
+        "| Confidence Scope | live execution readiness, not profit forecast |",
         f"| Trading Env Ready | {'yes' if policy.ready else 'no'} |",
         f"| Order Submission Required | {'yes' if require_order_submission else 'no'} |",
         f"| Order Submission Enabled | {'yes' if policy.order_submission_enabled else 'no'} |",
+        f"| Broker Preflight Required | {'yes' if require_broker_preflight else 'no'} |",
         f"| Strategy | {policy.strategy_id or 'missing'} |",
         f"| Broker | {policy.broker or 'missing'} |",
         f"| Max Capital | {policy.max_capital:,.2f} |",
@@ -3403,7 +3660,73 @@ def _format_live_readiness(
     if issues:
         lines.extend(["", "## Blocking Issues", ""])
         lines.extend(f"- [{issue.area}:{issue.item}] {issue.message}" for issue in issues)
+    if confidence.deductions:
+        lines.extend(
+            [
+                "",
+                "## Confidence Deductions",
+                "",
+                "| Area | Penalty | Reason |",
+                "|---|---:|---|",
+            ]
+        )
+        for area, penalty, reason in confidence.deductions:
+            lines.append(f"| {area} | -{penalty}% | {reason} |")
+    remediation = _live_readiness_remediation(issues, required_prices)
+    if remediation:
+        lines.extend(["", "## Next Actions", ""])
+        lines.extend(f"- {item}" for item in remediation)
     return "\n".join(lines)
+
+
+def _live_readiness_remediation(
+    issues: list[DataQualityIssue],
+    required_prices: tuple[tuple[str, str], ...],
+) -> list[str]:
+    actions: list[str] = []
+    areas = {issue.area for issue in issues}
+    messages = " ".join(issue.message for issue in issues).lower()
+    if "live-policy" in areas:
+        actions.append(
+            "Set and review LIVE_TRADING_ENABLED=true, LIVE_TRADING_ACK_RISK=true, "
+            "LIVE_ORDER_SUBMISSION_ENABLED=true, LIVE_STRATEGY_ID, LIVE_BROKER, "
+            "LIVE_MAX_CAPITAL, and LIVE_POLICY_VERSION only after accepting the risk."
+        )
+    if "broker-preflight" in areas:
+        if "alpaca_api_key" in messages or "401" in messages or "unauthorized" in messages:
+            actions.append(
+                "Replace or enable ALPACA_API_KEY/ALPACA_SECRET_KEY for the selected "
+                "LIVE_BROKER, then rerun readiness with --require-broker-preflight."
+            )
+        if "market is closed" in messages:
+            actions.append("Rerun broker preflight during the regular market session.")
+        if "buying power" in messages:
+            actions.append(
+                "Reduce LIVE_MAX_CAPITAL or fund the broker account so buying power covers "
+                "the max order notional."
+            )
+    if "price" in areas and required_prices:
+        symbols = ",".join(symbol for symbol, _market in required_prices)
+        actions.append(
+            "Load broker-grade prices with "
+            f"`uv run trader live-price-stream {symbols} --max-bars {len(required_prices)} "
+            "--timeout-seconds 90 --catalog-db data/store/live-prices.duckdb` "
+            "or `uv run trader live-price-ingest ... --source alpaca` after Alpaca auth works."
+        )
+    if "paper-oos" in areas:
+        actions.append(
+            "Continue cadence-controlled paper OOS until the ledger has the required closed "
+            "periods, then provide LIVE_PAPER_OOS_PRICES for scoring."
+        )
+    if "live-drill" in areas:
+        actions.append("Record passing paper/shadow drills with `uv run trader live-drill record ...`.")
+    if "halt" in areas:
+        actions.append("Resolve the halt root cause, then clear it with `uv run trader live-halt clear`.")
+    if "model-gate" in areas:
+        actions.append(
+            "Record an approved promotion decision with `uv run trader validate-model --record-gate ...`."
+        )
+    return actions
 
 
 def _format_drill_summary(summary: DrillSummary) -> str:

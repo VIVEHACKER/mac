@@ -31,7 +31,7 @@ from engine.significance import block_bootstrap_sharpe  # noqa: E402
 from scripts.aqr_ideal_walkforward import MEGACAPS  # noqa: E402
 
 SNAP_DIR = ROOT / "data" / "snapshots"
-US_PRICES = SNAP_DIR / "prices-ideal-2026-06-01.csv"
+US_PRICES = SNAP_DIR / "prices-ideal-2026-06-27.csv"
 
 EUROPE = [
     "ASML.AS",

@@ -74,6 +74,7 @@ def test_factor_validation_suite_runs_multiple_validation_layers() -> None:
     excesses = suite.stress_window_excesses
     assert len(excesses) == 1
     window = suite.stress_windows[0].result
+    assert window is not None
     assert excesses[0] == pytest.approx(window.total_return - window.benchmark_return)
     assert suite.worst_stress_excess == pytest.approx(min(excesses))
     assert suite.mean_stress_excess == pytest.approx(sum(excesses) / len(excesses))

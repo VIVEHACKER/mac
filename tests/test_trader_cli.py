@@ -10,6 +10,7 @@ import pytest
 from data.catalog import MarketDataCatalog
 from data.models import FundamentalRecord, MacroObservation, PriceBar, UniverseMember
 from trader import cli
+from trader.execution.broker import AccountSnapshot, BrokerClock
 from valuation.option_vol import OptionQuote
 
 
@@ -930,7 +931,173 @@ def test_live_readiness_accepts_paper_oos_closed_periods_for_live_broker(
     captured = capsys.readouterr()
     assert result == 0
     assert "Ready | yes" in captured.out
+    assert "Operational Confidence | 100%" in captured.out
     assert "Required Paper OOS Periods | 2" in captured.out
+
+
+def test_live_readiness_confidence_scores_hard_blockers(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    for name in (
+        "LIVE_TRADING_ENABLED",
+        "LIVE_TRADING_ACK_RISK",
+        "LIVE_ORDER_SUBMISSION_ENABLED",
+        "LIVE_STRATEGY_ID",
+        "LIVE_BROKER",
+        "LIVE_MAX_CAPITAL",
+        "LIVE_POLICY_VERSION",
+    ):
+        monkeypatch.setenv(name, "")
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--catalog-db",
+            str(tmp_path / "catalog.duckdb"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "Operational Confidence | 40%" in captured.out
+    assert "Confidence Band | blocked-low" in captured.out
+    assert "| live-policy | -35%" in captured.out
+    assert "| price | -25%" in captured.out
+    assert "## Next Actions" in captured.out
+    assert "LIVE_TRADING_ENABLED=true" in captured.out
+    assert "live-price-stream QQQ" in captured.out
+
+
+def test_live_readiness_broker_preflight_requires_alpaca_credentials(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    monkeypatch.setenv("ALPACA_API_KEY", "")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "")
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-broker-preflight",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "ALPACA_API_KEY and ALPACA_SECRET_KEY are required" in captured.out
+    assert "| broker-preflight | -30%" in captured.out
+    assert "Replace or enable ALPACA_API_KEY/ALPACA_SECRET_KEY" in captured.out
+
+
+def test_live_readiness_broker_preflight_blocks_closed_market_and_low_buying_power(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+
+    class _ClosedMarketAdapter:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def get_account(self) -> AccountSnapshot:
+            return AccountSnapshot(
+                account_id="acc",
+                buying_power=100.0,
+                cash=100.0,
+                equity=10_000.0,
+            )
+
+        def list_positions(self) -> list:
+            return []
+
+        def get_clock(self) -> BrokerClock:
+            return BrokerClock(
+                is_open=False,
+                timestamp=datetime(2026, 5, 25, 12, tzinfo=cli.UTC),
+                next_open=datetime(2026, 5, 26, 13, 30, tzinfo=cli.UTC),
+            )
+
+    monkeypatch.setattr(cli, "AlpacaBrokerAdapter", _ClosedMarketAdapter)
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-broker-preflight",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "buying power 100.00 < max order notional 2,500.00" in captured.out
+    assert "market is closed" in captured.out
+    assert "Operational Confidence | 70%" in captured.out
+    assert "| broker-preflight | -30%" in captured.out
+    assert "Rerun broker preflight during the regular market session" in captured.out
+    assert "Reduce LIVE_MAX_CAPITAL or fund the broker account" in captured.out
 
 
 def test_live_readiness_ignores_future_paper_oos_rows_before_as_of(
@@ -2135,6 +2302,35 @@ def test_live_price_ingest_yahoo_partial_failure_exits_nonzero(
     captured = capsys.readouterr()
     assert result == 2  # one symbol failed -> non-zero, failure visible
     assert "BAD" in captured.out
+
+
+def test_live_price_ingest_alpaca_failure_is_summarized(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+
+    def fail_fetch(_symbols, *, api_key: str, secret_key: str, feed: str) -> list[PriceBar]:
+        assert api_key == "key"
+        assert secret_key == "secret"
+        assert feed == "iex"
+        raise RuntimeError("<html><body><h1>401 Authorization Required</h1></body></html>")
+
+    monkeypatch.setattr(cli, "fetch_alpaca_latest_stock_bars", fail_fetch)
+
+    result = cli.main(
+        [
+            "live-price-ingest",
+            "QQQ",
+            "--source",
+            "alpaca",
+            "--catalog-db",
+            str(tmp_path / "l.duckdb"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "401 Authorization Required" in captured.out
+    assert "<html>" not in captured.out
 
 
 def test_live_dry_run_submit_fake_is_armed_not_crashed(tmp_path, capsys) -> None:

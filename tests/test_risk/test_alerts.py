@@ -14,7 +14,12 @@ from typing import Any
 from risk.halt_state import HaltStateStore
 from risk.policy import RiskPolicy
 from trader.execution.adapters.fake import FakeBrokerAdapter
-from trader.execution.broker import AccountSnapshot, BrokerTemporaryError, PositionSnapshot
+from trader.execution.broker import (
+    AccountSnapshot,
+    BrokerClock,
+    BrokerTemporaryError,
+    PositionSnapshot,
+)
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore
 from trader.execution.runner import process_order_intents
@@ -63,6 +68,9 @@ class _ReadFailsBroker:
 
     def list_positions(self) -> list[PositionSnapshot]:
         return []
+
+    def get_clock(self) -> BrokerClock:
+        return BrokerClock(is_open=True, timestamp=datetime(2026, 5, 12, tzinfo=UTC))
 
     def submit_order(self, intent: OrderIntent) -> object:
         raise AssertionError("must not submit when reads fail")

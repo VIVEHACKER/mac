@@ -13,6 +13,7 @@ from risk.halt_state import HaltStateStore
 from risk.policy import RiskPolicy
 from trader.execution.broker import (
     AccountSnapshot,
+    BrokerClock,
     BrokerOrder,
     BrokerTemporaryError,
     PositionSnapshot,
@@ -39,6 +40,10 @@ def _intent(symbol: str = "qqq", qty: float = 2, key: str = "2026-05-12") -> Ord
 
 def _account() -> AccountSnapshot:
     return AccountSnapshot("test", buying_power=10_000, cash=10_000, equity=10_000)
+
+
+def _clock() -> BrokerClock:
+    return BrokerClock(is_open=True, timestamp=datetime(2026, 5, 12, tzinfo=UTC))
 
 
 def _order(cid: str, symbol: str, side: str, qty: float) -> BrokerOrder:
@@ -69,6 +74,9 @@ class _FillProgressionBroker:
 
     def list_positions(self) -> list[PositionSnapshot]:
         return []
+
+    def get_clock(self) -> BrokerClock:
+        return _clock()
 
     def submit_order(self, intent: OrderIntent) -> BrokerOrder:
         n = intent.normalized()
@@ -200,6 +208,9 @@ class _CancelOnPollBroker:
 
     def list_positions(self) -> list[PositionSnapshot]:
         return []
+
+    def get_clock(self) -> BrokerClock:
+        return _clock()
 
     def submit_order(self, intent: OrderIntent) -> BrokerOrder:
         n = intent.normalized()

@@ -8,6 +8,7 @@ from typing import Any
 
 from trader.execution.broker import (
     AccountSnapshot,
+    BrokerClock,
     BrokerOrder,
     BrokerRejectedError,
     BrokerTemporaryError,
@@ -105,6 +106,16 @@ class AlpacaBrokerAdapter:
                 )
             )
         return rows
+
+    def get_clock(self) -> BrokerClock:
+        clock = self._request(self.client.get_clock, "get market clock", retry=True)
+        timestamp = _datetime_utc(getattr(clock, "timestamp", None))
+        return BrokerClock(
+            is_open=bool(getattr(clock, "is_open", False)),
+            timestamp=timestamp or datetime.now(UTC),
+            next_open=_datetime_utc(getattr(clock, "next_open", None)),
+            next_close=_datetime_utc(getattr(clock, "next_close", None)),
+        )
 
     def submit_order(self, intent: OrderIntent) -> BrokerOrder:
         from alpaca.trading.enums import OrderSide, TimeInForce
@@ -246,9 +257,7 @@ def _time_in_force(value: str, enum_type):
 
 
 def _map_alpaca_order(order) -> BrokerOrder:
-    submitted_at = getattr(order, "submitted_at", None) or datetime.now(UTC)
-    if getattr(submitted_at, "tzinfo", None) is None:
-        submitted_at = submitted_at.replace(tzinfo=UTC)
+    submitted_at = _datetime_utc(getattr(order, "submitted_at", None)) or datetime.now(UTC)
     return BrokerOrder(
         broker_order_id=str(getattr(order, "id", "")),
         client_order_id=str(getattr(order, "client_order_id", "")),
@@ -267,3 +276,13 @@ def _optional_float(value) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _datetime_utc(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, datetime):
+        value = datetime.fromisoformat(str(value))
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
