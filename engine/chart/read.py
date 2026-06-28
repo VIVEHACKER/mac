@@ -70,6 +70,12 @@ LAYER_DERIVED = "derived"
 # Base weights (docs/CHART_READING.md "기본 가중치 참조 테이블").
 _W_STRUCTURE = 0.30
 _W_STRUCTURE_COMBO = 0.40
+# A-1 검증(CHARTBLOOM_VALIDATION_RESULTS.md): FVG 미동반 CHoCH(반전)는 forward 음수(t=-2.3@+24,
+# n=1591). 동일방향 FVG가 없는 CHoCH-driven 구조 가중을 이 값으로 캡한다.
+_W_STRUCTURE_NOFVG_CHOCH = 0.15
+# 게이트 토글. forward-OOS 재확인 전 보수적 기본 ON(음의 신호 약화 방향이라 false-ENTER만 감소).
+# 끄려면 False. (테스트는 read._CHOCH_FVG_GATE monkeypatch)
+_CHOCH_FVG_GATE = True
 _W_SWEEP = 0.30
 _W_SWEEP_SOLO = 0.10
 _W_VOLUME_PROFILE = 0.20
@@ -262,6 +268,21 @@ def _run_detectors(
 # ---------------------------------------------------------------------------
 
 
+def _has_supporting_fvg(feat: _Features, bias: TrendBias) -> bool:
+    """bias 방향과 같은 미완화 active FVG가 존재하는가 — CHoCH를 만든 임펄스의 흔적.
+
+    A-1 검증(CHARTBLOOM_VALIDATION_RESULTS.md): FVG 미동반 CHoCH 단독은 forward 음수였음.
+    """
+    res = feat.fvgs
+    if res is None:
+        return False
+    want = "bullish" if bias is TrendBias.BULLISH else "bearish"
+    for z in res.active_fvgs:
+        if z.direction == want and not z.mitigated and z.mitigation_type != "full":
+            return True
+    return False
+
+
 def _structure_vote(feat: _Features, direction: str) -> SignalContribution | None:
     ms = feat.structure
     if ms is None:
@@ -285,6 +306,19 @@ def _structure_vote(feat: _Features, direction: str) -> SignalContribution | Non
     if has_int_choch and has_int_bos:
         weight = _W_STRUCTURE_COMBO
         note = "internal CHoCH+BOS 콤보"
+    # A-1 게이트: 최신 구조정의 이벤트가 CHoCH(반전)인데 동일방향 FVG 미동반이면 가중 캡.
+    # 근거: 검증서 A-1 — FVG 없는 CHoCH 단독은 음의 기대값. (forward-OOS 재확인 전 기본 ON)
+    if _CHOCH_FVG_GATE:
+        defining = [e for e in ms.events if e.event_type.endswith(("CHoCH", "BOS"))]
+        if defining:
+            latest = max(defining, key=lambda e: e.bar_index)
+            if (
+                latest.event_type.endswith("CHoCH")
+                and not _has_supporting_fvg(feat, bias)
+                and weight > _W_STRUCTURE_NOFVG_CHOCH
+            ):
+                weight = _W_STRUCTURE_NOFVG_CHOCH
+                note += " · FVG 미동반 CHoCH 가중 캡(A-1)"
     d = _bias_dir(bias)
     aligned = 1 if d == _intended_sign(direction) else -1
     return SignalContribution(
