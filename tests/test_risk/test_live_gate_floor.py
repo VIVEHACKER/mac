@@ -50,15 +50,20 @@ def test_env_cannot_lower_gate_below_floor_without_ack(monkeypatch) -> None:
     assert policy.min_paper_oos_vs_backtest == 0.5
 
 
-def test_explicit_ack_allows_reduced_gates(monkeypatch) -> None:
+def test_explicit_ack_allows_reduced_drill_gates_only(monkeypatch) -> None:
     _live(monkeypatch)
+    monkeypatch.setenv("LIVE_MIN_PAPER_DAYS", "0")
+    monkeypatch.setenv("LIVE_MIN_SHADOW_DAYS", "0")
     monkeypatch.setenv("LIVE_MIN_PAPER_OOS_PERIODS", "0")
     monkeypatch.setenv("LIVE_MIN_PAPER_OOS_VS_BACKTEST", "0.0")
     monkeypatch.setenv("LIVE_ACCEPT_REDUCED_VALIDATION", "true")
     policy = load_live_trading_policy()
-    # A deliberate, auditable override is honoured.
-    assert policy.min_paper_oos_periods == 0
-    assert policy.min_paper_oos_vs_backtest == 0.0
+    # A deliberate, auditable override can relax rehearsal cadence only.
+    assert policy.min_paper_days == 0
+    assert policy.min_shadow_days == 0
+    # Forward-alpha evidence remains a hard live-money floor.
+    assert policy.min_paper_oos_periods == 6
+    assert policy.min_paper_oos_vs_backtest == 0.5
 
 
 def test_env_can_still_raise_gates(monkeypatch) -> None:

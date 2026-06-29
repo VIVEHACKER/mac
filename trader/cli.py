@@ -2867,6 +2867,36 @@ def _run_paper_exposure(args: argparse.Namespace) -> int:
     return 0 if check.passed else 2
 
 
+_ALPACA_CREDENTIAL_PLACEHOLDERS = {
+    "your_key_here",
+    "your_secret_here",
+    "your_secret_key_here",
+    "replace_me",
+    "changeme",
+    "change_me",
+}
+
+
+def _looks_like_placeholder_credential(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized in _ALPACA_CREDENTIAL_PLACEHOLDERS or (
+        normalized.startswith("your_") and normalized.endswith("_here")
+    )
+
+
+def _alpaca_credentials_issue(api_key: str, secret_key: str, *, purpose: str) -> str | None:
+    if not api_key or not secret_key:
+        return f"ALPACA_API_KEY and ALPACA_SECRET_KEY are required for {purpose}"
+    if _looks_like_placeholder_credential(api_key) or _looks_like_placeholder_credential(
+        secret_key
+    ):
+        return (
+            f"ALPACA_API_KEY and ALPACA_SECRET_KEY must be real Alpaca credentials for "
+            f"{purpose}; replace placeholder values"
+        )
+    return None
+
+
 def _run_live_price_ingest(args: argparse.Namespace) -> int:
     symbols = _parse_symbols(args.symbols)
     if args.source == "yahoo":
@@ -2889,11 +2919,11 @@ def _run_live_price_ingest(args: argparse.Namespace) -> int:
     else:
         api_key = os.getenv("ALPACA_API_KEY", "").strip()
         secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
-        if not api_key or not secret_key:
-            print(
-                "ALPACA_API_KEY and ALPACA_SECRET_KEY are required for live-price-ingest "
-                "(or use --source yahoo for the keyless EOD fallback)"
-            )
+        credential_issue = _alpaca_credentials_issue(
+            api_key, secret_key, purpose="live-price-ingest"
+        )
+        if credential_issue:
+            print(f"{credential_issue} (or use --source yahoo for the keyless EOD fallback)")
             return 2
         try:
             bars = fetch_alpaca_latest_stock_bars(
@@ -2949,8 +2979,11 @@ def _run_live_price_stream(args: argparse.Namespace) -> int:
     symbols = _parse_symbols(args.symbols)
     api_key = os.getenv("ALPACA_API_KEY", "").strip()
     secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
-    if not api_key or not secret_key:
-        print("ALPACA_API_KEY and ALPACA_SECRET_KEY are required for live-price-stream")
+    credential_issue = _alpaca_credentials_issue(
+        api_key, secret_key, purpose="live-price-stream"
+    )
+    if credential_issue:
+        print(credential_issue)
         return 2
     catalog = MarketDataCatalog(args.catalog_db)
 
@@ -3484,13 +3517,14 @@ def _live_broker_preflight_issues(policy: LiveTradingPolicy) -> list[DataQuality
         ]
     api_key = os.getenv("ALPACA_API_KEY", "").strip()
     secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
-    if not api_key or not secret_key:
+    credential_issue = _alpaca_credentials_issue(api_key, secret_key, purpose="broker preflight")
+    if credential_issue:
         return [
             DataQualityIssue(
                 "error",
                 "broker-preflight",
                 broker_name,
-                "ALPACA_API_KEY and ALPACA_SECRET_KEY are required for broker preflight",
+                credential_issue,
             )
         ]
     try:
@@ -3791,10 +3825,11 @@ def _live_broker_adapter(broker_name: str, args: argparse.Namespace) -> BrokerAd
     if normalized in {"alpaca-paper", "alpaca-live"}:
         api_key = os.getenv("ALPACA_API_KEY", "").strip()
         secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
-        if not api_key or not secret_key:
-            raise ValueError(
-                "ALPACA_API_KEY and ALPACA_SECRET_KEY are required for Alpaca live-submit"
-            )
+        credential_issue = _alpaca_credentials_issue(
+            api_key, secret_key, purpose="Alpaca live-submit"
+        )
+        if credential_issue:
+            raise ValueError(credential_issue)
         return AlpacaBrokerAdapter(api_key, secret_key, paper=normalized == "alpaca-paper")
     raise ValueError(f"Unsupported LIVE_BROKER: {broker_name}")
 

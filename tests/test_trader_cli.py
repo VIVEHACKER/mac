@@ -870,7 +870,7 @@ def test_live_readiness_requires_paper_oos_closed_periods_for_live_broker(
 
     captured = capsys.readouterr()
     assert result == 2
-    assert "paper OOS closed periods 0 < 2" in captured.out
+    assert "paper OOS closed periods 0 < 6" in captured.out
 
 
 def test_live_readiness_accepts_paper_oos_closed_periods_for_live_broker(
@@ -887,11 +887,23 @@ def test_live_readiness_accepts_paper_oos_closed_periods_for_live_broker(
     _write_paper_oos_ledger(
         paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
         strategy_id="approved-live",
-        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+        rebal_dates=[
+            "2025-11-01",
+            "2025-12-01",
+            "2026-01-01",
+            "2026-02-01",
+            "2026-03-01",
+            "2026-04-01",
+            "2026-05-01",
+        ],
     )
     _write_paper_oos_prices(
         paper_oos_prices,
         rows=[
+            ("2025-12-01", 101.0, 100.0),
+            ("2026-01-01", 101.0, 100.0),
+            ("2026-02-01", 101.0, 100.0),
+            ("2026-03-01", 101.0, 100.0),
             ("2026-04-01", 101.0, 100.0),
             ("2026-05-01", 101.0, 100.0),
         ],
@@ -932,7 +944,7 @@ def test_live_readiness_accepts_paper_oos_closed_periods_for_live_broker(
     assert result == 0
     assert "Ready | yes" in captured.out
     assert "Operational Confidence | 100%" in captured.out
-    assert "Required Paper OOS Periods | 2" in captured.out
+    assert "Required Paper OOS Periods | 6" in captured.out
 
 
 def test_live_readiness_confidence_scores_hard_blockers(
@@ -1026,6 +1038,59 @@ def test_live_readiness_broker_preflight_requires_alpaca_credentials(
     assert "Replace or enable ALPACA_API_KEY/ALPACA_SECRET_KEY" in captured.out
 
 
+def test_live_readiness_broker_preflight_rejects_placeholder_alpaca_credentials(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="alpaca-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    monkeypatch.setenv("ALPACA_API_KEY", "your_key_here")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "your_secret_here")
+
+    class _ShouldNotConnectAdapter:
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("placeholder credentials must not reach the broker SDK")
+
+    monkeypatch.setattr(cli, "AlpacaBrokerAdapter", _ShouldNotConnectAdapter)
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-broker-preflight",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "must be real Alpaca credentials" in captured.out
+    assert "placeholder values" in captured.out
+    assert "broker account/positions preflight failed" not in captured.out
+
+
 def test_live_readiness_broker_preflight_blocks_closed_market_and_low_buying_power(
     tmp_path,
     monkeypatch,
@@ -1107,7 +1172,7 @@ def test_live_readiness_ignores_future_paper_oos_rows_before_as_of(
 ) -> None:
     # Codex P2 (PIT): rebalances dated after --as-of were not knowable then and
     # must not satisfy the closed-period gate. Only 2026-03-01 <= as_of survives,
-    # so closed periods = 0 < 2 and readiness must block.
+    # so closed periods = 0 < the live floor and readiness must block.
     catalog_db = tmp_path / "catalog.duckdb"
     registry = tmp_path / "registry.jsonl"
     paper_oos_dir = tmp_path / "oos"
@@ -1157,7 +1222,7 @@ def test_live_readiness_ignores_future_paper_oos_rows_before_as_of(
 
     captured = capsys.readouterr()
     assert result == 2
-    assert "paper OOS closed periods 0 < 2" in captured.out
+    assert "paper OOS closed periods 0 < 6" in captured.out
 
 
 def test_live_readiness_requires_paper_oos_prices_for_live_broker(
@@ -1173,7 +1238,15 @@ def test_live_readiness_requires_paper_oos_prices_for_live_broker(
     _write_paper_oos_ledger(
         paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
         strategy_id="approved-live",
-        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+        rebal_dates=[
+            "2025-11-01",
+            "2025-12-01",
+            "2026-01-01",
+            "2026-02-01",
+            "2026-03-01",
+            "2026-04-01",
+            "2026-05-01",
+        ],
     )
     _set_live_env(
         monkeypatch,
@@ -1224,11 +1297,23 @@ def test_live_readiness_blocks_weak_paper_oos_ratio_for_live_broker(
     _write_paper_oos_ledger(
         paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
         strategy_id="approved-live",
-        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+        rebal_dates=[
+            "2025-11-01",
+            "2025-12-01",
+            "2026-01-01",
+            "2026-02-01",
+            "2026-03-01",
+            "2026-04-01",
+            "2026-05-01",
+        ],
     )
     _write_paper_oos_prices(
         paper_oos_prices,
         rows=[
+            ("2025-12-01", 100.0, 101.0),
+            ("2026-01-01", 100.0, 101.0),
+            ("2026-02-01", 100.0, 101.0),
+            ("2026-03-01", 100.0, 101.0),
             ("2026-04-01", 100.0, 101.0),
             ("2026-05-01", 100.0, 101.0),
         ],
@@ -1287,11 +1372,23 @@ def test_live_readiness_blocks_when_ratio_gate_required_but_uncomputable(
     _write_paper_oos_ledger(
         paper_oos_dir / "paper-oos-ledger-approved-live.jsonl",
         strategy_id="approved-live",
-        rebal_dates=["2026-03-01", "2026-04-01", "2026-05-01"],
+        rebal_dates=[
+            "2025-11-01",
+            "2025-12-01",
+            "2026-01-01",
+            "2026-02-01",
+            "2026-03-01",
+            "2026-04-01",
+            "2026-05-01",
+        ],
     )
     _write_paper_oos_prices(
         paper_oos_prices,
         rows=[
+            ("2025-12-01", 100.0, 101.0),
+            ("2026-01-01", 100.0, 101.0),
+            ("2026-02-01", 100.0, 101.0),
+            ("2026-03-01", 100.0, 101.0),
             ("2026-04-01", 100.0, 101.0),
             ("2026-05-01", 100.0, 101.0),
         ],
@@ -1628,10 +1725,9 @@ def _set_live_env(
     monkeypatch.setenv("LIVE_BROKER", broker)
     monkeypatch.setenv("LIVE_MAX_CAPITAL", "10000")
     monkeypatch.setenv("LIVE_POLICY_VERSION", "test-policy-v1")
-    # These readiness tests deliberately choose explicit gate thresholds (including reduced
-    # ones) to isolate a single gate, so acknowledge reduced validation — otherwise the live
-    # floor (Step 7) would clamp the chosen thresholds. The floor itself is covered separately
-    # in tests/test_risk/test_live_gate_floor.py.
+    # These readiness tests deliberately choose explicit drill-day thresholds to isolate a
+    # single gate, so acknowledge reduced drill validation. Paper-OOS periods/ratio remain
+    # hard live-money floors and are covered in tests/test_risk/test_live_gate_floor.py.
     monkeypatch.setenv("LIVE_ACCEPT_REDUCED_VALIDATION", "true")
     if min_paper_days is not None:
         monkeypatch.setenv("LIVE_MIN_PAPER_DAYS", min_paper_days)
@@ -2331,6 +2427,34 @@ def test_live_price_ingest_alpaca_failure_is_summarized(tmp_path, capsys, monkey
     assert result == 2
     assert "401 Authorization Required" in captured.out
     assert "<html>" not in captured.out
+
+
+def test_live_price_ingest_rejects_placeholder_alpaca_credentials(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    monkeypatch.setenv("ALPACA_API_KEY", "your_key_here")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "your_secret_here")
+
+    def fail_fetch(_symbols, *, api_key: str, secret_key: str, feed: str) -> list[PriceBar]:
+        raise AssertionError("placeholder credentials must not reach Alpaca fetch")
+
+    monkeypatch.setattr(cli, "fetch_alpaca_latest_stock_bars", fail_fetch)
+
+    result = cli.main(
+        [
+            "live-price-ingest",
+            "QQQ",
+            "--source",
+            "alpaca",
+            "--catalog-db",
+            str(tmp_path / "l.duckdb"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "must be real Alpaca credentials" in captured.out
+    assert "placeholder values" in captured.out
 
 
 def test_live_dry_run_submit_fake_is_armed_not_crashed(tmp_path, capsys) -> None:
