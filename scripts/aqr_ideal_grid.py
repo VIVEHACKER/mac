@@ -36,7 +36,7 @@ from scripts.aqr_ideal_walkforward import (  # noqa: E402
     run_window,
 )
 
-DEFAULT_PRICES = ROOT / "data" / "snapshots" / "prices-ideal-2026-06-01.csv"
+DEFAULT_PRICES = ROOT / "data" / "snapshots" / "prices-ideal-2026-06-27.csv"
 DEFAULT_SNAPSHOT = ROOT / "data" / "snapshots" / "fundamentals-2026-06-01-gp2.csv"
 DEFAULT_OUT = ROOT / "out" / "aqr-ideal-grid.md"
 

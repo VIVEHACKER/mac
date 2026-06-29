@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -95,7 +96,7 @@ def main() -> int:
     calendar = sorted({b.ts for bars in bars_by.values() for b in bars})
     cal_index = {d: i for i, d in enumerate(calendar)}
     # Monthly rebalance dates = last calendar date in each month.
-    by_month: dict[tuple[int, int], object] = {}
+    by_month: dict[tuple[int, int], date] = {}
     for d in calendar:
         by_month[(d.year, d.month)] = d
     rebal_dates = sorted(by_month.values())

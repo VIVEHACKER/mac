@@ -13,6 +13,8 @@ from trader.execution.adapters.alpaca import AlpacaBrokerAdapter
 from trader.execution.adapters.fake import FakeBrokerAdapter
 from trader.execution.broker import (
     AccountSnapshot,
+    BrokerClock,
+    BrokerOrder,
     BrokerTemporaryError,
     PositionSnapshot,
 )
@@ -164,6 +166,36 @@ def test_fake_broker_timeout_latches_halt(tmp_path) -> None:
 
     assert result[0].status == "uncertain"
     assert halt.current().halted
+
+
+def test_market_closed_blocks_live_batch_without_recording_intent(tmp_path) -> None:
+    store = JsonlOrderStore(tmp_path / "orders.jsonl")
+    halt = HaltStateStore(tmp_path / "halt.json")
+    intent = _intent().normalized()
+    broker = FakeBrokerAdapter(
+        account=AccountSnapshot("test", buying_power=10_000, cash=10_000, equity=10_000),
+        clock=BrokerClock(
+            is_open=False,
+            timestamp=datetime(2026, 5, 12, 12, tzinfo=UTC),
+            next_open=datetime(2026, 5, 12, 13, 30, tzinfo=UTC),
+        ),
+    )
+
+    result = process_order_intents(
+        [intent],
+        broker=broker,
+        store=store,
+        halt_store=halt,
+        policy=RiskPolicy(max_order_notional=1_000, max_symbol_weight=1.0),
+        marks={"QQQ": 100},
+        dry_run=False,
+        reference_equity=10_000.0,
+    )
+
+    assert result[0].status == "risk_block"
+    assert "market is closed" in result[0].reasons[0]
+    assert not store.has_intent(intent.client_order_id)
+    assert not halt.current().halted
 
 
 def test_runner_enforces_daily_order_count_from_order_log(tmp_path) -> None:
@@ -575,6 +607,14 @@ class _ScriptedAlpacaClient:
     def get_all_positions(self) -> list[object]:
         return []
 
+    def get_clock(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_open=True,
+            timestamp=datetime(2026, 5, 12, 14, 30, tzinfo=UTC),
+            next_open=datetime(2026, 5, 13, 13, 30, tzinfo=UTC),
+            next_close=datetime(2026, 5, 12, 20, tzinfo=UTC),
+        )
+
     def submit_order(self, request: object) -> object:
         raise self._submit_exc
 
@@ -591,10 +631,13 @@ class _FailingReadBroker:
     def list_positions(self) -> list[PositionSnapshot]:
         return []
 
-    def submit_order(self, intent: OrderIntent) -> object:
+    def get_clock(self) -> BrokerClock:
+        return BrokerClock(is_open=True, timestamp=datetime(2026, 5, 12, tzinfo=UTC))
+
+    def submit_order(self, intent: OrderIntent) -> BrokerOrder:
         raise AssertionError("submit_order must not be reached when reads fail")
 
-    def get_order(self, client_order_id: str) -> object:
+    def get_order(self, client_order_id: str) -> BrokerOrder | None:
         return None
 
 

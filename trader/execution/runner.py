@@ -189,6 +189,39 @@ def process_order_intents(
             )
         return blocked_reads
     halt = halt_store.current()
+    if not dry_run and not halt.halted:
+        try:
+            clock = broker.get_clock()
+        except BrokerError as exc:
+            reason = f"broker market clock unavailable: {exc}"
+            halt = halt_store.activate(reason, source="execution-runner")
+            _alert(
+                notifier,
+                level="critical",
+                event="broker_clock_failed",
+                message=reason,
+                dry_run=dry_run,
+            )
+        else:
+            if not clock.is_open:
+                next_open = clock.next_open.isoformat() if clock.next_open else "unknown"
+                reason = f"market is closed at {clock.timestamp.isoformat()}; next_open={next_open}"
+                blocked_closed: list[ExecutionResult] = []
+                for raw in intents:
+                    intent = raw.normalized()
+                    store.record_event(
+                        OrderEvent(
+                            event_type="market_closed_block",
+                            client_order_id=intent.client_order_id,
+                            ts=datetime.now(UTC),
+                            status="blocked",
+                            message=reason,
+                        )
+                    )
+                    blocked_closed.append(
+                        ExecutionResult(intent.client_order_id, "block", "risk_block", (reason,))
+                    )
+                return blocked_closed
     # Portfolio kill-switch — wired into the live loop (previously a dead, never-called function).
     # Latch a NEW halt when the account breaches the daily-loss or peak-drawdown latch, but NEVER
     # overwrite an existing halt (a prior manual/broker halt must survive, so clearing the

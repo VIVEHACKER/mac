@@ -14,6 +14,7 @@ functions, no I/O.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 
 from strategies._base import StrategySignal
@@ -23,7 +24,7 @@ EXTREME_HIGH = 90.0  # speculators crowded long → contrarian bearish
 EXTREME_LOW = 10.0  # speculators crowded short → contrarian bullish
 
 
-def cot_index(net_history: list[float], *, window: int = INDEX_WINDOW) -> float | None:
+def cot_index(net_history: Sequence[float], *, window: int = INDEX_WINDOW) -> float | None:
     """Where the latest net position sits in its trailing ``window`` range, 0–100.
 
     ``None`` when there is less than ``window`` of history. When the window is flat
@@ -40,7 +41,7 @@ def cot_index(net_history: list[float], *, window: int = INDEX_WINDOW) -> float 
 
 def cot_extreme_signal(
     as_of: date,
-    net_history: list[float],
+    net_history: Sequence[float],
     *,
     window: int = INDEX_WINDOW,
     high: float = EXTREME_HIGH,

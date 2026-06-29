@@ -5,7 +5,7 @@ re-downloading from yfinance each run (which drifts the ICs). The snapshot CSV i
 (large); only the manifest is tracked.
 
 Usage:
-    python scripts/snapshot_prices.py [NAME]   # default: prices-2026-06-01
+    python scripts/snapshot_prices.py [NAME]   # default: prices-2026-06-27
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ UNIVERSES = [
     ROOT / "data" / "universes" / "megacap-gp.csv",
 ]
 PRICE_START = "2011-01-01"
-PRICE_END = "2026-06-01"
+PRICE_END = "2026-06-27"
 
 
 def load_symbols() -> list[str]:
@@ -43,7 +43,7 @@ def load_symbols() -> list[str]:
 
 
 def main() -> None:
-    name = sys.argv[1] if len(sys.argv) > 1 else "prices-2026-06-01"
+    name = sys.argv[1] if len(sys.argv) > 1 else "prices-2026-06-27"
     symbols = load_symbols()
     print(f"Downloading {len(symbols)} symbols ({PRICE_START}..{PRICE_END})...")
     raw = yf.download(symbols, start=PRICE_START, end=PRICE_END, auto_adjust=True, progress=False)

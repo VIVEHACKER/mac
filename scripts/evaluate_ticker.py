@@ -30,7 +30,7 @@ from valuation.recommendation import (  # noqa: E402
     load_validated_strategy,
 )
 
-DEFAULT_PRICES = ROOT / "data" / "snapshots" / "prices-ideal-2026-06-01.csv"
+DEFAULT_PRICES = ROOT / "data" / "snapshots" / "prices-ideal-2026-06-27.csv"
 DEFAULT_FUNDAMENTALS = ROOT / "data" / "snapshots" / "fundamentals-2026-06-01-gp.csv"
 
 

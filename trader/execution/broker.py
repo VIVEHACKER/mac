@@ -54,6 +54,14 @@ class PositionSnapshot:
 
 
 @dataclass(frozen=True)
+class BrokerClock:
+    is_open: bool
+    timestamp: datetime
+    next_open: datetime | None = None
+    next_close: datetime | None = None
+
+
+@dataclass(frozen=True)
 class BrokerOrder:
     broker_order_id: str
     client_order_id: str
@@ -76,6 +84,8 @@ class BrokerAdapter(Protocol):
     def get_account(self) -> AccountSnapshot: ...
 
     def list_positions(self) -> list[PositionSnapshot]: ...
+
+    def get_clock(self) -> BrokerClock: ...
 
     def submit_order(self, intent: OrderIntent) -> BrokerOrder: ...
 

@@ -65,6 +65,15 @@ def _account() -> SimpleNamespace:
     )
 
 
+def _clock(is_open: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        is_open=is_open,
+        timestamp=datetime(2026, 5, 12, 14, 30, tzinfo=UTC),
+        next_open=datetime(2026, 5, 13, 13, 30, tzinfo=UTC),
+        next_close=datetime(2026, 5, 12, 20, 0, tzinfo=UTC),
+    )
+
+
 def _intent() -> OrderIntent:
     return OrderIntent(
         strategy="approved-etf",
@@ -88,10 +97,12 @@ class _FakeClient:
         self.account_effect: object = None
         self.positions_effect: object = None
         self.get_order_effect: object = None
+        self.clock_effect: object = _clock()
         self.submit_calls = 0
         self.account_calls = 0
         self.positions_calls = 0
         self.get_order_calls = 0
+        self.clock_calls = 0
 
     @staticmethod
     def _resolve(effect: object, attempt: int) -> object:
@@ -117,6 +128,10 @@ class _FakeClient:
         self.get_order_calls += 1
         return self._resolve(self.get_order_effect, self.get_order_calls)
 
+    def get_clock(self) -> object:
+        self.clock_calls += 1
+        return self._resolve(self.clock_effect, self.clock_calls)
+
 
 def _adapter(client: _FakeClient, **kwargs: object) -> AlpacaBrokerAdapter:
     kwargs.setdefault("sleep", lambda _seconds: None)  # no real backoff in tests
@@ -132,6 +147,18 @@ def test_submit_4xx_is_rejected_and_not_retried() -> None:
     with pytest.raises(BrokerRejectedError):
         _adapter(client).submit_order(_intent())
     assert client.submit_calls == 1  # a definite rejection is never retried
+
+
+def test_get_clock_maps_market_state() -> None:
+    client = _FakeClient()
+    client.clock_effect = _clock(is_open=False)
+
+    clock = _adapter(client).get_clock()
+
+    assert not clock.is_open
+    assert clock.timestamp == datetime(2026, 5, 12, 14, 30, tzinfo=UTC)
+    assert clock.next_close == datetime(2026, 5, 12, 20, 0, tzinfo=UTC)
+    assert client.clock_calls == 1
 
 
 def test_submit_5xx_is_temporary_and_not_retried() -> None:
@@ -158,7 +185,12 @@ def test_submit_network_error_is_temporary() -> None:
 
 def test_submit_timeout_is_temporary() -> None:
     client = _FakeClient()
-    client.submit_effect = lambda _attempt: (time.sleep(0.5), _order())[1]
+
+    def slow_order(_attempt: int) -> object:
+        time.sleep(0.5)
+        return _order()
+
+    client.submit_effect = slow_order
     with pytest.raises(BrokerTemporaryError, match="timed out"):
         _adapter(client, timeout_s=0.05).submit_order(_intent())
 

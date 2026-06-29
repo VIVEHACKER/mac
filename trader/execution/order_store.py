@@ -6,8 +6,20 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from trader.execution.broker import BrokerOrder
+from trader.execution.broker import TERMINAL_ORDER_STATUSES, BrokerOrder
 from trader.execution.intents import OrderIntent
+
+# Broker-order snapshot events (submit + in-batch poll + cross-cycle reconcile recovery).
+_BROKER_ORDER_EVENTS = ("broker_submit", "broker_poll", "broker_reconcile")
+# Non-broker events that cleanly resolve an intent without it ever being live at the broker
+# (dry_run/risk_block = never sent; broker_reject = broker said no; broker_reconcile_absent =
+# recovery confirmed the broker has no such order).
+_RESOLVED_NONBROKER_EVENTS = (
+    "dry_run",
+    "risk_block",
+    "broker_reject",
+    "broker_reconcile_absent",
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +77,38 @@ class JsonlOrderStore:
             for row in self.rows()
         )
 
+    def unresolved_intent_ids(self) -> list[str]:
+        """Client order ids that were recorded (an intent exists) but never reached a recorded
+        terminal resolution: no terminal broker order, and no clean dry_run/risk_block/
+        broker_reject event. These may be live at the broker (process crashed between
+        submit_order and the broker_submit record, or an uncertain submit) and must be
+        resolved via get_order before new orders are sent. First-seen order is preserved."""
+        intents: list[str] = []
+        seen: set[str] = set()
+        resolved: set[str] = set()
+        for row in self.rows():
+            cid = str(row.get("client_order_id") or "")
+            if not cid:
+                continue
+            record_type = row.get("record_type")
+            if record_type == "intent":
+                if cid not in seen:
+                    seen.add(cid)
+                    intents.append(cid)
+                continue
+            if record_type != "event":
+                continue
+            payload = row.get("payload") or {}
+            event_type = payload.get("event_type")
+            # An intent is resolved by a clean non-broker event (never sent / rejected / absent)
+            # or by a terminal broker-order snapshot. Anything else leaves it in-flight.
+            if event_type in _RESOLVED_NONBROKER_EVENTS or (
+                event_type in _BROKER_ORDER_EVENTS
+                and str(payload.get("status", "")).lower() in TERMINAL_ORDER_STATUSES
+            ):
+                resolved.add(cid)
+        return [cid for cid in intents if cid not in resolved]
+
     def latest_status(self, client_order_id: str) -> str | None:
         status: str | None = None
         for row in self.rows():
@@ -84,7 +128,7 @@ class JsonlOrderStore:
             if row.get("record_type") != "event":
                 continue
             event = row.get("payload") or {}
-            if event.get("event_type") not in ("broker_submit", "broker_poll"):
+            if event.get("event_type") not in _BROKER_ORDER_EVENTS:
                 continue
             order = event.get("payload") or {}
             cid = str(order.get("client_order_id") or row.get("client_order_id") or "")

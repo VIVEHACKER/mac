@@ -41,11 +41,10 @@ class LiveTradingPolicy:
 def load_live_trading_policy() -> LiveTradingPolicy:
     broker = os.getenv("LIVE_BROKER", "").strip()
     live_broker = broker.lower() == "alpaca-live"
-    # The forward-validation gates can be RAISED by env (stricter) but NOT silently lowered
-    # below their safe live floor by a single .env toggle (e.g. =0). Weakening requires the
-    # deliberate, auditable LIVE_ACCEPT_REDUCED_VALIDATION=true acknowledgement — otherwise the
-    # floor holds (readiness-audit overlooked risk: "one .env toggle nukes forward validation").
-    allow_reduced = _env_bool("LIVE_ACCEPT_REDUCED_VALIDATION")
+    # Drill-day gates may be reduced only with an explicit acknowledgement. The forward-alpha
+    # evidence gates (paper-OOS periods and live/backtest ratio) stay hard floors for live money:
+    # a single env toggle must not erase the only out-of-sample evidence requirement.
+    allow_reduced_drill_gates = _env_bool("LIVE_ACCEPT_REDUCED_VALIDATION")
     return LiveTradingPolicy(
         enabled=_env_bool("LIVE_TRADING_ENABLED"),
         risk_acknowledged=_env_bool("LIVE_TRADING_ACK_RISK"),
@@ -54,13 +53,17 @@ def load_live_trading_policy() -> LiveTradingPolicy:
         broker=broker,
         max_capital=float(os.getenv("LIVE_MAX_CAPITAL", "0") or "0"),
         policy_version=os.getenv("LIVE_POLICY_VERSION", "").strip(),
-        min_paper_days=_gate_int("LIVE_MIN_PAPER_DAYS", 30 if live_broker else 0, allow_reduced),
-        min_shadow_days=_gate_int("LIVE_MIN_SHADOW_DAYS", 10 if live_broker else 0, allow_reduced),
+        min_paper_days=_gate_int(
+            "LIVE_MIN_PAPER_DAYS", 30 if live_broker else 0, allow_reduced_drill_gates
+        ),
+        min_shadow_days=_gate_int(
+            "LIVE_MIN_SHADOW_DAYS", 10 if live_broker else 0, allow_reduced_drill_gates
+        ),
         min_paper_oos_periods=_gate_int(
-            "LIVE_MIN_PAPER_OOS_PERIODS", 6 if live_broker else 0, allow_reduced
+            "LIVE_MIN_PAPER_OOS_PERIODS", 6 if live_broker else 0, allow_reduced=False
         ),
         min_paper_oos_vs_backtest=_gate_float(
-            "LIVE_MIN_PAPER_OOS_VS_BACKTEST", 0.5 if live_broker else 0.0, allow_reduced
+            "LIVE_MIN_PAPER_OOS_VS_BACKTEST", 0.5 if live_broker else 0.0, allow_reduced=False
         ),
         paper_oos_backtest_excess=_env_float("LIVE_PAPER_OOS_BACKTEST_EXCESS", 0.08),
     )
