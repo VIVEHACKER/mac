@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -36,7 +38,18 @@ class OrderEvent:
 class JsonlOrderStore:
     def __init__(self, path: Path | str):
         self.path = Path(path)
+        # Durably create the directory chain: a newly-created directory's entry is not crash-safe
+        # until its OWN parent is fsynced (POSIX), so a fresh deep path could otherwise be lost
+        # whole after the first append. Record which ancestors are missing, create them, then
+        # fsync each new directory's parent (shallowest first) so the chain survives a crash.
+        missing: list[Path] = []
+        probe = self.path.parent
+        while not probe.exists():
+            missing.append(probe)
+            probe = probe.parent
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in reversed(missing):
+            _fsync_dir(directory.parent)
 
     def record_intent(self, intent: OrderIntent) -> None:
         self._append(
@@ -169,8 +182,40 @@ class JsonlOrderStore:
         return rows
 
     def _append(self, row: dict[str, Any]) -> None:
+        # Durable append: flush the Python buffer AND fsync the OS page cache to disk before
+        # returning, so a crash right after a submit cannot lose the just-recorded order/intent
+        # (storage-layer form of the "ledger lies" risk). Order writes are infrequent, so the
+        # per-append fsync cost is negligible.
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Always fsync the parent directory. On first creation this persists the file's new
+        # directory entry (the file data alone is not crash-safe until the entry is durable on
+        # POSIX); on later appends it is a cheap redundant sync. Doing it unconditionally — rather
+        # than gating on "did the file exist?" — also covers a retry after a first-create whose
+        # directory fsync had failed, where the file is on disk but its entry was never persisted.
+        _fsync_dir(self.path.parent)
+
+
+def _fsync_dir(path: Path) -> None:
+    """Fsync a directory so a child entry (file or subdir) it just gained becomes crash-durable.
+
+    Opening a directory as a fd and fsyncing it is a POSIX concept, so non-POSIX platforms (e.g.
+    Windows) are skipped wholesale. On POSIX every failure fails closed — a real EACCES/EIO/ENOSPC
+    means the entry was NOT made durable, and silently returning success would be a durability lie
+    — EXCEPT EINVAL on the fsync, which just means the filesystem does not support directory fsync.
+    """
+    if os.name != "posix":
+        return
+    fd = os.open(path, os.O_RDONLY)  # any failure propagates (fail-closed)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno != errno.EINVAL:  # EINVAL = filesystem lacks directory fsync (benign)
+            raise
+    finally:
+        os.close(fd)
 
 
 def _dataclass_payload(value: Any) -> dict[str, Any]:
