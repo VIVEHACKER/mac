@@ -14,6 +14,11 @@ class RiskPolicy:
     max_order_notional: float = 1_000.0
     max_daily_new_notional: float = 2_000.0
     max_symbol_weight: float = 0.25
+    # Aggregate weight cap per sector (|projected market value in sector| / equity). Default 1.0 =
+    # off, so existing callers are unaffected; the live policy sets a real cap and supplies a
+    # symbol->sector map. Without that map the pre-trade gate cannot see sectors (audit P1: the
+    # submission path was structurally sector-blind — only the exposure monitor knew sectors).
+    max_sector_weight: float = 1.0
     max_gross_exposure: float = 1.0
     min_cash_fraction: float = 0.05
     max_limit_deviation: float = 0.03
