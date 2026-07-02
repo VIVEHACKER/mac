@@ -90,3 +90,12 @@ class BrokerAdapter(Protocol):
     def submit_order(self, intent: OrderIntent) -> BrokerOrder: ...
 
     def get_order(self, client_order_id: str) -> BrokerOrder | None: ...
+
+    def cancel_order(self, client_order_id: str) -> BrokerOrder | None:
+        """Cancel a WORKING order and return its refreshed snapshot.
+
+        Contract (live-readiness P2 — recall a limit order the market ran away from): a
+        terminal order is a benign no-op (returned as-is), an unknown order returns ``None``,
+        and the cancel-vs-fill race resolves to the terminal order — never an error. An
+        uncertain broker outcome raises ``BrokerTemporaryError``."""
+        ...

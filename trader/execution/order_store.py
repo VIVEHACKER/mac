@@ -11,8 +11,10 @@ from typing import Any
 from trader.execution.broker import TERMINAL_ORDER_STATUSES, BrokerOrder
 from trader.execution.intents import OrderIntent
 
-# Broker-order snapshot events (submit + in-batch poll + cross-cycle reconcile recovery).
-_BROKER_ORDER_EVENTS = ("broker_submit", "broker_poll", "broker_reconcile")
+# Broker-order snapshot events (submit + in-batch poll + cross-cycle reconcile recovery +
+# operator cancel). A cancel snapshot must join the baseline: it resolves the intent AND its
+# filled_qty (a partial fill before the cancel) still counts toward reconciled positions.
+_BROKER_ORDER_EVENTS = ("broker_submit", "broker_poll", "broker_reconcile", "broker_cancel")
 # Non-broker events that cleanly resolve an intent without it ever being live at the broker
 # (dry_run/risk_block = never sent; broker_reject = broker said no; broker_reconcile_absent =
 # recovery confirmed the broker has no such order).

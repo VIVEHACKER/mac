@@ -179,6 +179,7 @@ CORE_COMMANDS = {
     "live-halt",
     "live-drill",
     "live-reconcile",
+    "live-cancel",
     "live-price-ingest",
     "live-price-stream",
     "live-dry-run",
@@ -265,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_live_drill(parsed)
     if parsed.command == "live-reconcile":
         return _run_live_reconcile(parsed)
+    if parsed.command == "live-cancel":
+        return _run_live_cancel(parsed)
     if parsed.command == "live-price-ingest":
         return _run_live_price_ingest(parsed)
     if parsed.command == "live-price-stream":
@@ -889,6 +892,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Report mismatches without activating the persistent halt latch.",
     )
+
+    live_cancel = sub.add_parser(
+        "live-cancel",
+        help="Cancel a working broker order by client_order_id and record it in the ledger. "
+        "Deliberately NOT gated by live-readiness: canceling is risk-reducing and must stay "
+        "available even while halted.",
+    )
+    live_cancel.add_argument("client_order_id")
+    live_cancel.add_argument(
+        "--broker",
+        choices=["fake", "alpaca-paper", "alpaca-live", "manual-paper", "manual-live"],
+        default=None,
+    )
+    live_cancel.add_argument(
+        "--fake-position",
+        help="Fake broker positions for drills, e.g. QQQ:us:1:100.",
+    )
+    live_cancel.add_argument("--cash", type=float, default=100_000.0)
+    live_cancel.add_argument("--equity", type=float, default=100_000.0)
+    live_cancel.add_argument("--buying-power", type=float, default=100_000.0)
+    live_cancel.add_argument("--order-log", type=Path, default=DEFAULT_ORDER_LOG)
 
     live_price_ingest = sub.add_parser(
         "live-price-ingest",
@@ -2770,7 +2794,81 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
                 f"{issue.actual_qty:g} | {issue.message} |"
             )
     print("\n".join(lines))
-    return 0 if not issues else 2
+    # Fail on a position mismatch OR an unresolved in-flight order — both mean the reconcile
+    # baseline cannot be trusted, so callers/cron must not read exit 0 as "clean" (live-readiness P1).
+    return 0 if (not issues and not unresolved) else 2
+
+
+def _run_live_cancel(args: argparse.Namespace) -> int:
+    """Cancel a working order by client_order_id and record the outcome in the ledger.
+
+    Deliberately NOT gated by live-readiness: canceling is risk-REDUCING and must remain
+    available even while a halt is latched (a halt is exactly when an operator needs to pull
+    stray working orders). Exit codes mirror live-submit: 0 ok/no-op, 1 rejected, 2 not
+    found / config error, 3 uncertain (re-run or reconcile once the broker is reachable).
+    """
+    # Local imports keep this handler self-contained (shared import block is contended).
+    from trader.execution.broker import BrokerRejectedError, BrokerTemporaryError
+    from trader.execution.order_store import OrderEvent
+
+    policy = load_live_trading_policy()
+    broker_name = args.broker or policy.broker
+    try:
+        broker = _live_broker_adapter(broker_name, args)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    store = JsonlOrderStore(args.order_log)
+    cancel = getattr(broker, "cancel_order", None)
+    if cancel is None:
+        # e.g. the manual ticket adapter — orders there are placed by hand, so recall them by
+        # hand too; refuse loudly instead of crashing on a structurally-typed missing method.
+        print(f"broker {broker_name} does not support order cancel; cancel it at the broker.")
+        return 2
+    try:
+        order = cancel(args.client_order_id)
+    except BrokerTemporaryError as exc:
+        # State unknown — log the attempt (NOT as a resolving broker-order event) and tell the
+        # operator how to converge: retry, or reconcile-in-flight once the broker answers.
+        store.record_event(
+            OrderEvent(
+                event_type="broker_cancel_uncertain",
+                client_order_id=args.client_order_id,
+                ts=datetime.now(UTC),
+                status="uncertain",
+                message=str(exc),
+            )
+        )
+        print(
+            f"cancel state uncertain for {args.client_order_id}: {exc}\n"
+            "Re-run live-cancel, or `trader live-reconcile --from-store` once the broker "
+            "is reachable."
+        )
+        return 3
+    except BrokerRejectedError as exc:
+        print(f"broker rejected cancel for {args.client_order_id}: {exc}")
+        return 1
+    if order is None:
+        print(
+            f"order {args.client_order_id} not found at broker {broker_name} — nothing to cancel."
+        )
+        return 2
+    store.record_broker_order("broker_cancel", order)
+    lines = [
+        "# Live Cancel",
+        "",
+        "| Field | Value |",
+        "|---|---:|",
+        f"| Broker | {broker_name} |",
+        f"| Client Order ID | {order.client_order_id} |",
+        f"| Symbol | {order.symbol} |",
+        f"| Status | {order.status} |",
+        f"| Filled Qty | {order.filled_qty:g} |",
+    ]
+    if order.status.lower() != "canceled":
+        lines.append(f"| Note | order already terminal ({order.status}); nothing was recalled |")
+    print("\n".join(lines))
+    return 0
 
 
 def _run_paper_exposure(args: argparse.Namespace) -> int:

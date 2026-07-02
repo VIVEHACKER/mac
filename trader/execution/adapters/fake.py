@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -30,7 +31,9 @@ class FakeBrokerAdapter:
             cash=100_000.0,
             equity=100_000.0,
         )
-        self.positions = {(item.symbol.upper(), item.market.lower()): item for item in positions or []}
+        self.positions = {
+            (item.symbol.upper(), item.market.lower()): item for item in positions or []
+        }
         self.mode = mode
         self.fill_ratio = fill_ratio
         self.clock = clock or BrokerClock(is_open=True, timestamp=datetime.now(UTC))
@@ -71,3 +74,15 @@ class FakeBrokerAdapter:
 
     def get_order(self, client_order_id: str) -> BrokerOrder | None:
         return self.orders.get(client_order_id)
+
+    def cancel_order(self, client_order_id: str) -> BrokerOrder | None:
+        """Cancel contract mirror of the live adapters: unknown -> None, terminal -> no-op
+        (returned unchanged), working -> canceled snapshot with the partial fill preserved."""
+        order = self.orders.get(client_order_id)
+        if order is None:
+            return None
+        if order.terminal:
+            return order
+        canceled = replace(order, status="canceled")
+        self.orders[client_order_id] = canceled
+        return canceled
