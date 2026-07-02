@@ -1034,6 +1034,13 @@ def build_parser() -> argparse.ArgumentParser:
     live_submit.add_argument("--paper-oos-prices", type=Path, default=_default_paper_oos_prices())
     live_submit.add_argument("--registry", type=Path, default=DEFAULT_RESEARCH_REGISTRY)
     live_submit.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
+    live_submit.add_argument(
+        "--sectors-csv",
+        type=Path,
+        default=None,
+        help="symbol->sector map for the pre-trade sector cap (default: newest "
+        "data/sectors/*-sectors.csv; a real --submit blocks if none is found).",
+    )
 
     model_gate = sub.add_parser(
         "model-gate",
@@ -3279,6 +3286,44 @@ def _run_live_submit(args: argparse.Namespace) -> int:
                 f"--broker {args.broker} does not match LIVE_BROKER={policy.broker}",
             )
         )
+    # Symbol->sector map for the pre-trade sector cap (audit P1 activation). Explicitly named
+    # but missing = config error; auto-discovery empty = warning in shadow (cap inactive,
+    # surfaced in the output) but a BLOCKING issue for a real --submit — real money must not
+    # trade sector-blind silently.
+    from risk.sectors import load_sector_map  # local: shared import block is contended
+
+    sectors: dict[str, str] | None = None
+    sectors_label = "missing (sector cap inactive)"
+    if args.sectors_csv is not None:
+        if args.sectors_csv.exists():
+            sectors = load_sector_map(args.sectors_csv)
+            sectors_label = str(args.sectors_csv)
+        else:
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-submit",
+                    "sectors",
+                    f"--sectors-csv {args.sectors_csv} does not exist",
+                )
+            )
+    else:
+        auto_map = _latest_sector_map()
+        if auto_map is not None:
+            sectors = load_sector_map(auto_map)
+            sectors_label = str(auto_map)
+        elif args.submit:
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-submit",
+                    "sectors",
+                    "no symbol->sector map found under data/sectors/; run "
+                    "`python scripts/fetch_sectors.py --universe-csv "
+                    "data/universes/sp100-pit-2008.csv` or pass --sectors-csv "
+                    "(a real submission must not trade sector-blind)",
+                )
+            )
     if issues:
         print(
             _format_live_readiness(
@@ -3332,6 +3377,8 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         # Poll an async accepted/filled_qty=0 submit to its real terminal fill instead of
         # leaving a stale non-terminal snapshot in the ledger (live-readiness P0 Gap A).
         fill_poll=FillPoll(),
+        # Sector cap only fires with a map; None = inactive (surfaced in the table below).
+        sectors=sectors,
     )
     result = results[0]
     lines = [
@@ -3348,6 +3395,7 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         f"| Quantity | {args.qty:g} |",
         f"| Mark | {args.price:,.2f} |",
         f"| Catalog Mark | {_number_or_na(catalog_mark)} |",
+        f"| Sector Map | {sectors_label} |",
         f"| Action | {result.action} |",
         f"| Status | {result.status} |",
     ]
@@ -3891,6 +3939,17 @@ def _number_or_na(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:,.4f}"
+
+
+def _latest_sector_map() -> Path | None:
+    """Newest ``data/sectors/*-sectors.csv`` (fetch_sectors output) or None. The sector cap
+    only fires with a map, so discovery failure surfaces as a warning/blocker at the caller —
+    never a silent skip."""
+    sector_dir = ROOT / "data" / "sectors"
+    candidates = sorted(
+        sector_dir.glob("*-sectors.csv"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    return candidates[0] if candidates else None
 
 
 def _latest_catalog_mark(catalog: MarketDataCatalog, symbol: str, market: str) -> float | None:

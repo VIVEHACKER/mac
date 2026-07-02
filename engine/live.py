@@ -79,11 +79,25 @@ def live_risk_policy(policy: LiveTradingPolicy | None = None) -> RiskPolicy:
         max_order_notional=max_capital * 0.25,
         max_daily_new_notional=max_capital,
         max_symbol_weight=0.35,
+        # Sector concentration cap for the pre-trade gate (audit P1 activation). Matches the
+        # single-name cap by default so one sector cannot exceed what one name may hold plus
+        # crowding; the gate itself only fires when live-submit supplies a symbol->sector map.
+        max_sector_weight=_sector_weight_env(),
         max_gross_exposure=1.0,
         min_cash_fraction=0.02,
         max_limit_deviation=_env_float("LIVE_MAX_LIMIT_DEVIATION", 0.03),
         allowed_order_types=allowed_order_types,
     )
+
+
+def _sector_weight_env() -> float:
+    """``LIVE_MAX_SECTOR_WEIGHT`` (default 0.35). A nonsense value must not silently disable
+    the cap: non-finite or <=0 falls back to the default; >1 clamps to 1.0, which is the one
+    EXPLICIT way to turn the sector gate off (RiskPolicy treats 1.0 as inactive)."""
+    value = _env_float("LIVE_MAX_SECTOR_WEIGHT", 0.35)
+    if not math.isfinite(value) or value <= 0:
+        return 0.35
+    return min(value, 1.0)
 
 
 def assert_live_trading_enabled(policy: LiveTradingPolicy | None = None) -> None:
