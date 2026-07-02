@@ -180,6 +180,7 @@ CORE_COMMANDS = {
     "live-drill",
     "live-reconcile",
     "live-cancel",
+    "rebalance-plan",
     "live-price-ingest",
     "live-price-stream",
     "live-dry-run",
@@ -268,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_live_reconcile(parsed)
     if parsed.command == "live-cancel":
         return _run_live_cancel(parsed)
+    if parsed.command == "rebalance-plan":
+        return _run_rebalance_plan(parsed)
     if parsed.command == "live-price-ingest":
         return _run_live_price_ingest(parsed)
     if parsed.command == "live-price-stream":
@@ -913,6 +916,22 @@ def build_parser() -> argparse.ArgumentParser:
     live_cancel.add_argument("--equity", type=float, default=100_000.0)
     live_cancel.add_argument("--buying-power", type=float, default=100_000.0)
     live_cancel.add_argument("--order-log", type=Path, default=DEFAULT_ORDER_LOG)
+
+    rebalance_plan = sub.add_parser(
+        "rebalance-plan",
+        help="Generate the delta rebalance order plan (sells first, live-gate pre-validated) "
+        "as reviewable JSON + submit commands — the semi-auto operating surface.",
+    )
+    rebalance_plan.add_argument("--top-n", type=int, default=None)
+    rebalance_plan.add_argument("--strategy-id", default=None)
+    rebalance_plan.add_argument("--capital", type=float, default=None)
+    rebalance_plan.add_argument("--snapshot", type=Path, default=None)
+    rebalance_plan.add_argument("--allow-live-fundamentals", action="store_true")
+    rebalance_plan.add_argument(
+        "--no-record-oos",
+        action="store_true",
+        help="Skip appending this rebalance to the forward-OOS ledger.",
+    )
 
     live_price_ingest = sub.add_parser(
         "live-price-ingest",
@@ -2876,6 +2895,27 @@ def _run_live_cancel(args: argparse.Namespace) -> int:
         lines.append(f"| Note | order already terminal ({order.status}); nothing was recalled |")
     print("\n".join(lines))
     return 0
+
+
+def _run_rebalance_plan(args: argparse.Namespace) -> int:
+    """Thin forwarder to the validated paper_drill generator (single implementation of the
+    ranking/sizing/delta-plan pipeline — the CLI must not grow a second one)."""
+    import scripts.paper_drill as paper_drill  # lazy: keeps yfinance/pandas off other paths
+
+    argv: list[str] = []
+    if args.top_n is not None:
+        argv += ["--top-n", str(args.top_n)]
+    if args.strategy_id:
+        argv += ["--strategy-id", args.strategy_id]
+    if args.capital is not None:
+        argv += ["--capital", str(args.capital)]
+    if args.snapshot is not None:
+        argv += ["--snapshot", str(args.snapshot)]
+    if args.allow_live_fundamentals:
+        argv += ["--allow-live-fundamentals"]
+    if args.no_record_oos:
+        argv += ["--no-record-oos"]
+    return int(paper_drill.main(argv) or 0)
 
 
 def _run_paper_exposure(args: argparse.Namespace) -> int:

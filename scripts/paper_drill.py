@@ -241,7 +241,149 @@ def pit_lookup(records: list, as_of_dt: datetime):
     return cand
 
 
-def main():
+def build_delta_plan(
+    *,
+    strategy_id: str,
+    rebalance_key: str,
+    weights: dict[str, float],
+    marks: dict[str, float],
+    prior_positions: dict[str, float],
+    nav: float,
+    target_capital: float,
+    sectors: dict[str, str] | None = None,
+    work_dir: Path | None = None,
+    generated_at: datetime | None = None,
+) -> dict:
+    """Delta rebalance plan, pre-validated by the live gates (semi-auto operating model).
+
+    Routes the validated weights through the SAME decision->order layer live uses
+    (``targets_from_weights`` + ``plan_rebalance``: target-vs-prior delta, exits for dropped
+    names, sells before buys) and dry-runs every intent through the SAME gate live uses
+    (``process_order_intents`` with ``live_risk_policy()`` and the sector map). The operator
+    approves a plan the live gates have already seen — a buy-only list re-bought the whole
+    book from month 2 (double-buy) and could never sell a dropped name.
+    """
+    from dataclasses import replace as _dc_replace
+    from datetime import UTC
+
+    from engine.live import live_risk_policy, load_live_trading_policy
+    from risk.halt_state import HaltStateStore
+    from trader.execution.adapters.fake import FakeBrokerAdapter
+    from trader.execution.broker import AccountSnapshot, PositionSnapshot
+    from trader.execution.order_store import JsonlOrderStore
+    from trader.execution.rebalance import plan_rebalance, targets_from_weights
+    from trader.execution.runner import process_order_intents
+
+    generated = generated_at or datetime.now(UTC)
+    targets = targets_from_weights(weights, marks, target_capital)
+    plan = plan_rebalance(
+        strategy=strategy_id,
+        rebalance_key=rebalance_key,
+        targets=targets,
+        current_qty=prior_positions,
+        marks=marks,
+        generated_at=generated,
+    )
+    # plan_rebalance emits market intents; the live policy only allows LIMIT orders, priced at
+    # the mark (same convention as live-submit's default). Convert so the preview drills the
+    # exact order the operator will submit — a market intent would be gate-blocked anyway.
+    intents = [
+        _dc_replace(
+            intent,
+            order_type="limit",
+            limit_price=float(marks.get(intent.symbol.upper()) or 0.0) or None,
+            client_order_id="",  # re-derive: the id hashes order_type/limit_price
+        ).normalized()
+        for intent in plan.intents
+    ]
+
+    warning: str | None = None
+    if not weights and not prior_positions:
+        warning = (
+            "empty plan: no target weights and no prior holdings — confirm the signal layer "
+            "really produced an empty book before treating this as done"
+        )
+    elif not weights and intents:
+        warning = (
+            f"FULL LIQUIDATION plan: empty target book exits all {len(intents)} holdings — "
+            "confirm this is intended before submitting"
+        )
+
+    # Mirror the live risk policy exactly; when LIVE_MAX_CAPITAL is not configured yet, size
+    # the caps to this book's NAV instead of the 1k fallback so the preview is meaningful.
+    live_policy = load_live_trading_policy()
+    if live_policy.max_capital <= 0:
+        live_policy = _dc_replace(live_policy, max_capital=nav)
+    policy = live_risk_policy(live_policy)
+
+    account = AccountSnapshot("rebalance-plan", buying_power=nav, cash=nav, equity=nav)
+    positions = [
+        PositionSnapshot(sym.upper(), "us", qty, qty * float(marks.get(sym.upper(), 0.0)))
+        for sym, qty in prior_positions.items()
+        if qty
+    ]
+    work = Path(work_dir) if work_dir is not None else OUT_DIR
+    work.mkdir(parents=True, exist_ok=True)
+    # Fresh preview ledger/halt per run: a stale preview would inflate daily-notional counts
+    # and mark re-planned intents as duplicates; a stale preview halt would block the batch.
+    preview_store_path = work / f"rebalance-plan-preview-{strategy_id}.jsonl"
+    preview_halt_path = work / f"rebalance-plan-preview-halt-{strategy_id}.json"
+    for stale in (preview_store_path, preview_halt_path):
+        stale.unlink(missing_ok=True)
+    results = process_order_intents(
+        intents,
+        broker=FakeBrokerAdapter(account=account, positions=positions),
+        store=JsonlOrderStore(preview_store_path),
+        halt_store=HaltStateStore(preview_halt_path),
+        policy=policy,
+        marks=marks,
+        dry_run=True,
+        sectors=sectors,
+    )
+    checks = [
+        {
+            "client_order_id": r.client_order_id,
+            "action": r.action,
+            "status": r.status,
+            "reasons": list(r.reasons),
+        }
+        for r in results
+    ]
+    return {
+        "strategy_id": strategy_id,
+        "rebalance_key": rebalance_key,
+        "generated_at": generated.isoformat(),
+        "nav": nav,
+        "target_capital": target_capital,
+        "target_book": {t.symbol: t.target_qty for t in targets},
+        "intents": [
+            {
+                "symbol": i.symbol,
+                "side": i.side,
+                "qty": i.qty,
+                "limit_price": i.limit_price,
+                "client_order_id": i.client_order_id,
+            }
+            for i in intents
+        ],
+        "pretrade": checks,
+        "all_pass": all(c["status"] == "accepted" for c in checks) if checks else True,
+        "sector_map_used": sectors is not None,
+        "empty": not intents,
+        "warning": warning,
+    }
+
+
+def write_plan_json(plan: dict, *, out_dir: Path | None = None) -> Path:
+    """Persist the plan as the machine-readable operator artifact (idempotent per key)."""
+    out = Path(out_dir) if out_dir is not None else OUT_DIR
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"rebalance-plan-{plan['rebalance_key']}.json"
+    path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="IDEAL paper-drill rebalance generator.")
     parser.add_argument(
         "--snapshot",
@@ -281,7 +423,7 @@ def main():
         help="skip appending this rebalance to the pre-registered forward-OOS ledger "
         "(recording is on by default — it is how paper trading becomes evidence).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     top_n = args.top_n
     if top_n < 1:
         raise SystemExit(f"--top-n must be >= 1 (got {top_n}).")
@@ -358,7 +500,7 @@ def main():
     picks = scores[:top_n]
     weights = weights_from_picks(picks, prices, rebal, cap=CAP)
 
-    # Build order list
+    # Build order list (the TARGET book view — feeds the picks table and the OOS ledger)
     orders = []
     for sym, w in weights.items():
         dollar = target_capital * w
@@ -379,6 +521,40 @@ def main():
                 "dollar": qty * price,
             }
         )
+
+    # Delta plan vs the PRIOR book (captured before the state update below): sells of dropped
+    # names first, then delta buys — pre-validated by the live gates incl. the sector cap.
+    rebal_key = f"{strategy_id}-{rebal.date()}"
+    prior_positions = {
+        str(sym).upper(): float(qty) for sym, qty in (state.get("positions") or {}).items()
+    }
+    plan_marks: dict[str, float] = {}
+    for sym in {o["symbol"] for o in orders} | set(prior_positions):
+        try:
+            plan_marks[sym] = float(prices.loc[rebal, sym])
+        except KeyError:
+            continue  # a prior holding with no price today surfaces as a pretrade block
+    sector_files = sorted(
+        (ROOT / "data" / "sectors").glob("*-sectors.csv"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    sectors = None
+    if sector_files:
+        from risk.sectors import load_sector_map
+
+        sectors = load_sector_map(sector_files[0])
+    plan_dict = build_delta_plan(
+        strategy_id=strategy_id,
+        rebalance_key=rebal_key,
+        weights={o["symbol"]: o["weight"] for o in orders},
+        marks=plan_marks,
+        prior_positions=prior_positions,
+        nav=nav,
+        target_capital=target_capital,
+        sectors=sectors,
+    )
+    plan_path = write_plan_json(plan_dict)
 
     # Update state
     state["last_rebal"] = str(rebal.date())
@@ -433,17 +609,48 @@ def main():
             f"${o['price']:.2f} | {o['qty']} | ${o['dollar']:,.2f} |"
         )
 
+    # Delta section — the orders that would actually be sent (sells of dropped names first,
+    # then delta buys), each pre-validated by the live gates. THIS list is what the operator
+    # submits; the picks table above is the target book, not the trade list.
+    check_by_id = {c["client_order_id"]: c for c in plan_dict["pretrade"]}
+    lines += [
+        "",
+        f"## Delta orders vs prior book ({len(prior_positions)} holdings) — "
+        f"pretrade {'ALL PASS' if plan_dict['all_pass'] else 'BLOCKED ITEMS PRESENT'}",
+        "",
+        f"Plan JSON: {plan_path}",
+        f"Sector map: {'yes' if plan_dict['sector_map_used'] else 'MISSING (sector cap inactive)'}",
+    ]
+    if plan_dict["warning"]:
+        lines.append(f"**WARNING**: {plan_dict['warning']}")
+    if plan_dict["intents"]:
+        lines += [
+            "",
+            "| Side | Symbol | Qty | Limit | Pretrade |",
+            "|---|---|---:|---:|---|",
+        ]
+        for it in plan_dict["intents"]:
+            check = check_by_id.get(it["client_order_id"], {})
+            status = check.get("status", "?")
+            reasons = "; ".join(check.get("reasons", []))
+            limit = f"${it['limit_price']:.2f}" if it["limit_price"] else "n/a"
+            lines.append(
+                f"| {it['side']} | {it['symbol']} | {it['qty']:g} | {limit} | "
+                f"{status}{(' — ' + reasons) if reasons else ''} |"
+            )
+    else:
+        lines.append("\n(no delta — the book already matches the target)")
+
     lines += [
         "",
         "## Dry-run commands (no broker interaction)",
         "",
         "```bash",
     ]
-    rebal_key = f"{strategy_id}-{rebal.date()}"
-    for o in orders:
+    for it in plan_dict["intents"]:
         lines.append(
-            f".venv/bin/trader live-dry-run {o['symbol']} --side buy "
-            f"--qty {o['qty']} --price {o['price']:.2f} "
+            f".venv/bin/trader live-dry-run {it['symbol']} --side {it['side']} "
+            f"--qty {it['qty']:g} --price {it['limit_price'] or 0:.2f} "
             f"--strategy {strategy_id} --rebalance-key {rebal_key} "
             f"--equity {nav:.2f} --cash {target_capital:.2f}"
         )
@@ -461,10 +668,10 @@ def main():
         "",
         "```bash",
     ]
-    for o in orders:
+    for it in plan_dict["intents"]:
         lines.append(
-            f".venv/bin/trader live-submit {o['symbol']} --side buy "
-            f"--qty {o['qty']} --price {o['price']:.2f} "
+            f".venv/bin/trader live-submit {it['symbol']} --side {it['side']} "
+            f"--qty {it['qty']:g} --price {it['limit_price'] or 0:.2f} "
             f"--strategy {strategy_id} --rebalance-key {rebal_key}"
         )
     lines += [
