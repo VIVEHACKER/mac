@@ -183,6 +183,12 @@ class PaperBroker:
     def get_order(self, client_order_id: str) -> BrokerOrder | None:
         return self._orders_by_coid.get(client_order_id)
 
+    def cancel_order(self, client_order_id: str) -> BrokerOrder | None:
+        """BrokerAdapter.cancel_order contract. PaperBroker fills instantly, so there is never
+        a working order to recall: a known order is already terminal (truthful no-op, returned
+        as-is) and an unknown one is None — same semantics as the live adapters."""
+        return self._orders_by_coid.get(client_order_id)
+
     def _apply_fill(self, *, symbol: str, market: str, signed_qty: float, price: float) -> None:
         key = (symbol, market)
         current = self.positions.get(key)

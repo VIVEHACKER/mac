@@ -141,6 +141,7 @@ def process_order_intents(
     fill_poll: FillPoll | None = None,
     sleep: Callable[[float], None] = time.sleep,
     notifier: Notifier | None = None,
+    sectors: dict[str, str] | None = None,
 ) -> list[ExecutionResult]:
     # Fail-closed arming check (adversarial-review finding): reference_equity=None used to
     # silently skip the whole kill-switch block — a future live/paper entry point that forgot
@@ -303,6 +304,7 @@ def process_order_intents(
             halt=halt,
             orders_today=store.intent_count_on(intent_day),
             new_notional_today=store.buy_notional_on(intent_day, marks),
+            sectors=sectors,
         )
         store.record_intent(intent)
         if not check.passed:

@@ -16,6 +16,7 @@ def evaluate_pretrade_order(
     halt: HaltRecord | None = None,
     orders_today: int = 0,
     new_notional_today: float = 0.0,
+    sectors: dict[str, str] | None = None,
 ) -> RiskCheckResult:
     normalized = intent.normalized()
     reasons: list[str] = []
@@ -119,6 +120,41 @@ def evaluate_pretrade_order(
                 f"{normalized.symbol} weight {symbol_value / account.equity:.2%} exceeds "
                 f"{policy.max_symbol_weight:.2%}"
             )
+        # Sector concentration: block an order that pushes its sector's aggregate weight over the
+        # cap. Needs a symbol->sector map; an unmapped order symbol is skipped (cannot gate what we
+        # cannot classify — same convention as the exposure monitor's empty-sector bucket).
+        if sectors is not None and policy.max_sector_weight < 1.0:
+            sector_map = {symbol.upper(): sector for symbol, sector in sectors.items()}
+            order_sector = sector_map.get(normalized.symbol)
+            if order_sector:
+                # Value the order leg at the order mark in BOTH current and projected so the only
+                # difference is the quantity change — the other sector names are identical in
+                # both books. Comparing |exposure| this way (not by order side) correctly exempts
+                # any risk-REDUCING order — a long sell OR a short buy-to-cover — while still
+                # gating an exposure-increasing short sell when allow_short is set (codex P2).
+                order_mark = mark or 0.0
+                current_qty = _position_qty(positions, normalized)
+                delta_qty = normalized.qty if normalized.side == "buy" else -normalized.qty
+                others_value = sum(
+                    abs(position.market_value)
+                    for position in positions
+                    if sector_map.get(position.symbol.upper()) == order_sector
+                    and not (
+                        position.symbol.upper() == normalized.symbol
+                        and position.market.lower() == normalized.market
+                    )
+                )
+                current_value = others_value + abs(current_qty * order_mark)
+                projected_value = others_value + abs((current_qty + delta_qty) * order_mark)
+                projected_weight = projected_value / account.equity
+                if (
+                    projected_weight > policy.max_sector_weight
+                    and projected_value > current_value + 1e-9
+                ):
+                    reasons.append(
+                        f"sector {order_sector} weight {projected_weight:.2%} exceeds "
+                        f"{policy.max_sector_weight:.2%}"
+                    )
 
     if reasons:
         return RiskCheckResult.fail(reasons)

@@ -166,6 +166,32 @@ class AlpacaBrokerAdapter:
             return None
         return _map_alpaca_order(raw)
 
+    def cancel_order(self, client_order_id: str) -> BrokerOrder | None:
+        """Cancel a working order by client id; see BrokerAdapter.cancel_order for the contract.
+
+        Unlike submit, cancel is safe to retry: a second cancel of the same order id answers
+        422 (not cancelable), which lands in the benign-race branch below. The 422 race —
+        the order reached a terminal state between our fetch and the cancel — resolves by
+        re-fetching and returning the terminal order, because "you cannot recall it, here is
+        what actually happened" is a truthful outcome, not an operator error."""
+        current = self.get_order(client_order_id)
+        if current is None:
+            return None
+        if current.terminal:
+            return current  # nothing live at the broker to recall
+        try:
+            self._request(
+                lambda: self.client.cancel_order_by_id(current.broker_order_id),
+                "cancel order",
+                retry=True,
+            )
+        except BrokerRejectedError:
+            refreshed = self.get_order(client_order_id)
+            if refreshed is not None and refreshed.terminal:
+                return refreshed  # filled/canceled in the race window — benign
+            raise
+        return self.get_order(client_order_id) or current
+
     def _request(
         self,
         fn: Callable[[], Any],

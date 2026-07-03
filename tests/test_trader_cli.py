@@ -706,6 +706,10 @@ def test_live_submit_can_submit_to_fake_after_all_gates_pass(tmp_path, monkeypat
     catalog_db = tmp_path / "catalog.duckdb"
     registry = tmp_path / "registry.jsonl"
     order_log = tmp_path / "orders.jsonl"
+    # A real --submit fails closed unless the sector map classifies the order symbol
+    # (sector-cap coverage gate), so this all-gates-pass fixture must cover QQQ.
+    sectors_csv = tmp_path / "sectors.csv"
+    sectors_csv.write_text("symbol,sic,sector\nQQQ,,etf\n", encoding="utf-8")
     MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
     _approve_strategy(registry, "approved-live")
     _set_live_env(monkeypatch, strategy_id="approved-live")

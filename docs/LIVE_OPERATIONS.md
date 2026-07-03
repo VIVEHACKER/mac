@@ -506,3 +506,53 @@ Statistical evidence as of 2026-05-29 (see `out/significance-report.md`,
 [0.92, 1.92], PSR 100%; Sharpe holds ~1.4 with no directional decay even at 25%
 fundamental coverage. Variant N (trader-CLI line) is NOT deployable — it is both
 non-reproducible and concentration-fragile.
+
+---
+
+## 실매매 활성화 체크리스트 (2026-07-03 — 단일 정본)
+
+시스템 측 준비는 완료됐다. 남은 것은 **① 브로커 키 ② 실증 시간게이트** 둘뿐이며,
+아래 순서를 건너뛰는 코드 경로는 존재하지 않는다(전부 fail-closed 게이트).
+
+### 현재 완료된 시스템 측 항목
+- 정산 무결성: reconcile-in-flight 자가치유 + live-submit FillPoll + 원장 fsync(파일+디렉터리)
+- 섹터 집중 캡: pretrade 강제 + `LIVE_MAX_SECTOR_WEIGHT`(기본 0.35) + `data/sectors/sp100-pit-2008-sectors.csv` 자동 로드 — 실주문(`--submit`)은 섹터맵 없으면 차단
+- 주문 회수: `trader live-cancel <client_order_id>` (게이트 무관 상시 가용 — halt 중에도)
+- 델타 주문안: `trader rebalance-plan` — 매도 우선 델타 + 라이브 게이트 사전검증 + `out/rebalance-plan-*.json`
+- 가격 신선도: price-ingest cron 설치됨(키 없으면 yahoo EOD, 키 설정 시 같은 cron이 IEX로 자동 전환)
+- forward-OOS 원장: cadence cron 가동 중(T0 2026-06-05, 21영업일 주기)
+
+### Phase A — 브로커 키 (사용자 액션, ~10분)
+1. https://alpaca.markets 가입 → **Paper** API 키 발급
+2. `.env`에 `ALPACA_API_KEY=...` / `ALPACA_SECRET_KEY=...`
+3. 검증: `.venv/bin/trader live-price-ingest SPY --source alpaca` 성공 = 키 정상
+   (이 순간부터 price-ingest cron이 IEX로 자동 전환)
+
+### Phase B — 페이퍼 루프 가동 (매월, 반자동)
+```bash
+export LIVE_TRADING_ENABLED=true LIVE_TRADING_ACK_RISK=true \
+  LIVE_STRATEGY_ID=aqr_top7_cap20_trail10_pit110 LIVE_BROKER=alpaca-paper \
+  LIVE_MAX_CAPITAL=10000 LIVE_POLICY_VERSION=1 LIVE_ORDER_SUBMISSION_ENABLED=true
+.venv/bin/trader rebalance-plan --top-n 7   # 델타 주문안 생성(사전검증 포함)
+# → out/rebalance-plan-*.json 검토 → ALL PASS 확인 → 출력된 live-submit 명령 실행(사용자 승인)
+.venv/bin/trader live-drill --kind paper    # 드릴 일수 기록
+.venv/bin/trader live-reconcile --from-store  # 제출 후 정산(자가치유 포함)
+```
+- 미체결 이탈 주문: `trader live-cancel <id>` → `rebalance-plan` 재생성
+- 상태 확인: `trader live-readiness` / 사고 시: `trader live-halt`
+
+### Phase C — 실증 시간게이트 (코드로 단축 불가)
+alpaca-live 전환에는 하드 플로어가 강제된다(ack로도 못 내림):
+- paper 드릴 연속 **30일** + shadow **10일**
+- forward-OOS **닫힌 기간 6개**(≈2026-12월 초 도달, T0=06-05) + vs_backtest **≥0.5x**
+- `LIVE_ACCEPT_REDUCED_VALIDATION`은 드릴 일수만 완화 가능 — **운영 .env에 상시 설정 금지**
+
+### Phase D — 라이브 전환 (전부 충족 후)
+1. Alpaca **Live** 키 발급, `.env` 교체 + `LIVE_BROKER=alpaca-live`
+2. `trader live-readiness --require-order-submission` → **Ready | yes** 확인
+3. 첫 달은 `LIVE_MAX_CAPITAL=10000` 유지(소액), 이후 성과 보고 증액 재검토
+4. 매 제출은 Phase B와 동일 반자동 루프(자동 제출 없음, `--ack-live-order` 수동)
+
+### 미해결/주의
+- 수동 브로커 어댑터(`manual-*`)는 `cancel_order` 미구현 — live-cancel이 명시 거부함
+  (수동 주문은 브로커에서 직접 취소). API 어댑터 통합 시 cancel_order 구현 필요.

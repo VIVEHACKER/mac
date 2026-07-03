@@ -179,6 +179,8 @@ CORE_COMMANDS = {
     "live-halt",
     "live-drill",
     "live-reconcile",
+    "live-cancel",
+    "rebalance-plan",
     "live-price-ingest",
     "live-price-stream",
     "live-dry-run",
@@ -265,6 +267,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_live_drill(parsed)
     if parsed.command == "live-reconcile":
         return _run_live_reconcile(parsed)
+    if parsed.command == "live-cancel":
+        return _run_live_cancel(parsed)
+    if parsed.command == "rebalance-plan":
+        return _run_rebalance_plan(parsed)
     if parsed.command == "live-price-ingest":
         return _run_live_price_ingest(parsed)
     if parsed.command == "live-price-stream":
@@ -890,6 +896,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report mismatches without activating the persistent halt latch.",
     )
 
+    live_cancel = sub.add_parser(
+        "live-cancel",
+        help="Cancel a working broker order by client_order_id and record it in the ledger. "
+        "Deliberately NOT gated by live-readiness: canceling is risk-reducing and must stay "
+        "available even while halted.",
+    )
+    live_cancel.add_argument("client_order_id")
+    live_cancel.add_argument(
+        "--broker",
+        choices=["fake", "alpaca-paper", "alpaca-live", "manual-paper", "manual-live"],
+        default=None,
+    )
+    live_cancel.add_argument(
+        "--fake-position",
+        help="Fake broker positions for drills, e.g. QQQ:us:1:100.",
+    )
+    live_cancel.add_argument("--cash", type=float, default=100_000.0)
+    live_cancel.add_argument("--equity", type=float, default=100_000.0)
+    live_cancel.add_argument("--buying-power", type=float, default=100_000.0)
+    live_cancel.add_argument("--order-log", type=Path, default=DEFAULT_ORDER_LOG)
+
+    rebalance_plan = sub.add_parser(
+        "rebalance-plan",
+        help="Generate the delta rebalance order plan (sells first, live-gate pre-validated) "
+        "as reviewable JSON + submit commands — the semi-auto operating surface.",
+    )
+    rebalance_plan.add_argument("--top-n", type=int, default=None)
+    rebalance_plan.add_argument("--strategy-id", default=None)
+    rebalance_plan.add_argument("--capital", type=float, default=None)
+    rebalance_plan.add_argument("--snapshot", type=Path, default=None)
+    rebalance_plan.add_argument("--allow-live-fundamentals", action="store_true")
+    rebalance_plan.add_argument(
+        "--no-record-oos",
+        action="store_true",
+        help="Skip appending this rebalance to the forward-OOS ledger.",
+    )
+
     live_price_ingest = sub.add_parser(
         "live-price-ingest",
         help="Fetch latest US stock bars into the catalog (Alpaca broker-grade, or keyless "
@@ -1010,6 +1053,13 @@ def build_parser() -> argparse.ArgumentParser:
     live_submit.add_argument("--paper-oos-prices", type=Path, default=_default_paper_oos_prices())
     live_submit.add_argument("--registry", type=Path, default=DEFAULT_RESEARCH_REGISTRY)
     live_submit.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
+    live_submit.add_argument(
+        "--sectors-csv",
+        type=Path,
+        default=None,
+        help="symbol->sector map for the pre-trade sector cap (default: newest "
+        "data/sectors/*-sectors.csv; a real --submit blocks if none is found).",
+    )
 
     model_gate = sub.add_parser(
         "model-gate",
@@ -2741,13 +2791,13 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
         f"| Expected Positions | {len(expected)} |",
         f"| Mismatches | {len(issues)} |",
     ]
+    # Uncertain (state unknown) or still-working (open at broker) recoveries leave the FILLED
+    # baseline incomplete — a "no mismatch" result built on them is guesswork (live-readiness P1).
+    unresolved = [r for r in recoveries if r.outcome in ("uncertain", "still_working")]
     if recoveries:
-        uncertain = [r for r in recoveries if r.outcome == "uncertain"]
         lines.append(f"| In-Flight Recovered | {len(recoveries)} |")
-        if uncertain:
-            # An order whose state could not be confirmed leaves the baseline incomplete — flag
-            # it loudly so the operator does not trust a "no mismatch" result built on guesswork.
-            lines.append(f"| In-Flight Unresolved | {len(uncertain)} |")
+        if unresolved:
+            lines.append(f"| In-Flight Unresolved | {len(unresolved)} |")
     if issues:
         if not args.no_halt_on_mismatch:
             HaltStateStore(args.halt_state).activate(
@@ -2770,7 +2820,102 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
                 f"{issue.actual_qty:g} | {issue.message} |"
             )
     print("\n".join(lines))
-    return 0 if not issues else 2
+    # Fail on a position mismatch OR an unresolved in-flight order — both mean the reconcile
+    # baseline cannot be trusted, so callers/cron must not read exit 0 as "clean" (live-readiness P1).
+    return 0 if (not issues and not unresolved) else 2
+
+
+def _run_live_cancel(args: argparse.Namespace) -> int:
+    """Cancel a working order by client_order_id and record the outcome in the ledger.
+
+    Deliberately NOT gated by live-readiness: canceling is risk-REDUCING and must remain
+    available even while a halt is latched (a halt is exactly when an operator needs to pull
+    stray working orders). Exit codes mirror live-submit: 0 ok/no-op, 1 rejected, 2 not
+    found / config error, 3 uncertain (re-run or reconcile once the broker is reachable).
+    """
+    # Local imports keep this handler self-contained (shared import block is contended).
+    from trader.execution.broker import BrokerRejectedError, BrokerTemporaryError
+    from trader.execution.order_store import OrderEvent
+
+    policy = load_live_trading_policy()
+    broker_name = args.broker or policy.broker
+    try:
+        broker = _live_broker_adapter(broker_name, args)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    store = JsonlOrderStore(args.order_log)
+    cancel = getattr(broker, "cancel_order", None)
+    if cancel is None:
+        # e.g. the manual ticket adapter — orders there are placed by hand, so recall them by
+        # hand too; refuse loudly instead of crashing on a structurally-typed missing method.
+        print(f"broker {broker_name} does not support order cancel; cancel it at the broker.")
+        return 2
+    try:
+        order = cancel(args.client_order_id)
+    except BrokerTemporaryError as exc:
+        # State unknown — log the attempt (NOT as a resolving broker-order event) and tell the
+        # operator how to converge: retry, or reconcile-in-flight once the broker answers.
+        store.record_event(
+            OrderEvent(
+                event_type="broker_cancel_uncertain",
+                client_order_id=args.client_order_id,
+                ts=datetime.now(UTC),
+                status="uncertain",
+                message=str(exc),
+            )
+        )
+        print(
+            f"cancel state uncertain for {args.client_order_id}: {exc}\n"
+            "Re-run live-cancel, or `trader live-reconcile --from-store` once the broker "
+            "is reachable."
+        )
+        return 3
+    except BrokerRejectedError as exc:
+        print(f"broker rejected cancel for {args.client_order_id}: {exc}")
+        return 1
+    if order is None:
+        print(
+            f"order {args.client_order_id} not found at broker {broker_name} — nothing to cancel."
+        )
+        return 2
+    store.record_broker_order("broker_cancel", order)
+    lines = [
+        "# Live Cancel",
+        "",
+        "| Field | Value |",
+        "|---|---:|",
+        f"| Broker | {broker_name} |",
+        f"| Client Order ID | {order.client_order_id} |",
+        f"| Symbol | {order.symbol} |",
+        f"| Status | {order.status} |",
+        f"| Filled Qty | {order.filled_qty:g} |",
+    ]
+    if order.status.lower() != "canceled":
+        lines.append(f"| Note | order already terminal ({order.status}); nothing was recalled |")
+    print("\n".join(lines))
+    return 0
+
+
+def _run_rebalance_plan(args: argparse.Namespace) -> int:
+    """Thin forwarder to the validated paper_drill generator (single implementation of the
+    ranking/sizing/delta-plan pipeline — the CLI must not grow a second one)."""
+    import scripts.paper_drill as paper_drill  # lazy: keeps yfinance/pandas off other paths
+
+    argv: list[str] = []
+    if args.top_n is not None:
+        argv += ["--top-n", str(args.top_n)]
+    if args.strategy_id:
+        argv += ["--strategy-id", args.strategy_id]
+    if args.capital is not None:
+        argv += ["--capital", str(args.capital)]
+    if args.snapshot is not None:
+        argv += ["--snapshot", str(args.snapshot)]
+    if args.allow_live_fundamentals:
+        argv += ["--allow-live-fundamentals"]
+    if args.no_record_oos:
+        argv += ["--no-record-oos"]
+    return int(paper_drill.main(argv) or 0)
 
 
 def _run_paper_exposure(args: argparse.Namespace) -> int:
@@ -3181,6 +3326,58 @@ def _run_live_submit(args: argparse.Namespace) -> int:
                 f"--broker {args.broker} does not match LIVE_BROKER={policy.broker}",
             )
         )
+    # Symbol->sector map for the pre-trade sector cap (audit P1 activation). Explicitly named
+    # but missing = config error; auto-discovery empty = warning in shadow (cap inactive,
+    # surfaced in the output) but a BLOCKING issue for a real --submit — real money must not
+    # trade sector-blind silently.
+    from risk.sectors import load_sector_map  # local: shared import block is contended
+
+    sectors: dict[str, str] | None = None
+    sectors_label = "missing (sector cap inactive)"
+    if args.sectors_csv is not None:
+        if args.sectors_csv.exists():
+            sectors = load_sector_map(args.sectors_csv)
+            sectors_label = str(args.sectors_csv)
+        else:
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-submit",
+                    "sectors",
+                    f"--sectors-csv {args.sectors_csv} does not exist",
+                )
+            )
+    else:
+        auto_map = _latest_sector_map()
+        if auto_map is not None:
+            sectors = load_sector_map(auto_map)
+            sectors_label = str(auto_map)
+        elif args.submit:
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-submit",
+                    "sectors",
+                    "no symbol->sector map found under data/sectors/; run "
+                    "`python scripts/fetch_sectors.py --universe-csv "
+                    "data/universes/sp100-pit-2008.csv` or pass --sectors-csv "
+                    "(a real submission must not trade sector-blind)",
+                )
+            )
+    # A loaded map that does not classify the ORDER symbol (wrong universe / empty file) would
+    # make the pretrade gate skip the sector cap for exactly this order — a real submission must
+    # fail closed instead of trading sector-blind on a technically-present map (codex P1).
+    if args.submit and sectors is not None and symbol.upper() not in sectors:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "live-submit",
+                "sectors",
+                f"sector map {sectors_label} does not classify {symbol} — the sector cap "
+                "cannot gate this order; extend the map (fetch_sectors) or pass a "
+                "--sectors-csv that covers it",
+            )
+        )
     if issues:
         print(
             _format_live_readiness(
@@ -3220,7 +3417,19 @@ def _run_live_submit(args: argparse.Namespace) -> int:
     # Self-heal before sending: resolve any prior in-flight order (crash after submit, or an
     # uncertain submit) against the broker so the ledger reflects real fills before this order
     # is sized/checked and so the next reconcile is honest (live-readiness P0).
-    reconcile_in_flight(store, broker)
+    recoveries = reconcile_in_flight(store, broker)
+    # Fail closed: never place a NEW live order while a prior intent is still working at the
+    # broker or its state is unknown — sizing/submitting on top of unresolved exposure risks a
+    # double-fill or unhedged position (live-readiness P1). Shadow mode (no real order) is exempt.
+    unresolved = [r for r in recoveries if r.outcome in ("uncertain", "still_working")]
+    if args.submit and unresolved:
+        detail = ", ".join(f"{r.client_order_id}={r.outcome}" for r in unresolved)
+        print(
+            "# Live Submit Gate\n\n"
+            f"BLOCKED: {len(unresolved)} prior in-flight order(s) unresolved ({detail}). "
+            "Resolve them first (`trader live-reconcile --from-store`) before submitting."
+        )
+        return 2
     results = process_order_intents(
         [intent],
         broker=broker,
@@ -3234,6 +3443,8 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         # Poll an async accepted/filled_qty=0 submit to its real terminal fill instead of
         # leaving a stale non-terminal snapshot in the ledger (live-readiness P0 Gap A).
         fill_poll=FillPoll(),
+        # Sector cap only fires with a map; None = inactive (surfaced in the table below).
+        sectors=sectors,
     )
     result = results[0]
     lines = [
@@ -3250,6 +3461,7 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         f"| Quantity | {args.qty:g} |",
         f"| Mark | {args.price:,.2f} |",
         f"| Catalog Mark | {_number_or_na(catalog_mark)} |",
+        f"| Sector Map | {sectors_label} |",
         f"| Action | {result.action} |",
         f"| Status | {result.status} |",
     ]
@@ -3793,6 +4005,17 @@ def _number_or_na(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:,.4f}"
+
+
+def _latest_sector_map() -> Path | None:
+    """Newest ``data/sectors/*-sectors.csv`` (fetch_sectors output) or None. The sector cap
+    only fires with a map, so discovery failure surfaces as a warning/blocker at the caller —
+    never a silent skip."""
+    sector_dir = ROOT / "data" / "sectors"
+    candidates = sorted(
+        sector_dir.glob("*-sectors.csv"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    return candidates[0] if candidates else None
 
 
 def _latest_catalog_mark(catalog: MarketDataCatalog, symbol: str, market: str) -> float | None:
