@@ -14,6 +14,10 @@ TRADER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MARKER="price_ingest_cron"
 LOG="out/price-ingest-cron.log"
 
+# cron's shell opens the log path before Python starts — on a fresh checkout (or a cleaned
+# out/) a missing directory would fail the job before it ever ingests (codex P2).
+mkdir -p "${TRADER_DIR}/out"
+
 LINE1="40 22,23 * * 1-5 cd \"${TRADER_DIR}\" && .venv/bin/python -m scripts.${MARKER} >> ${LOG} 2>&1"
 LINE2="40 0,1,2,3,4,5 * * 2-6 cd \"${TRADER_DIR}\" && .venv/bin/python -m scripts.${MARKER} >> ${LOG} 2>&1"
 

@@ -374,6 +374,19 @@ def build_delta_plan(
     }
 
 
+def resolve_plan_prior(state: dict, rebal_date: str) -> dict[str, float]:
+    """Delta base for the plan. Generating a plan saves the TARGET book into
+    ``state['positions']`` immediately (the established assume-filled paper-evidence loop), so
+    a SAME-DAY rerun — the review loop, or a blocked item fixed and regenerated — must delta
+    from the persisted PRE-plan book (``state['plan_prior']``), not from the freshly generated
+    targets, or the rerun would show "already held" and emit no deltas (codex P1)."""
+    if state.get("last_rebal") == rebal_date and isinstance(state.get("plan_prior"), dict):
+        base = state["plan_prior"]
+    else:
+        base = state.get("positions") or {}
+    return {str(sym).upper(): float(qty) for sym, qty in base.items()}
+
+
 def write_plan_json(plan: dict, *, out_dir: Path | None = None) -> Path:
     """Persist the plan as the machine-readable operator artifact (idempotent per key)."""
     out = Path(out_dir) if out_dir is not None else OUT_DIR
@@ -384,6 +397,12 @@ def write_plan_json(plan: dict, *, out_dir: Path | None = None) -> Path:
 
 
 def main(argv: list[str] | None = None):
+    # `python -m scripts.paper_drill` (cadence cron) bypasses trader.cli's dotenv loading, so
+    # the live-gate preview (live_risk_policy) would read unset env and could mark orders ALL
+    # PASS that the real live-submit path rejects (codex P2). Same source of truth: .env first.
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
     parser = argparse.ArgumentParser(description="IDEAL paper-drill rebalance generator.")
     parser.add_argument(
         "--snapshot",
@@ -525,9 +544,7 @@ def main(argv: list[str] | None = None):
     # Delta plan vs the PRIOR book (captured before the state update below): sells of dropped
     # names first, then delta buys — pre-validated by the live gates incl. the sector cap.
     rebal_key = f"{strategy_id}-{rebal.date()}"
-    prior_positions = {
-        str(sym).upper(): float(qty) for sym, qty in (state.get("positions") or {}).items()
-    }
+    prior_positions = resolve_plan_prior(state, str(rebal.date()))
     plan_marks: dict[str, float] = {}
     for sym in {o["symbol"] for o in orders} | set(prior_positions):
         try:
@@ -558,6 +575,8 @@ def main(argv: list[str] | None = None):
 
     # Update state
     state["last_rebal"] = str(rebal.date())
+    # Persist the delta base actually used, so a same-day rerun stays idempotent (codex P1).
+    state["plan_prior"] = prior_positions
     state["positions"] = {o["symbol"]: o["qty"] for o in orders}
     save_state(state, state_path)
 

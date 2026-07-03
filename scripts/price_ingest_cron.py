@@ -44,11 +44,21 @@ def collect_symbols(*, out_dir: Path | None = None, benchmark: str = BENCHMARK) 
     return sorted(symbols)
 
 
+def _looks_like_real_key(value: str) -> bool:
+    """Real Alpaca key ids are 20 chars and secrets 40; a repo-template placeholder
+    ("your_key_here", 13 chars) must NOT flip the cron to alpaca — that would replace the
+    working yahoo fallback with an auth-failure loop and silently stale prices."""
+    v = value.strip()
+    return len(v) >= 20 and "your" not in v.lower()
+
+
 def decide_source() -> str:
-    """``alpaca`` (broker-grade IEX) when both keys are set, else the keyless yahoo fallback."""
-    api_key = os.getenv("ALPACA_API_KEY", "").strip()
-    secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
-    return "alpaca" if api_key and secret_key else "yahoo"
+    """``alpaca`` (broker-grade IEX) when both keys look real, else the keyless yahoo fallback."""
+    api_key = os.getenv("ALPACA_API_KEY", "")
+    secret_key = os.getenv("ALPACA_SECRET_KEY", "")
+    return (
+        "alpaca" if _looks_like_real_key(api_key) and _looks_like_real_key(secret_key) else "yahoo"
+    )
 
 
 def run(
@@ -59,6 +69,16 @@ def run(
 ) -> int:
     if cli_main is None:  # lazy: keep the trader CLI import off the test path
         from trader.cli import main as cli_main  # type: ignore[no-redef]
+    # The documented key path puts ALPACA keys ONLY in .env; cron does not export them, and
+    # trader.cli loads dotenv only after --source is already fixed. Load .env here so the
+    # source decision sees the keys — otherwise the cron never upgrades to IEX (codex P1).
+    # override=False: explicitly exported env still wins (tests, operator overrides).
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(ROOT / ".env")
+    except ImportError:  # pragma: no cover — dotenv ships with the project env
+        pass
     symbols = collect_symbols(out_dir=out_dir, benchmark=benchmark)
     source = decide_source()
     if source == "yahoo":

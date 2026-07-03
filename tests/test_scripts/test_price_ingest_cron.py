@@ -43,9 +43,20 @@ def test_decide_source_keyless_falls_back_to_yahoo(monkeypatch) -> None:
     assert decide_source() == "yahoo"
 
 
-def test_decide_source_uses_alpaca_when_keys_present(monkeypatch) -> None:
-    monkeypatch.setenv("ALPACA_API_KEY", "k")
+def test_decide_source_treats_template_placeholders_as_unset(monkeypatch) -> None:
+    # The repo .env ships "your_key_here"-style placeholders; loading them must NOT flip the
+    # cron to alpaca — that would trade the working yahoo fallback for an auth-failure loop.
+    monkeypatch.setenv("ALPACA_API_KEY", "your_key_here")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "your_secret_here_x")
+    assert decide_source() == "yahoo"
+    monkeypatch.setenv("ALPACA_API_KEY", "k")  # too short to be a real Alpaca key id
     monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    assert decide_source() == "yahoo"
+
+
+def test_decide_source_uses_alpaca_when_keys_look_real(monkeypatch) -> None:
+    monkeypatch.setenv("ALPACA_API_KEY", "PK" + "A" * 18)  # real key-id shape (20 chars)
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "S" * 40)  # real secret shape
     assert decide_source() == "alpaca"
 
 

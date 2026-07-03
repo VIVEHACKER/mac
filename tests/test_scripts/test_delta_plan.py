@@ -102,6 +102,23 @@ def test_empty_target_book_with_holdings_is_full_liquidation_warning(tmp_path) -
     assert plan["warning"] and "liquidat" in plan["warning"].lower()
 
 
+def test_resolve_plan_prior_fresh_day_uses_positions() -> None:
+    from scripts.paper_drill import resolve_plan_prior
+
+    state = {"last_rebal": "2026-06-05", "positions": {"AAPL": 20}, "plan_prior": {"MSFT": 5}}
+    assert resolve_plan_prior(state, "2026-07-06") == {"AAPL": 20.0}
+
+
+def test_resolve_plan_prior_same_day_rerun_reuses_preplan_book() -> None:
+    # codex P1: generating a plan saves the TARGET book into state.positions immediately, so a
+    # same-day rerun (review loop / a blocked item fixed and regenerated) would otherwise see
+    # "already held" and emit no deltas. The rerun must delta from the persisted PRE-plan book.
+    from scripts.paper_drill import resolve_plan_prior
+
+    state = {"last_rebal": "2026-07-06", "positions": {"AAPL": 20}, "plan_prior": {"MSFT": 5}}
+    assert resolve_plan_prior(state, "2026-07-06") == {"MSFT": 5.0}
+
+
 def test_cli_rebalance_plan_forwards_to_paper_drill(monkeypatch) -> None:
     # `trader rebalance-plan` is the CLI surface of the semi-auto model — a thin forwarder to
     # the validated paper_drill generator (single implementation, no duplicated ranking code).
