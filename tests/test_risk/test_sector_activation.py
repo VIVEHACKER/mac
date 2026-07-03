@@ -143,6 +143,26 @@ def test_live_submit_real_submission_blocks_without_sector_map(
     assert "sector" in out.lower()
 
 
+def test_live_submit_real_submission_blocks_when_symbol_not_in_map(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    # codex P1: a loaded map that does not classify the ORDER symbol (wrong universe / empty
+    # file) let a real submission slip past the sector cap sector-blind. --submit must fail
+    # closed unless the submitted symbol itself is mapped.
+    _clean_env(monkeypatch)
+    sectors_csv = tmp_path / "u-sectors.csv"
+    sectors_csv.write_text("symbol,sic,sector\nAAPL,3571,tech\n", encoding="utf-8")  # no QQQ
+    monkeypatch.setattr(cli, "_live_readiness_issues", lambda **k: [])
+
+    code = cli.main(
+        _submit_args(tmp_path, ["--submit", "--ack-live-order", "--sectors-csv", str(sectors_csv)])
+    )
+    out = capsys.readouterr().out
+
+    assert code == 2
+    assert "sector" in out.lower() and "qqq" in out.lower()
+
+
 def test_live_submit_explicit_missing_sectors_csv_is_config_error(
     tmp_path, monkeypatch, capsys
 ) -> None:

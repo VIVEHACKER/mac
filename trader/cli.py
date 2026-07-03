@@ -2791,13 +2791,13 @@ def _run_live_reconcile(args: argparse.Namespace) -> int:
         f"| Expected Positions | {len(expected)} |",
         f"| Mismatches | {len(issues)} |",
     ]
+    # Uncertain (state unknown) or still-working (open at broker) recoveries leave the FILLED
+    # baseline incomplete — a "no mismatch" result built on them is guesswork (live-readiness P1).
+    unresolved = [r for r in recoveries if r.outcome in ("uncertain", "still_working")]
     if recoveries:
-        uncertain = [r for r in recoveries if r.outcome == "uncertain"]
         lines.append(f"| In-Flight Recovered | {len(recoveries)} |")
-        if uncertain:
-            # An order whose state could not be confirmed leaves the baseline incomplete — flag
-            # it loudly so the operator does not trust a "no mismatch" result built on guesswork.
-            lines.append(f"| In-Flight Unresolved | {len(uncertain)} |")
+        if unresolved:
+            lines.append(f"| In-Flight Unresolved | {len(unresolved)} |")
     if issues:
         if not args.no_halt_on_mismatch:
             HaltStateStore(args.halt_state).activate(
@@ -3364,6 +3364,20 @@ def _run_live_submit(args: argparse.Namespace) -> int:
                     "(a real submission must not trade sector-blind)",
                 )
             )
+    # A loaded map that does not classify the ORDER symbol (wrong universe / empty file) would
+    # make the pretrade gate skip the sector cap for exactly this order — a real submission must
+    # fail closed instead of trading sector-blind on a technically-present map (codex P1).
+    if args.submit and sectors is not None and symbol.upper() not in sectors:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "live-submit",
+                "sectors",
+                f"sector map {sectors_label} does not classify {symbol} — the sector cap "
+                "cannot gate this order; extend the map (fetch_sectors) or pass a "
+                "--sectors-csv that covers it",
+            )
+        )
     if issues:
         print(
             _format_live_readiness(
@@ -3403,7 +3417,19 @@ def _run_live_submit(args: argparse.Namespace) -> int:
     # Self-heal before sending: resolve any prior in-flight order (crash after submit, or an
     # uncertain submit) against the broker so the ledger reflects real fills before this order
     # is sized/checked and so the next reconcile is honest (live-readiness P0).
-    reconcile_in_flight(store, broker)
+    recoveries = reconcile_in_flight(store, broker)
+    # Fail closed: never place a NEW live order while a prior intent is still working at the
+    # broker or its state is unknown — sizing/submitting on top of unresolved exposure risks a
+    # double-fill or unhedged position (live-readiness P1). Shadow mode (no real order) is exempt.
+    unresolved = [r for r in recoveries if r.outcome in ("uncertain", "still_working")]
+    if args.submit and unresolved:
+        detail = ", ".join(f"{r.client_order_id}={r.outcome}" for r in unresolved)
+        print(
+            "# Live Submit Gate\n\n"
+            f"BLOCKED: {len(unresolved)} prior in-flight order(s) unresolved ({detail}). "
+            "Resolve them first (`trader live-reconcile --from-store`) before submitting."
+        )
+        return 2
     results = process_order_intents(
         [intent],
         broker=broker,

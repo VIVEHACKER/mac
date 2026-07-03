@@ -155,6 +155,22 @@ def test_alpaca_cancel_unknown_order_returns_none() -> None:
     assert adapter.cancel_order("trd-nope") is None
 
 
+def test_paper_broker_cancel_conforms_to_contract() -> None:
+    # codex P2: every drop-in BrokerAdapter must implement cancel_order. PaperBroker fills
+    # instantly, so there is never a working order to recall: known -> terminal no-op,
+    # unknown -> None (same contract as the other adapters).
+    from engine.paper import PaperBroker
+
+    broker = PaperBroker(100_000.0, marks={"AAPL": 100.0})
+    intent = _intent()
+    order = broker.submit_order(intent)
+    assert order.terminal  # instant fill
+
+    result = broker.cancel_order(intent.client_order_id)
+    assert result is not None and result.status == order.status  # no-op, truthfully reported
+    assert broker.cancel_order("trd-nope") is None
+
+
 # ---------------------------------------------------------------- ledger integration
 
 
