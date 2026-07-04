@@ -13,7 +13,7 @@ LIVE_TRADING_ENABLED=true
 LIVE_TRADING_ACK_RISK=true
 LIVE_ORDER_SUBMISSION_ENABLED=true
 LIVE_STRATEGY_ID=<approved strategy id>
-LIVE_BROKER=<fake|alpaca-paper|alpaca-live>
+LIVE_BROKER=<fake|alpaca-paper|alpaca-live|manual-paper|manual-live>
 LIVE_MAX_CAPITAL=<maximum capital this system may use>
 LIVE_POLICY_VERSION=<risk policy version>
 LIVE_MIN_PAPER_DAYS=30
@@ -40,8 +40,8 @@ of approved capital.
 `LIVE_ORDER_SUBMISSION_ENABLED` is a separate final switch. Keep it unset during
 research, backtesting, paper, and shadow drills.
 
-For `alpaca-live`, the default drill requirement is 30 paper days, 10 shadow
-days, 6 scoreable paper-OOS ledger periods, and live/backtest excess ratio ≥0.5x
+For `alpaca-live` and `manual-live`, the default drill requirement is 30 paper
+days, 10 shadow days, 6 scoreable paper-OOS ledger periods, and live/backtest excess ratio ≥0.5x
 if `LIVE_MIN_PAPER_DAYS`, `LIVE_MIN_SHADOW_DAYS`,
 `LIVE_MIN_PAPER_OOS_PERIODS`, and `LIVE_MIN_PAPER_OOS_VS_BACKTEST` are unset.
 `LIVE_PAPER_OOS_PRICES` must point to a close-price CSV so the ledger periods can
@@ -242,6 +242,30 @@ Stored bars use a source such as `alpaca:iex:latest_bar`, which the live quality
 gate treats as broker-grade. Yahoo, manual, fixture, test, and missing sources
 remain blockers.
 
+For a non-Alpaca external broker, use an operator-attested broker quote. This is
+intended for the manual broker line, not for backtests:
+
+```bash
+uv run trader live-price-ingest QQQ \
+  --source external \
+  --price 100.00 \
+  --price-as-of 2026-07-01 \
+  --ack-external-price \
+  --catalog-db data/store/live-prices.duckdb
+```
+
+Manual broker preflight reads operator-attested account state from env:
+
+```bash
+LIVE_BROKER=manual-paper            # manual-live applies the real-money OOS/drill floors
+LIVE_MANUAL_ACCOUNT_ID=<external account id>
+LIVE_MANUAL_CASH=<cash>
+LIVE_MANUAL_EQUITY=<equity>
+LIVE_MANUAL_BUYING_POWER=<buying power>
+LIVE_MANUAL_MARKET_OPEN=true
+LIVE_MANUAL_POSITIONS="QQQ:us:2:1000"  # optional, comma-separated
+```
+
 For intraday/live operation, run the WebSocket stream instead of relying on a
 one-shot latest-bar poll:
 
@@ -330,6 +354,27 @@ gross exposure, cash fraction, broker account blocks, and uncertain submit state
 It also blocks when the submitted `--price` deviates from the latest live catalog
 close by more than `LIVE_MAX_MARK_DEVIATION` or `--max-mark-deviation`. Any
 uncertain broker submit activates the persistent halt latch.
+
+## Manual Broker Ticket Path
+
+`manual-paper` and `manual-live` do not submit through an API. `live-submit
+--submit` is blocked for these brokers. After readiness passes, create an
+external execution ticket and place it manually in the broker UI:
+
+```bash
+uv run trader live-ticket QQQ \
+  --side buy \
+  --qty 2 \
+  --price 100 \
+  --order-type limit \
+  --limit-price 99.50 \
+  --ack-manual-ticket \
+  --ticket-log data/store/manual-order-tickets.jsonl \
+  --halt-state data/store/live-halt.json
+```
+
+The ticket log is not a fill ledger. Record broker-confirmed fills separately and
+run reconciliation before any next order.
 
 ## Reconciliation
 

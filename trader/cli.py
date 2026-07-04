@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -111,7 +113,8 @@ from strategies.statarb_pairs import (
 )
 from trader.execution.adapters.alpaca import AlpacaBrokerAdapter
 from trader.execution.adapters.fake import FakeBrokerAdapter
-from trader.execution.broker import AccountSnapshot, BrokerAdapter, PositionSnapshot
+from trader.execution.adapters.manual import ManualBrokerAdapter
+from trader.execution.broker import AccountSnapshot, BrokerAdapter, BrokerClock, PositionSnapshot
 from trader.execution.intents import OrderIntent
 from trader.execution.order_store import JsonlOrderStore
 from trader.execution.reconciler import (
@@ -144,6 +147,7 @@ DEFAULT_DB = COPILOT_DIR / "data" / "copilot.db"
 DEFAULT_CATALOG_DB = ROOT / DEFAULT_CATALOG_PATH
 DEFAULT_LIVE_CATALOG_DB = ROOT / "data" / "store" / "live-prices.duckdb"
 DEFAULT_ORDER_LOG = ROOT / "data" / "store" / "live-orders.jsonl"
+DEFAULT_MANUAL_TICKET_LOG = ROOT / "data" / "store" / "manual-order-tickets.jsonl"
 DEFAULT_HALT_STATE = ROOT / "data" / "store" / "live-halt.json"
 DEFAULT_EQUITY_STATE = ROOT / "data" / "store" / "live-equity.json"
 DEFAULT_RESEARCH_REGISTRY = ROOT / "data" / "store" / "research-registry.jsonl"
@@ -185,6 +189,7 @@ CORE_COMMANDS = {
     "live-price-stream",
     "live-dry-run",
     "live-submit",
+    "live-ticket",
     "model-gate",
     "robustness",
     "quality",
@@ -279,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_live_dry_run(parsed)
     if parsed.command == "live-submit":
         return _run_live_submit(parsed)
+    if parsed.command == "live-ticket":
+        return _run_live_ticket(parsed)
     if parsed.command == "model-gate":
         return _run_model_gate(parsed)
     if parsed.command == "robustness":
@@ -879,7 +886,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live_reconcile.add_argument("--order-log", type=Path, default=DEFAULT_ORDER_LOG)
     live_reconcile.add_argument(
-        "--broker", choices=["fake", "alpaca-paper", "alpaca-live"], default=None
+        "--broker",
+        choices=["fake", "alpaca-paper", "alpaca-live", "manual-paper", "manual-live"],
+        default=None,
     )
     live_reconcile.add_argument(
         "--fake-position",
@@ -943,9 +952,21 @@ def build_parser() -> argparse.ArgumentParser:
     live_price_ingest.add_argument(
         "--source",
         default="alpaca",
-        choices=["alpaca", "yahoo"],
+        choices=["alpaca", "yahoo", "external"],
         help="alpaca = broker-grade latest bars (needs API keys); yahoo = keyless EOD "
-        "daily bars — good enough for paper-loop marks, NOT execution-grade.",
+        "daily bars — good enough for paper-loop marks, NOT execution-grade; external = "
+        "operator-attested quote from a non-Alpaca broker.",
+    )
+    live_price_ingest.add_argument(
+        "--price",
+        type=float,
+        help="Required with --source external. Supports one symbol per command.",
+    )
+    live_price_ingest.add_argument("--price-as-of", default=date.today().isoformat())
+    live_price_ingest.add_argument(
+        "--ack-external-price",
+        action="store_true",
+        help="Required with --source external to attest that the price came from the external broker.",
     )
     live_price_ingest.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
 
@@ -1023,7 +1044,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required with --submit to acknowledge that this may place a real order.",
     )
     live_submit.add_argument(
-        "--broker", choices=["fake", "alpaca-paper", "alpaca-live"], default=None
+        "--broker",
+        choices=["fake", "alpaca-paper", "alpaca-live", "manual-paper", "manual-live"],
+        default=None,
     )
     live_submit.add_argument(
         "--fake-mode", default="fill", choices=["fill", "partial", "reject", "timeout"]
@@ -1060,6 +1083,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="symbol->sector map for the pre-trade sector cap (default: newest "
         "data/sectors/*-sectors.csv; a real --submit blocks if none is found).",
     )
+
+    live_ticket = sub.add_parser(
+        "live-ticket",
+        help="Create an externally executable manual broker order ticket after live gates pass.",
+    )
+    live_ticket.add_argument("symbol")
+    live_ticket.add_argument("--market", default="us", choices=["us", "kospi", "kosdaq", "crypto"])
+    live_ticket.add_argument("--side", required=True, choices=["buy", "sell"])
+    live_ticket.add_argument("--qty", type=float, required=True)
+    live_ticket.add_argument("--price", type=float, required=True)
+    live_ticket.add_argument("--order-type", default="limit", choices=["market", "limit"])
+    live_ticket.add_argument("--limit-price", type=float)
+    live_ticket.add_argument("--time-in-force", default="day", choices=["day", "gtc", "ioc", "fok"])
+    live_ticket.add_argument("--rebalance-key", default=date.today().isoformat())
+    live_ticket.add_argument("--broker", choices=["manual-paper", "manual-live"], default=None)
+    live_ticket.add_argument(
+        "--ack-manual-ticket",
+        action="store_true",
+        help="Required to create a manual execution ticket.",
+    )
+    live_ticket.add_argument("--as-of", default=date.today().isoformat())
+    live_ticket.add_argument("--max-price-age-days", type=int, default=2)
+    live_ticket.add_argument(
+        "--max-mark-deviation",
+        type=float,
+        default=_default_live_mark_deviation(),
+        help="Maximum allowed difference between --price and latest external catalog close.",
+    )
+    live_ticket.add_argument("--ticket-log", type=Path, default=DEFAULT_MANUAL_TICKET_LOG)
+    live_ticket.add_argument("--halt-state", type=Path, default=DEFAULT_HALT_STATE)
+    live_ticket.add_argument("--equity-state", type=Path, default=DEFAULT_EQUITY_STATE)
+    live_ticket.add_argument("--drill-log", type=Path, default=DEFAULT_DRILL_LOG)
+    live_ticket.add_argument("--paper-oos-dir", type=Path, default=DEFAULT_PAPER_OOS_DIR)
+    live_ticket.add_argument("--paper-oos-prices", type=Path, default=_default_paper_oos_prices())
+    live_ticket.add_argument("--registry", type=Path, default=DEFAULT_RESEARCH_REGISTRY)
+    live_ticket.add_argument("--catalog-db", type=Path, default=_default_live_catalog_db())
 
     model_gate = sub.add_parser(
         "model-gate",
@@ -1119,8 +1178,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quality.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
 
-    dashboard = sub.add_parser("dashboard", help="Print the Streamlit command for the dashboard.")
+    dashboard = sub.add_parser("dashboard", help="Print or run the local Streamlit dashboard.")
     dashboard.add_argument("--port", type=int, default=8501)
+    dashboard.add_argument("--run", action="store_true", help="Start the local Streamlit server.")
 
     copilot = sub.add_parser("copilot", help="Forward arguments to the integrated copilot CLI.")
     copilot.add_argument("args", nargs=argparse.REMAINDER)
@@ -3042,9 +3102,82 @@ def _alpaca_credentials_issue(api_key: str, secret_key: str, *, purpose: str) ->
     return None
 
 
+_MANUAL_BROKERS = {"manual-paper", "manual-live"}
+
+
+def _manual_env_float(name: str, missing: list[str]) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        missing.append(name)
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+
+
+def _manual_broker_adapter_from_env(broker_name: str) -> ManualBrokerAdapter:
+    missing: list[str] = []
+    account_id = os.getenv("LIVE_MANUAL_ACCOUNT_ID", "").strip()
+    if not account_id:
+        missing.append("LIVE_MANUAL_ACCOUNT_ID")
+    cash = _manual_env_float("LIVE_MANUAL_CASH", missing)
+    equity = _manual_env_float("LIVE_MANUAL_EQUITY", missing)
+    buying_power = _manual_env_float("LIVE_MANUAL_BUYING_POWER", missing)
+    if missing:
+        raise ValueError(
+            f"{broker_name} requires operator-attested account env: " + ", ".join(missing)
+        )
+    positions = _parse_fake_positions(os.getenv("LIVE_MANUAL_POSITIONS", "").strip() or None)
+    market_open = os.getenv("LIVE_MANUAL_MARKET_OPEN", "").strip().lower() == "true"
+    return ManualBrokerAdapter(
+        account=AccountSnapshot(
+            account_id=account_id,
+            buying_power=buying_power,
+            cash=cash,
+            equity=equity,
+            currency=os.getenv("LIVE_MANUAL_CURRENCY", "USD").strip() or "USD",
+            last_equity=(
+                float(os.getenv("LIVE_MANUAL_LAST_EQUITY", "").strip())
+                if os.getenv("LIVE_MANUAL_LAST_EQUITY", "").strip()
+                else None
+            ),
+        ),
+        positions=positions,
+        clock=BrokerClock(is_open=market_open, timestamp=datetime.now(UTC)),
+    )
+
+
 def _run_live_price_ingest(args: argparse.Namespace) -> int:
     symbols = _parse_symbols(args.symbols)
-    if args.source == "yahoo":
+    if args.source == "external":
+        if len(symbols) != 1:
+            print("--source external supports exactly one symbol per command")
+            return 2
+        if args.price is None or args.price <= 0:
+            print("--price > 0 is required with --source external")
+            return 2
+        if not args.ack_external_price:
+            print("--ack-external-price is required with --source external")
+            return 2
+        symbol = symbols[0]
+        ts = _parse_date(args.price_as_of)
+        price = float(args.price)
+        bars = [
+            PriceBar(
+                symbol=symbol,
+                market="us",
+                source_symbol=symbol,
+                ts=ts,
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                volume=0.0,
+                source="external-broker:operator-attested",
+            )
+        ]
+    elif args.source == "yahoo":
         # Keyless EOD fallback: latest daily close per symbol from Yahoo. Good enough for
         # paper-loop marks / equity tracking; NOT execution-grade (use Alpaca for live).
         today = datetime.now(UTC).date()
@@ -3081,13 +3214,20 @@ def _run_live_price_ingest(args: argparse.Namespace) -> int:
             print(f"alpaca latest-bar fetch failed: {_compact_external_error(exc)}")
             return 2
     stored = MarketDataCatalog(args.catalog_db).put_bars(bars)
+    source_detail = (
+        args.feed
+        if args.source == "alpaca"
+        else "EOD daily"
+        if args.source == "yahoo"
+        else "operator-attested"
+    )
     lines = [
         "# Live Price Ingest",
         "",
         "| Field | Value |",
         "|---|---:|",
         f"| Symbols | {', '.join(symbols)} |",
-        f"| Source | {args.source} ({args.feed if args.source == 'alpaca' else 'EOD daily'}) |",
+        f"| Source | {args.source} ({source_detail}) |",
         f"| Stored Bars | {stored} |",
     ]
     if bars:
@@ -3124,9 +3264,7 @@ def _run_live_price_stream(args: argparse.Namespace) -> int:
     symbols = _parse_symbols(args.symbols)
     api_key = os.getenv("ALPACA_API_KEY", "").strip()
     secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
-    credential_issue = _alpaca_credentials_issue(
-        api_key, secret_key, purpose="live-price-stream"
-    )
+    credential_issue = _alpaca_credentials_issue(api_key, secret_key, purpose="live-price-stream")
     if credential_issue:
         print(credential_issue)
         return 2
@@ -3326,6 +3464,16 @@ def _run_live_submit(args: argparse.Namespace) -> int:
                 f"--broker {args.broker} does not match LIVE_BROKER={policy.broker}",
             )
         )
+    if args.submit and broker_name.strip().lower() in _MANUAL_BROKERS:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "live-submit",
+                "broker",
+                "manual brokers do not support API submission; use live-ticket and execute "
+                "the ticket in the external broker",
+            )
+        )
     # Symbol->sector map for the pre-trade sector cap (audit P1 activation). Explicitly named
     # but missing = config error; auto-discovery empty = warning in shadow (cap inactive,
     # surfaced in the output) but a BLOCKING issue for a real --submit — real money must not
@@ -3476,6 +3624,184 @@ def _run_live_submit(args: argparse.Namespace) -> int:
     if result.status == "risk_block":
         return 2
     return 1
+
+
+def _run_live_ticket(args: argparse.Namespace) -> int:
+    policy = load_live_trading_policy()
+    broker_name = args.broker or policy.broker
+    symbol = _catalog_symbol(args.symbol, args.market)
+    required_prices = ((symbol, args.market),)
+    catalog = MarketDataCatalog(args.catalog_db)
+    issues: list[DataQualityIssue] = []
+    if broker_name.strip().lower() not in _MANUAL_BROKERS:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "live-ticket",
+                "broker",
+                "live-ticket requires LIVE_BROKER=manual-paper or manual-live",
+            )
+        )
+    if args.broker and policy.broker and args.broker != policy.broker:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "live-ticket",
+                "broker",
+                f"--broker {args.broker} does not match LIVE_BROKER={policy.broker}",
+            )
+        )
+    if not args.ack_manual_ticket:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                "live-ticket",
+                "ack",
+                "--ack-manual-ticket is required to create an external execution ticket",
+            )
+        )
+    issues.extend(
+        _live_readiness_issues(
+            policy=policy,
+            registry=ResearchRegistry(args.registry),
+            halt_store=HaltStateStore(args.halt_state),
+            drill_log=DrillLog(args.drill_log),
+            paper_oos_dir=args.paper_oos_dir,
+            paper_oos_prices=args.paper_oos_prices,
+            catalog=catalog,
+            required_prices=required_prices,
+            as_of=_parse_date(args.as_of),
+            max_price_age_days=args.max_price_age_days,
+            require_order_submission=True,
+            require_broker_preflight=True,
+        )
+    )
+    catalog_mark = _latest_catalog_mark(catalog, symbol, args.market)
+    if catalog_mark is not None and args.max_mark_deviation >= 0:
+        deviation = abs(args.price / catalog_mark - 1.0)
+        if deviation > args.max_mark_deviation:
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-ticket",
+                    "mark",
+                    f"--price {args.price:.4f} deviates {deviation:.2%} from latest catalog "
+                    f"close {catalog_mark:.4f}; max {args.max_mark_deviation:.2%}",
+                )
+            )
+    if issues:
+        print(
+            _format_live_readiness(
+                policy,
+                issues,
+                required_prices=required_prices,
+                require_order_submission=True,
+                require_broker_preflight=True,
+                paper_oos_prices=args.paper_oos_prices,
+            )
+        )
+        return 2
+    try:
+        broker = _live_broker_adapter(broker_name, args)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+
+    limit_price = args.limit_price
+    if args.order_type == "limit" and limit_price is None:
+        limit_price = args.price
+    intent = OrderIntent(
+        strategy=policy.strategy_id,
+        symbol=symbol,
+        market=args.market,
+        side=args.side,
+        qty=args.qty,
+        order_type=args.order_type,
+        limit_price=limit_price,
+        time_in_force=args.time_in_force,
+        rebalance_key=args.rebalance_key,
+        reason="manual-live-ticket",
+        asof_ts=datetime.now(UTC),
+    ).normalized()
+    reference_equity, peak_equity = _live_equity_refs(broker, args.equity_state, broker_name)
+    store = JsonlOrderStore(args.ticket_log)
+    result = process_order_intents(
+        [intent],
+        broker=broker,
+        store=store,
+        halt_store=HaltStateStore(args.halt_state),
+        policy=live_risk_policy(policy),
+        marks={symbol: args.price},
+        dry_run=True,
+        reference_equity=reference_equity,
+        peak_equity=peak_equity,
+    )[0]
+    if result.status == "accepted":
+        _append_manual_ticket(
+            args.ticket_log, broker_name, policy, intent, args.price, catalog_mark
+        )
+    lines = [
+        "# Manual Order Ticket",
+        "",
+        "| Field | Value |",
+        "|---|---:|",
+        f"| Ready | {'yes' if result.status == 'accepted' else 'no'} |",
+        f"| Broker | {broker_name} |",
+        f"| Strategy | {policy.strategy_id} |",
+        f"| Client Order ID | {result.client_order_id} |",
+        f"| Symbol | {symbol} |",
+        f"| Side | {args.side} |",
+        f"| Quantity | {args.qty:g} |",
+        f"| Order Type | {args.order_type} |",
+        f"| Limit Price | {_number_or_na(limit_price)} |",
+        f"| Mark | {args.price:,.2f} |",
+        f"| Catalog Mark | {_number_or_na(catalog_mark)} |",
+        f"| Ticket Log | {args.ticket_log} |",
+        f"| Action | {result.action} |",
+        f"| Status | {result.status} |",
+        "| Execution Required | external broker manual entry |",
+    ]
+    if result.reasons:
+        lines.extend(["", "## Reasons", ""])
+        lines.extend(f"- {reason}" for reason in result.reasons)
+    print("\n".join(lines))
+    if result.status == "accepted":
+        return 0
+    if result.status == "uncertain":
+        return 3
+    return 2
+
+
+def _append_manual_ticket(
+    path: Path,
+    broker_name: str,
+    policy: LiveTradingPolicy,
+    intent: OrderIntent,
+    price: float,
+    catalog_mark: float | None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "record_type": "manual_ticket",
+        "created_at": datetime.now(UTC).isoformat(),
+        "broker": broker_name,
+        "strategy": policy.strategy_id,
+        "policy_version": policy.policy_version,
+        "client_order_id": intent.client_order_id,
+        "symbol": intent.symbol,
+        "market": intent.market,
+        "side": intent.side,
+        "qty": intent.qty,
+        "order_type": intent.order_type,
+        "limit_price": intent.limit_price,
+        "time_in_force": intent.time_in_force,
+        "rebalance_key": intent.rebalance_key,
+        "operator_price": price,
+        "catalog_mark": catalog_mark,
+        "status": "ticket_created_external_execution_required",
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _run_model_gate(args: argparse.Namespace) -> int:
@@ -3718,6 +4044,22 @@ def _live_broker_preflight_issues(policy: LiveTradingPolicy) -> list[DataQuality
         ]
     if broker_name == "fake":
         return []
+    if broker_name in _MANUAL_BROKERS:
+        try:
+            manual_broker = _manual_broker_adapter_from_env(broker_name)
+            account = manual_broker.get_account()
+            manual_broker.list_positions()
+            clock = manual_broker.get_clock()
+        except ValueError as exc:
+            return [
+                DataQualityIssue(
+                    "error",
+                    "broker-preflight",
+                    broker_name,
+                    str(exc),
+                )
+            ]
+        return _broker_snapshot_preflight_issues(policy, broker_name, account, clock)
     if broker_name not in {"alpaca-paper", "alpaca-live"}:
         return [
             DataQualityIssue(
@@ -3740,14 +4082,14 @@ def _live_broker_preflight_issues(policy: LiveTradingPolicy) -> list[DataQuality
             )
         ]
     try:
-        broker = AlpacaBrokerAdapter(
+        alpaca_broker = AlpacaBrokerAdapter(
             api_key,
             secret_key,
             paper=broker_name == "alpaca-paper",
         )
-        account = broker.get_account()
-        broker.list_positions()
-        clock = broker.get_clock()
+        account = alpaca_broker.get_account()
+        alpaca_broker.list_positions()
+        clock = alpaca_broker.get_clock()
     except Exception as exc:  # noqa: BLE001 - SDK/network/auth errors are normalized for operators.
         return [
             DataQualityIssue(
@@ -3757,6 +4099,15 @@ def _live_broker_preflight_issues(policy: LiveTradingPolicy) -> list[DataQuality
                 f"broker account/positions preflight failed: {_compact_external_error(exc)}",
             )
         ]
+    return _broker_snapshot_preflight_issues(policy, broker_name, account, clock)
+
+
+def _broker_snapshot_preflight_issues(
+    policy: LiveTradingPolicy,
+    broker_name: str,
+    account: AccountSnapshot,
+    clock: BrokerClock,
+) -> list[DataQualityIssue]:
     issues: list[DataQualityIssue] = []
     if account.account_blocked:
         issues.append(
@@ -3944,6 +4295,12 @@ def _live_readiness_remediation(
                 "Replace or enable ALPACA_API_KEY/ALPACA_SECRET_KEY for the selected "
                 "LIVE_BROKER, then rerun readiness with --require-broker-preflight."
             )
+        if "operator-attested account env" in messages:
+            actions.append(
+                "For manual brokers, set LIVE_MANUAL_ACCOUNT_ID, LIVE_MANUAL_CASH, "
+                "LIVE_MANUAL_EQUITY, LIVE_MANUAL_BUYING_POWER, LIVE_MANUAL_MARKET_OPEN=true, "
+                "and optional LIVE_MANUAL_POSITIONS, then rerun readiness."
+            )
         if "market is closed" in messages:
             actions.append("Rerun broker preflight during the regular market session.")
         if "buying power" in messages:
@@ -3957,7 +4314,8 @@ def _live_readiness_remediation(
             "Load broker-grade prices with "
             f"`uv run trader live-price-stream {symbols} --max-bars {len(required_prices)} "
             "--timeout-seconds 90 --catalog-db data/store/live-prices.duckdb` "
-            "or `uv run trader live-price-ingest ... --source alpaca` after Alpaca auth works."
+            "or `uv run trader live-price-ingest SYMBOL --source external --price PRICE "
+            "--ack-external-price --price-as-of YYYY-MM-DD` for manual broker execution."
         )
     if "paper-oos" in areas:
         actions.append(
@@ -3965,9 +4323,13 @@ def _live_readiness_remediation(
             "periods, then provide LIVE_PAPER_OOS_PRICES for scoring."
         )
     if "live-drill" in areas:
-        actions.append("Record passing paper/shadow drills with `uv run trader live-drill record ...`.")
+        actions.append(
+            "Record passing paper/shadow drills with `uv run trader live-drill record ...`."
+        )
     if "halt" in areas:
-        actions.append("Resolve the halt root cause, then clear it with `uv run trader live-halt clear`.")
+        actions.append(
+            "Resolve the halt root cause, then clear it with `uv run trader live-halt clear`."
+        )
     if "model-gate" in areas:
         actions.append(
             "Record an approved promotion decision with `uv run trader validate-model --record-gate ...`."
@@ -4045,6 +4407,8 @@ def _live_broker_adapter(broker_name: str, args: argparse.Namespace) -> BrokerAd
             positions=positions,
             mode=getattr(args, "fake_mode", "fill"),
         )
+    if normalized in _MANUAL_BROKERS:
+        return _manual_broker_adapter_from_env(normalized)
     if normalized in {"alpaca-paper", "alpaca-live"}:
         api_key = os.getenv("ALPACA_API_KEY", "").strip()
         secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
@@ -4130,9 +4494,20 @@ def _run_quality(args: argparse.Namespace) -> int:
 
 
 def _run_dashboard(args: argparse.Namespace) -> int:
-    command = f"uv run streamlit run dashboard/app.py --server.port {args.port}"
+    command_args = [
+        "uv",
+        "run",
+        "streamlit",
+        "run",
+        "dashboard/app.py",
+        "--server.port",
+        str(args.port),
+    ]
+    command = " ".join(command_args)
     print(command)
     print(f"Dashboard URL: http://localhost:{args.port}")
+    if args.run:
+        return subprocess.call(command_args)
     return 0
 
 

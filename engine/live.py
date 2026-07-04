@@ -40,7 +40,7 @@ class LiveTradingPolicy:
 
 def load_live_trading_policy() -> LiveTradingPolicy:
     broker = os.getenv("LIVE_BROKER", "").strip()
-    live_broker = broker.lower() == "alpaca-live"
+    live_broker = broker.lower() in {"alpaca-live", "manual-live"}
     # Drill-day gates may be reduced only with an explicit acknowledgement. The forward-alpha
     # evidence gates (paper-OOS periods and live/backtest ratio) stay hard floors for live money:
     # a single env toggle must not erase the only out-of-sample evidence requirement.

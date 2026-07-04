@@ -724,6 +724,8 @@ def test_live_submit_can_submit_to_fake_after_all_gates_pass(tmp_path, monkeypat
             "2",
             "--price",
             "100",
+            "--sectors-csv",
+            str(sectors_csv),
             "--submit",
             "--ack-live-order",
             "--as-of",
@@ -1167,6 +1169,173 @@ def test_live_readiness_broker_preflight_blocks_closed_market_and_low_buying_pow
     assert "| broker-preflight | -30%" in captured.out
     assert "Rerun broker preflight during the regular market session" in captured.out
     assert "Reduce LIVE_MAX_CAPITAL or fund the broker account" in captured.out
+
+
+def test_live_readiness_manual_paper_accepts_external_price_without_alpaca(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="manual-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    _set_manual_broker_env(monkeypatch)
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+
+    ingested = cli.main(
+        [
+            "live-price-ingest",
+            "QQQ",
+            "--source",
+            "external",
+            "--price",
+            "100",
+            "--price-as-of",
+            "2026-05-25",
+            "--ack-external-price",
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+    assert ingested == 0
+
+    result = cli.main(
+        [
+            "live-readiness",
+            "--require-order-submission",
+            "--require-broker-preflight",
+            "--require-price",
+            "QQQ",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Broker | manual-paper" in captured.out
+    assert "Operational Confidence | 100%" in captured.out
+    assert "ALPACA_API_KEY" not in captured.out
+
+
+def test_live_submit_blocks_manual_broker_api_submission(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="manual-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+
+    result = cli.main(
+        [
+            "live-submit",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--price",
+            "100",
+            "--submit",
+            "--ack-live-order",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "manual brokers do not support API submission" in captured.out
+    assert "use live-ticket" in captured.out
+
+
+def test_live_ticket_writes_manual_execution_ticket(tmp_path, monkeypatch, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    ticket_log = tmp_path / "tickets.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="manual-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    _set_manual_broker_env(monkeypatch)
+
+    result = cli.main(
+        [
+            "live-ticket",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--price",
+            "100",
+            "--ack-manual-ticket",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+            "--ticket-log",
+            str(ticket_log),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Manual Order Ticket" in captured.out
+    assert "Execution Required | external broker manual entry" in captured.out
+    ticket_rows = [json.loads(line) for line in ticket_log.read_text().splitlines()]
+    tickets = [row for row in ticket_rows if row.get("record_type") == "manual_ticket"]
+    assert tickets
+    assert tickets[0]["broker"] == "manual-paper"
+    assert tickets[0]["symbol"] == "QQQ"
+    assert tickets[0]["status"] == "ticket_created_external_execution_required"
 
 
 def test_live_readiness_ignores_future_paper_oos_rows_before_as_of(
@@ -1743,6 +1912,15 @@ def _set_live_env(
         monkeypatch.setenv("LIVE_MIN_PAPER_OOS_VS_BACKTEST", min_paper_oos_vs_backtest)
     if paper_oos_backtest_excess is not None:
         monkeypatch.setenv("LIVE_PAPER_OOS_BACKTEST_EXCESS", paper_oos_backtest_excess)
+
+
+def _set_manual_broker_env(monkeypatch) -> None:
+    monkeypatch.setenv("LIVE_MANUAL_ACCOUNT_ID", "manual-test")
+    monkeypatch.setenv("LIVE_MANUAL_CASH", "100000")
+    monkeypatch.setenv("LIVE_MANUAL_EQUITY", "100000")
+    monkeypatch.setenv("LIVE_MANUAL_BUYING_POWER", "100000")
+    monkeypatch.setenv("LIVE_MANUAL_MARKET_OPEN", "true")
+    monkeypatch.setenv("LIVE_MANUAL_POSITIONS", "")
 
 
 def _approve_strategy(registry: Path, strategy_id: str) -> None:
