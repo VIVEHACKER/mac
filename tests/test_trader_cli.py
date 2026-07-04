@@ -2748,3 +2748,160 @@ def test_paper_exposure_flags_breach(tmp_path, capsys, monkeypatch) -> None:
     captured = capsys.readouterr()
     assert result == 2
     assert "BREACH" in captured.out and "single-name AAA" in captured.out
+
+
+# ── codex P1/P2: manual-broker fail-closed gaps ────────────────────────────────
+
+
+def test_resolve_live_sectors_fails_closed_for_unclassified_symbol() -> None:
+    # P1: a real execution whose symbol the sector map cannot classify must fail closed;
+    # inspection (require_gate=False) stays lenient. Shared by live-submit and manual live-ticket.
+    _, blocking, _ = cli._resolve_live_sectors(
+        None, "ZZZZ", subcommand="live-ticket", require_gate=True
+    )
+    assert blocking  # unclassified symbol under a real execution -> at least one error issue
+    _, lenient, _ = cli._resolve_live_sectors(
+        None, "ZZZZ", subcommand="live-ticket", require_gate=False
+    )
+    assert not lenient
+
+
+def test_resolve_live_sectors_accepts_explicit_map(tmp_path) -> None:
+    # P2 follow-up: an explicit --sectors-csv (threaded by live-ticket) satisfies the gate even
+    # when auto-discovery would not classify the symbol — the fail-closed gate must be escapable.
+    csv = tmp_path / "sectors.csv"
+    csv.write_text("symbol,sic,sector\nQQQ,0000,ETF\n", encoding="utf-8")
+    sectors, issues, label = cli._resolve_live_sectors(
+        csv, "QQQ", subcommand="live-ticket", require_gate=True
+    )
+    assert not issues
+    assert sectors and sectors.get("QQQ") == "ETF"
+    assert str(csv) in label
+
+
+def test_manual_env_float_rejects_non_finite(monkeypatch) -> None:
+    # P2: nan/inf parse as float but make every downstream readiness/risk comparison fail open.
+    for bad in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("LIVE_MANUAL_EQUITY", bad)
+        with pytest.raises(ValueError, match="finite"):
+            cli._manual_env_float("LIVE_MANUAL_EQUITY", [])
+    monkeypatch.setenv("LIVE_MANUAL_EQUITY", "100000")
+    assert cli._manual_env_float("LIVE_MANUAL_EQUITY", []) == 100000.0
+
+
+def test_live_ticket_rejects_non_finite_price(tmp_path, monkeypatch, capsys) -> None:
+    # P2: --price nan slips past the deviation check (nan > x == False) and fails open in risk.
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="manual-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    _set_manual_broker_env(monkeypatch)
+
+    result = cli.main(
+        [
+            "live-ticket",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--price",
+            "nan",
+            "--ack-manual-ticket",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+            "--ticket-log",
+            str(tmp_path / "tickets.jsonl"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "finite positive" in captured.out
+
+
+def test_live_price_ingest_external_rejects_non_finite_price(tmp_path, monkeypatch, capsys) -> None:
+    # P2: external operator-attested --price nan must not be stored as a broker-grade mark.
+    catalog_db = tmp_path / "catalog.duckdb"
+    ingested = cli.main(
+        [
+            "live-price-ingest",
+            "QQQ",
+            "--source",
+            "external",
+            "--price",
+            "nan",
+            "--price-as-of",
+            "2026-05-25",
+            "--ack-external-price",
+            "--catalog-db",
+            str(catalog_db),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert ingested != 0
+    assert "finite positive" in captured.out
+
+
+def test_live_ticket_rejects_non_finite_limit_price(tmp_path, monkeypatch, capsys) -> None:
+    # P2 follow-up: a finite --price with a NaN --limit-price still fails open — the limit price
+    # becomes the risk mark (normalized.limit_price or reference_mark), so it must be validated too.
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="manual-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    _set_manual_broker_env(monkeypatch)
+
+    result = cli.main(
+        [
+            "live-ticket",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--price",
+            "100",
+            "--limit-price",
+            "nan",
+            "--ack-manual-ticket",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+            "--ticket-log",
+            str(tmp_path / "tickets.jsonl"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "limit-price" in captured.out and "finite positive" in captured.out

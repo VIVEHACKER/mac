@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -1110,6 +1111,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=_default_live_mark_deviation(),
         help="Maximum allowed difference between --price and latest external catalog close.",
+    )
+    live_ticket.add_argument(
+        "--sectors-csv",
+        type=Path,
+        default=None,
+        help="Explicit symbol->sector CSV for the sector cap (else auto-discover data/sectors/). "
+        "manual-live fails closed if neither classifies the order symbol.",
     )
     live_ticket.add_argument("--ticket-log", type=Path, default=DEFAULT_MANUAL_TICKET_LOG)
     live_ticket.add_argument("--halt-state", type=Path, default=DEFAULT_HALT_STATE)
@@ -3111,9 +3119,14 @@ def _manual_env_float(name: str, missing: list[str]) -> float:
         missing.append(name)
         return 0.0
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be numeric") from exc
+    # argparse/float() accept nan/inf; a non-finite equity/buying-power makes every downstream
+    # readiness and risk comparison fail open (NaN compares False) — reject it here (codex P2).
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite (got {raw!r})")
+    return value
 
 
 def _manual_broker_adapter_from_env(broker_name: str) -> ManualBrokerAdapter:
@@ -3154,8 +3167,8 @@ def _run_live_price_ingest(args: argparse.Namespace) -> int:
         if len(symbols) != 1:
             print("--source external supports exactly one symbol per command")
             return 2
-        if args.price is None or args.price <= 0:
-            print("--price > 0 is required with --source external")
+        if args.price is None or not math.isfinite(args.price) or args.price <= 0:
+            print("--price must be a finite positive number with --source external")
             return 2
         if not args.ack_external_price:
             print("--ack-external-price is required with --source external")
@@ -3413,6 +3426,65 @@ def _run_live_dry_run(args: argparse.Namespace) -> int:
     return 1
 
 
+def _resolve_live_sectors(
+    sectors_csv: Path | None,
+    symbol: str,
+    *,
+    subcommand: str,
+    require_gate: bool,
+) -> tuple[dict[str, str] | None, list[DataQualityIssue], str]:
+    """Load the symbol->sector map for the pre-trade sector cap and, for a REAL execution
+    (``require_gate``), fail closed when the map is missing or does not classify the order symbol
+    — otherwise the order trades sector-blind (codex P1). Shared by live-submit and live-ticket so
+    the manual path cannot silently bypass the sector concentration gate the API path enforces.
+    """
+    from risk.sectors import load_sector_map  # local: shared import block is contended
+
+    issues: list[DataQualityIssue] = []
+    sectors: dict[str, str] | None = None
+    label = "missing (sector cap inactive)"
+    if sectors_csv is not None:
+        if sectors_csv.exists():
+            sectors = load_sector_map(sectors_csv)
+            label = str(sectors_csv)
+        else:
+            issues.append(
+                DataQualityIssue(
+                    "error", subcommand, "sectors", f"--sectors-csv {sectors_csv} does not exist"
+                )
+            )
+    else:
+        auto_map = _latest_sector_map()
+        if auto_map is not None:
+            sectors = load_sector_map(auto_map)
+            label = str(auto_map)
+        elif require_gate:
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    subcommand,
+                    "sectors",
+                    "no symbol->sector map found under data/sectors/; run "
+                    "`python scripts/fetch_sectors.py --universe-csv "
+                    "data/universes/sp100-pit-2008.csv` or pass --sectors-csv "
+                    "(a real submission must not trade sector-blind)",
+                )
+            )
+    # A map that does not classify the ORDER symbol makes the pretrade gate skip the sector cap for
+    # exactly this order — a real execution must fail closed instead of trading sector-blind.
+    if require_gate and sectors is not None and symbol.upper() not in sectors:
+        issues.append(
+            DataQualityIssue(
+                "error",
+                subcommand,
+                "sectors",
+                f"sector map {label} does not classify {symbol} — the sector cap cannot gate this "
+                "order; extend the map (fetch_sectors) or pass a --sectors-csv that covers it",
+            )
+        )
+    return sectors, issues, label
+
+
 def _run_live_submit(args: argparse.Namespace) -> int:
     policy = load_live_trading_policy()
     symbol = _catalog_symbol(args.symbol, args.market)
@@ -3432,6 +3504,18 @@ def _run_live_submit(args: argparse.Namespace) -> int:
         require_order_submission=args.submit,
         require_broker_preflight=False,
     )
+    # A non-finite/non-positive mark makes the deviation check (nan > x == False) and every
+    # downstream notional/cash/weight comparison fail open — reject before it reaches risk (codex P2).
+    for _flag, _val in (("--price", args.price), ("--limit-price", args.limit_price)):
+        if _val is not None and (not math.isfinite(_val) or _val <= 0):
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-submit",
+                    "price",
+                    f"{_flag} must be a finite positive number (got {_val})",
+                )
+            )
     catalog_mark = _latest_catalog_mark(catalog, symbol, args.market)
     if catalog_mark is not None and args.max_mark_deviation >= 0:
         deviation = abs(args.price / catalog_mark - 1.0)
@@ -3478,54 +3562,10 @@ def _run_live_submit(args: argparse.Namespace) -> int:
     # but missing = config error; auto-discovery empty = warning in shadow (cap inactive,
     # surfaced in the output) but a BLOCKING issue for a real --submit — real money must not
     # trade sector-blind silently.
-    from risk.sectors import load_sector_map  # local: shared import block is contended
-
-    sectors: dict[str, str] | None = None
-    sectors_label = "missing (sector cap inactive)"
-    if args.sectors_csv is not None:
-        if args.sectors_csv.exists():
-            sectors = load_sector_map(args.sectors_csv)
-            sectors_label = str(args.sectors_csv)
-        else:
-            issues.append(
-                DataQualityIssue(
-                    "error",
-                    "live-submit",
-                    "sectors",
-                    f"--sectors-csv {args.sectors_csv} does not exist",
-                )
-            )
-    else:
-        auto_map = _latest_sector_map()
-        if auto_map is not None:
-            sectors = load_sector_map(auto_map)
-            sectors_label = str(auto_map)
-        elif args.submit:
-            issues.append(
-                DataQualityIssue(
-                    "error",
-                    "live-submit",
-                    "sectors",
-                    "no symbol->sector map found under data/sectors/; run "
-                    "`python scripts/fetch_sectors.py --universe-csv "
-                    "data/universes/sp100-pit-2008.csv` or pass --sectors-csv "
-                    "(a real submission must not trade sector-blind)",
-                )
-            )
-    # A loaded map that does not classify the ORDER symbol (wrong universe / empty file) would
-    # make the pretrade gate skip the sector cap for exactly this order — a real submission must
-    # fail closed instead of trading sector-blind on a technically-present map (codex P1).
-    if args.submit and sectors is not None and symbol.upper() not in sectors:
-        issues.append(
-            DataQualityIssue(
-                "error",
-                "live-submit",
-                "sectors",
-                f"sector map {sectors_label} does not classify {symbol} — the sector cap "
-                "cannot gate this order; extend the map (fetch_sectors) or pass a "
-                "--sectors-csv that covers it",
-            )
-        )
+    sectors, sector_issues, sectors_label = _resolve_live_sectors(
+        args.sectors_csv, symbol, subcommand="live-submit", require_gate=args.submit
+    )
+    issues.extend(sector_issues)
     if issues:
         print(
             _format_live_readiness(
@@ -3676,6 +3716,18 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
             require_broker_preflight=True,
         )
     )
+    # A non-finite/non-positive mark makes the deviation check (nan > x == False) and every
+    # downstream notional/cash/weight comparison fail open — reject before it reaches risk (codex P2).
+    for _flag, _val in (("--price", args.price), ("--limit-price", args.limit_price)):
+        if _val is not None and (not math.isfinite(_val) or _val <= 0):
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-ticket",
+                    "price",
+                    f"{_flag} must be a finite positive number (got {_val})",
+                )
+            )
     catalog_mark = _latest_catalog_mark(catalog, symbol, args.market)
     if catalog_mark is not None and args.max_mark_deviation >= 0:
         deviation = abs(args.price / catalog_mark - 1.0)
@@ -3689,6 +3741,15 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
                     f"close {catalog_mark:.4f}; max {args.max_mark_deviation:.2%}",
                 )
             )
+    # Mirror live-submit: a manual-live execution must not bypass the sector concentration gate.
+    # manual-paper (inspection) is lenient; manual-live fails closed on a missing/incomplete map.
+    ticket_sectors, ticket_sector_issues, _ = _resolve_live_sectors(
+        args.sectors_csv,
+        symbol,
+        subcommand="live-ticket",
+        require_gate=broker_name.strip().lower() == "manual-live",
+    )
+    issues.extend(ticket_sector_issues)
     if issues:
         print(
             _format_live_readiness(
@@ -3735,6 +3796,8 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
         dry_run=True,
         reference_equity=reference_equity,
         peak_equity=peak_equity,
+        # Sector cap fires only with a map; manual-live fails closed above when it is missing.
+        sectors=ticket_sectors,
     )[0]
     if result.status == "accepted":
         _append_manual_ticket(
