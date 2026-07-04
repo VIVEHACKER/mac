@@ -9,9 +9,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import html
+import io
 import json
+import math
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -23,23 +29,582 @@ CATALOG_PATH = ROOT / DEFAULT_CATALOG_PATH
 OUT_DIR = ROOT / "out"
 MERR = Path("/Users/jjuni/재무관리 모델/merr_corpus")
 RAG_URL = "http://localhost:8800"
+LIVE_CATALOG_PATH = ROOT / "data" / "store" / "live-prices.duckdb"
+MANUAL_TICKET_LOG = ROOT / "data" / "store" / "manual-order-tickets.jsonl"
+LIVE_HALT_STATE = ROOT / "data" / "store" / "live-halt.json"
+LIVE_EQUITY_STATE = ROOT / "data" / "store" / "live-equity.json"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / 테마
 # ─────────────────────────────────────────────────────────────────────────────
 _CSS = """
 <style>
-  .block-container {padding-top: 1.2rem; max-width: 1500px;}
-  h1, h2, h3 {letter-spacing: -0.01em;}
-  [data-testid="stMetricValue"] {font-variant-numeric: tabular-nums;}
-  .stDataFrame {font-variant-numeric: tabular-nums;}
-  .badge {display:inline-block;padding:3px 12px;border-radius:6px;font-weight:600;font-size:0.9rem;}
-  .badge-buy {background:rgba(38,166,154,.18);color:#26a69a;border:1px solid #26a69a;}
-  .badge-hold {background:rgba(255,202,40,.15);color:#ffca28;border:1px solid #ffca28;}
-  .badge-avoid {background:rgba(239,83,80,.15);color:#ef5350;border:1px solid #ef5350;}
-  .hdr-sub {color:#8a93b8;font-size:0.92rem;margin-top:-0.4rem;}
-  div[data-baseweb="tab-list"] {gap: 2px;}
-  button[data-baseweb="tab"] {font-weight:600;}
+  @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.min.css");
+
+  :root {
+    --bg: #f4f6f1;
+    --bg-rail: #e8ede5;
+    --surface: #ffffff;
+    --surface-muted: #eef2eb;
+    --ink: #141815;
+    --ink-soft: #343b37;
+    --muted: #69736d;
+    --line: #d6ddd3;
+    --line-strong: #aeb8af;
+    --accent: #2c6d5c;
+    --accent-deep: #174f42;
+    --accent-soft: #dfece6;
+    --warning: #8a6726;
+    --danger: #a34842;
+    --success: #276b57;
+    --shadow: 0 18px 45px rgba(38, 54, 45, 0.08);
+    --mono: "SFMono-Regular", "JetBrains Mono", "Menlo", monospace;
+  }
+
+  html, body, [class*="css"], [class*="st-"] {
+    font-family: "Pretendard", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    letter-spacing: 0;
+  }
+
+  html, body, .stApp {
+    background:
+      linear-gradient(90deg, rgba(20, 24, 21, 0.035) 1px, transparent 1px),
+      linear-gradient(180deg, rgba(20, 24, 21, 0.03) 1px, transparent 1px),
+      var(--bg);
+    background-size: 28px 28px;
+    color: var(--ink);
+  }
+
+  .stApp::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: radial-gradient(rgba(20, 24, 21, 0.09) 0.6px, transparent 0.6px);
+    background-size: 5px 5px;
+    opacity: 0.16;
+    z-index: 0;
+  }
+
+  [data-testid="stToolbar"], footer, header[data-testid="stHeader"] {
+    display: none;
+  }
+
+  .block-container {
+    position: relative;
+    z-index: 1;
+    padding: 2.1rem 3rem 4rem;
+    max-width: 1460px;
+  }
+
+  h1, h2, h3, h4 {
+    color: var(--ink);
+    letter-spacing: 0;
+    text-wrap: balance;
+    word-break: keep-all;
+  }
+
+  h2, h3 {
+    margin-top: 0.45rem;
+  }
+
+  p, li, label, span, div {
+    word-break: keep-all;
+  }
+
+  code, pre, [data-testid="stMetricValue"], .stDataFrame {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .app-hero {
+    display: grid;
+    grid-template-columns: minmax(280px, 0.9fr) minmax(420px, 1.35fr);
+    gap: 2rem;
+    align-items: end;
+    border-top: 2px solid var(--ink);
+    border-bottom: 1px solid var(--line-strong);
+    padding: 1.65rem 0 1.35rem;
+    margin-bottom: 1.2rem;
+  }
+
+  .hero-kicker, .section-kicker {
+    color: var(--accent-deep);
+    font-size: 0.73rem;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .hero-title {
+    margin: 0.4rem 0 0.35rem;
+    color: var(--ink);
+    font-size: clamp(2rem, 4.4vw, 4.3rem);
+    line-height: 1.02;
+    font-weight: 860;
+  }
+
+  .hero-copy {
+    color: var(--muted);
+    max-width: 62ch;
+    font-size: 0.98rem;
+    line-height: 1.6;
+    word-break: keep-all !important;
+    overflow-wrap: normal !important;
+    line-break: strict;
+  }
+
+  .hero-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.72);
+    box-shadow: var(--shadow);
+  }
+
+  .hero-metric {
+    min-height: 104px;
+    padding: 1rem 1rem 0.9rem;
+    border-right: 1px solid var(--line);
+  }
+
+  .hero-metric:last-child {
+    border-right: 0;
+  }
+
+  .hero-metric-label {
+    color: var(--muted);
+    font-size: 0.77rem;
+    font-weight: 700;
+  }
+
+  .hero-metric-value {
+    margin-top: 0.6rem;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: clamp(1.35rem, 2.5vw, 2rem);
+    font-weight: 760;
+    line-height: 1.08;
+  }
+
+  .hero-metric-value.compact {
+    font-size: clamp(1.15rem, 1.7vw, 1.55rem);
+    line-height: 1.22;
+    white-space: normal;
+  }
+
+  .hero-metric-foot {
+    margin-top: 0.55rem;
+    color: var(--muted);
+    font-size: 0.72rem;
+  }
+
+  .section-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(220px, max-content);
+    align-items: end;
+    gap: 1rem;
+    padding-top: 1.15rem;
+    margin: 0.35rem 0 1rem;
+    border-top: 1px solid var(--line);
+  }
+
+  .section-title {
+    margin: 0.18rem 0 0;
+    color: var(--ink);
+    font-size: clamp(1.35rem, 2vw, 2rem);
+    font-weight: 820;
+    line-height: 1.18;
+  }
+
+  .section-note, .evidence-note {
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.55;
+    margin: 0.35rem 0 0;
+    word-break: keep-all !important;
+    overflow-wrap: normal !important;
+    line-break: strict;
+  }
+
+  .section-side {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    text-align: right;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .stock-brief {
+    display: grid;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+    gap: 1rem;
+    margin: 0.9rem 0 1rem;
+  }
+
+  .candidate-list {
+    border-top: 2px solid var(--ink);
+    border-bottom: 1px solid var(--line-strong);
+    margin: 1rem 0 1.1rem;
+    background: rgba(255, 255, 255, 0.58);
+  }
+
+  .candidate-row {
+    display: grid;
+    grid-template-columns: 0.55fr 1.15fr 1.6fr 0.88fr;
+    gap: 1rem;
+    padding: 0.95rem 0.85rem;
+    border-bottom: 1px solid var(--line);
+    align-items: start;
+  }
+
+  .candidate-row:last-child {
+    border-bottom: 0;
+  }
+
+  .candidate-rank {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.78rem;
+  }
+
+  .candidate-symbol {
+    margin-top: 0.25rem;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 1.25rem;
+    font-weight: 820;
+  }
+
+  .candidate-name {
+    color: var(--ink);
+    font-weight: 780;
+    line-height: 1.25;
+  }
+
+  .candidate-sector {
+    margin-top: 0.22rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+
+  .candidate-copy {
+    color: var(--ink-soft);
+    font-size: 0.88rem;
+    line-height: 1.5;
+    word-break: keep-all;
+  }
+
+  .candidate-levels {
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.55;
+    white-space: nowrap;
+  }
+
+  .brief-panel {
+    background: rgba(255, 255, 255, 0.82);
+    border: 1px solid var(--line);
+    border-top: 2px solid var(--ink);
+    padding: 1rem 1.05rem;
+    min-width: 0;
+  }
+
+  .brief-label {
+    color: var(--accent-deep);
+    font-size: 0.72rem;
+    font-weight: 820;
+    text-transform: uppercase;
+  }
+
+  .brief-title {
+    margin-top: 0.35rem;
+    color: var(--ink);
+    font-size: 1.35rem;
+    font-weight: 840;
+    line-height: 1.2;
+  }
+
+  .brief-meta {
+    margin-top: 0.28rem;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.78rem;
+  }
+
+  .brief-body {
+    margin-top: 0.78rem;
+    color: var(--ink-soft);
+    font-size: 0.94rem;
+    line-height: 1.62;
+    word-break: keep-all;
+    overflow-wrap: normal;
+  }
+
+  .brief-list {
+    margin: 0.7rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .brief-list li {
+    position: relative;
+    padding-left: 0.9rem;
+    margin: 0.42rem 0;
+    color: var(--ink-soft);
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+
+  .brief-list li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.62em;
+    width: 0.34rem;
+    height: 0.34rem;
+    background: var(--accent);
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.55rem;
+    padding: 0.18rem 0.58rem;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-weight: 760;
+    font-size: 0.78rem;
+    letter-spacing: 0;
+  }
+
+  .badge-buy {
+    background: #dceee7;
+    color: var(--success);
+    border: 1px solid rgba(39, 107, 87, 0.24);
+  }
+
+  .badge-hold {
+    background: #f2ead8;
+    color: var(--warning);
+    border: 1px solid rgba(138, 103, 38, 0.24);
+  }
+
+  .badge-avoid {
+    background: #f4dedc;
+    color: var(--danger);
+    border: 1px solid rgba(163, 72, 66, 0.22);
+  }
+
+  div[data-testid="stMetric"] {
+    background: rgba(255, 255, 255, 0.78);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    padding: 0.9rem 1rem;
+    min-height: 96px;
+    box-shadow: 0 10px 24px rgba(38, 54, 45, 0.055);
+  }
+
+  [data-testid="stMetricLabel"] {
+    color: var(--muted);
+    font-weight: 720;
+  }
+
+  [data-testid="stMetricValue"] {
+    color: var(--ink);
+    font-weight: 760;
+  }
+
+  [data-testid="stMetricDelta"] {
+    color: var(--accent-deep);
+  }
+
+  div[data-baseweb="tab-list"] {
+    gap: 0.35rem;
+    border-bottom: 1px solid var(--line-strong);
+    padding-bottom: 0.52rem;
+    margin-bottom: 1.35rem;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  div[data-baseweb="tab-list"]::-webkit-scrollbar {
+    display: none;
+  }
+
+  button[data-baseweb="tab"] {
+    flex: 0 0 auto;
+    min-height: 2.65rem;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: var(--muted);
+    font-weight: 760;
+    white-space: nowrap;
+    transition: background 180ms ease, color 180ms ease, border-color 180ms ease, transform 120ms ease;
+  }
+
+  button[data-baseweb="tab"]:hover {
+    background: rgba(44, 109, 92, 0.08);
+    color: var(--ink);
+  }
+
+  button[data-baseweb="tab"]:active {
+    transform: translateY(1px);
+  }
+
+  button[data-baseweb="tab"][aria-selected="true"] {
+    background: var(--ink);
+    color: #f7faf6;
+    border-color: var(--ink);
+  }
+
+  div[data-baseweb="tab-highlight"] {
+    display: none;
+  }
+
+  .stButton > button {
+    border-radius: 4px;
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: #f7faf6;
+    font-weight: 760;
+    transition: transform 120ms ease, box-shadow 180ms ease, background 180ms ease;
+    box-shadow: 0 8px 18px rgba(20, 24, 21, 0.12);
+  }
+
+  .stButton > button:hover {
+    background: var(--accent-deep);
+    border-color: var(--accent-deep);
+    color: #ffffff;
+  }
+
+  .stButton > button * {
+    color: inherit !important;
+  }
+
+  .stButton > button:active {
+    transform: translateY(1px);
+  }
+
+  .stButton > button:focus-visible,
+  button[data-baseweb="tab"]:focus-visible {
+    outline: 3px solid rgba(44, 109, 92, 0.28);
+    outline-offset: 2px;
+  }
+
+  [data-baseweb="input"] > div,
+  [data-baseweb="select"] > div,
+  [data-baseweb="textarea"] {
+    background: rgba(255, 255, 255, 0.84);
+    border-color: var(--line-strong);
+    border-radius: 4px;
+  }
+
+  [data-baseweb="input"]:focus-within > div,
+  [data-baseweb="select"]:focus-within > div,
+  [data-baseweb="textarea"]:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(44, 109, 92, 0.12);
+  }
+
+  [data-testid="stDataFrame"],
+  .stDataFrame {
+    border: 1px solid var(--line);
+    box-shadow: 0 12px 28px rgba(38, 54, 45, 0.055);
+  }
+
+  div[data-testid="stExpander"] {
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.7);
+    border-radius: 4px;
+    box-shadow: none;
+  }
+
+  div[data-testid="stAlert"] {
+    border-radius: 4px;
+    border: 1px solid var(--line);
+  }
+
+  hr {
+    border-color: var(--line);
+    margin: 1.4rem 0;
+  }
+
+  @media (max-width: 900px) {
+    .block-container {
+      padding: 1.35rem 1rem 3rem;
+    }
+    .app-hero {
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+    .hero-metrics {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .hero-metric:nth-child(2) {
+      border-right: 0;
+    }
+    .hero-metric:nth-child(-n + 2) {
+      border-bottom: 1px solid var(--line);
+    }
+    .section-head {
+      grid-template-columns: 1fr;
+    }
+    .section-side {
+      text-align: left;
+    }
+    .stock-brief {
+      grid-template-columns: 1fr;
+    }
+    .candidate-row {
+      grid-template-columns: 1fr;
+      gap: 0.55rem;
+      padding: 0.9rem 0.75rem;
+    }
+    .candidate-levels {
+      white-space: normal;
+    }
+    div[data-baseweb="tab-list"] {
+      flex-wrap: wrap;
+      overflow-x: visible;
+      row-gap: 0.42rem;
+    }
+    button[data-baseweb="tab"] {
+      min-height: 2.45rem;
+      padding-inline: 0.7rem;
+      font-size: 0.86rem;
+    }
+  }
+
+  @media (min-width: 901px) and (max-width: 1180px) {
+    .app-hero {
+      grid-template-columns: 1fr;
+      align-items: start;
+    }
+    .hero-metrics {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .section-head {
+      grid-template-columns: 1fr;
+      align-items: start;
+    }
+    .section-side {
+      text-align: left;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 </style>
 """
 
@@ -52,6 +617,378 @@ def _badge(action: str) -> str:
         else ("badge-avoid" if a in ("AVOID", "SELL") else "badge-hold")
     )
     return f'<span class="badge {cls}">{a or "—"}</span>'
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _fmt_num(value: Any, digits: int = 2) -> str:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return "—"
+    return f"{numeric:,.{digits}f}"
+
+
+def _fmt_pct(
+    value: Any, digits: int = 1, *, already_pct: bool = False, signed: bool = True
+) -> str:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return "—"
+    pct = numeric if already_pct else numeric * 100
+    sign = "+" if signed else ""
+    return f"{pct:{sign}.{digits}f}%"
+
+
+def _short_text(text: str, limit: int = 120) -> str:
+    clean = " ".join(str(text).split())
+    return clean if len(clean) <= limit else f"{clean[: limit - 1]}…"
+
+
+def _compact_reasons(reasons: tuple[str, ...] | list[str], limit: int = 2) -> str:
+    clean = [_short_text(reason, 110) for reason in reasons if str(reason).strip()]
+    return " · ".join(clean[:limit]) if clean else "—"
+
+
+def _confidence_score(confidence: Any) -> float | None:
+    return _safe_float(getattr(confidence, "score", None))
+
+
+def _factor_rows(values: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"항목": "AQR 합성", "값": _fmt_num(values.get("composite"), 3), "해석": "횡단면 최종 점수"},
+        {"항목": "모멘텀", "값": _fmt_pct(values.get("momentum")), "해석": "최근 추세 강도"},
+        {"항목": "가치", "값": _fmt_num(values.get("value"), 3), "해석": "밸류에이션 팩터"},
+        {"항목": "퀄리티", "값": _fmt_num(values.get("quality"), 3), "해석": "수익성/재무 품질"},
+    ]
+
+
+def _signal_direction_label(direction: int) -> str:
+    if direction > 0:
+        return "우호"
+    if direction < 0:
+        return "반대"
+    return "중립"
+
+
+def _entry_zone_text(entry_zone: tuple[float, float] | None) -> str:
+    if not entry_zone:
+        return "—"
+    lo, hi = entry_zone
+    return f"{_fmt_num(lo)} ~ {_fmt_num(hi)}"
+
+
+def _entry_plan_rows(entry_plan: Any) -> list[dict[str, str]]:
+    if entry_plan is None:
+        return []
+    return [
+        {"항목": "현재가", "값": _fmt_num(getattr(entry_plan, "current_price", None))},
+        {"항목": "평균 진입", "값": _fmt_num(getattr(entry_plan, "target_entry", None))},
+        {"항목": "손절", "값": _fmt_num(getattr(entry_plan, "stop_loss", None))},
+        {"항목": "목표", "값": _fmt_num(getattr(entry_plan, "target_exit", None))},
+        {"항목": "손익비", "값": _fmt_num(getattr(entry_plan, "risk_reward", None), 2)},
+        {"항목": "예상 보유일", "값": f"{getattr(entry_plan, 'expected_holding_days', '—')}일"},
+    ]
+
+
+_STOCK_PROFILES: dict[str, dict[str, str | tuple[str, ...]]] = {
+    "CL": {
+        "name": "Colgate-Palmolive",
+        "sector": "필수소비재",
+        "business": "치약, 구강관리, 개인·가정용품, 반려동물 영양 브랜드를 전세계에 판매하는 방어적 소비재 기업입니다.",
+        "why": "경기 민감도가 낮은 반복 수요 사업이고, 현재 검증 AQR 랭킹에서 최상단에 있어 모델은 방어적 현금흐름과 상대 강도를 동시에 평가합니다.",
+        "risks": (
+            "원재료 가격과 환율이 마진을 압박할 수 있습니다.",
+            "신흥국 소비 둔화가 매출 성장률을 낮출 수 있습니다.",
+            "방어주 특성상 급등장에서 상대 수익률이 약해질 수 있습니다.",
+        ),
+    },
+    "MU": {
+        "name": "Micron Technology",
+        "sector": "반도체 메모리",
+        "business": "DRAM, NAND, 고대역폭 메모리(HBM)를 만드는 메모리 반도체 기업입니다.",
+        "why": "메모리 업황 회복과 AI 서버 메모리 수요를 가격/모멘텀이 반영하는 구간에서 AQR 상위권에 올라온 종목입니다.",
+        "risks": (
+            "메모리 가격은 공급 증설과 재고 사이클에 크게 흔들립니다.",
+            "대규모 설비투자가 현금흐름 변동성을 키울 수 있습니다.",
+            "중국/수출 규제와 고객 투자 지연이 리스크입니다.",
+        ),
+    },
+    "TGT": {
+        "name": "Target",
+        "sector": "소매",
+        "business": "미국 전역의 대형 매장과 온라인 채널로 생활용품, 의류, 식료품을 판매하는 리테일러입니다.",
+        "why": "소비재 리테일 중 가격 회복과 밸류에이션/모멘텀 조합이 개선되어 검증 전략의 보유권 안에 들어왔습니다.",
+        "risks": (
+            "미국 소비 둔화와 재고 부담이 마진을 누를 수 있습니다.",
+            "Walmart, Amazon, Costco와의 가격 경쟁이 강합니다.",
+            "임금·물류비 상승이 영업 레버리지를 약화시킬 수 있습니다.",
+        ),
+    },
+    "HD": {
+        "name": "Home Depot",
+        "sector": "주택·리테일",
+        "business": "건축자재, 주택 보수, DIY·프로 고객용 공구와 설비를 판매하는 미국 최대권 홈임프루브먼트 기업입니다.",
+        "why": "주택 보수 수요가 구조적으로 유지되는 가운데, 모델은 현재 가격 추세와 품질/가치 조합을 상위 후보로 평가합니다.",
+        "risks": (
+            "금리와 주택 거래량 둔화가 매출을 압박할 수 있습니다.",
+            "전문 시공 고객 수요가 경기 변동에 민감합니다.",
+            "목재·운송비 같은 비용 변동이 마진에 영향을 줍니다.",
+        ),
+    },
+    "DD": {
+        "name": "DuPont",
+        "sector": "특수소재",
+        "business": "전자재료, 산업용 소재, 보호소재 등 고부가 화학·소재 제품을 공급하는 기업입니다.",
+        "why": "산업재/소재군 안에서 가격 회복과 AQR 점수가 동시에 개선되어, 모델은 경기 회복 노출이 있는 상위 후보로 분류합니다.",
+        "risks": (
+            "산업 생산 둔화와 고객 재고 조정에 민감합니다.",
+            "원재료 가격과 구조조정 비용이 실적 변동을 키울 수 있습니다.",
+            "사업 포트폴리오 변화가 비교 가능성을 낮출 수 있습니다.",
+        ),
+    },
+    "INTC": {
+        "name": "Intel",
+        "sector": "반도체",
+        "business": "PC·서버 CPU와 데이터센터 반도체, 파운드리 사업을 운영하는 종합 반도체 기업입니다.",
+        "why": "턴어라운드 성격이 강하지만, 현재 모델은 가격 모멘텀과 횡단면 점수가 검증 전략 보유 기준을 넘었다고 봅니다.",
+        "risks": (
+            "공정 전환과 파운드리 실행 실패가 가장 큰 리스크입니다.",
+            "AMD, NVIDIA, TSMC와의 경쟁 압력이 큽니다.",
+            "대규모 투자로 잉여현금흐름 회복이 지연될 수 있습니다.",
+        ),
+    },
+    "LRCX": {
+        "name": "Lam Research",
+        "sector": "반도체 장비",
+        "business": "식각·증착 등 웨이퍼 제조 공정 장비를 공급하는 반도체 장비 기업입니다.",
+        "why": "메모리/첨단 공정 투자 회복에 레버리지가 있고, AQR 상위권 진입으로 모델상 매수 후보가 됐습니다.",
+        "risks": (
+            "반도체 설비투자 사이클이 꺾이면 매출이 빠르게 둔화됩니다.",
+            "중국 수출 규제와 고객 투자 지연에 민감합니다.",
+            "장비주는 기대가 앞서면 밸류에이션 압축이 빠르게 나타납니다.",
+        ),
+    },
+    "AAPL": {
+        "name": "Apple",
+        "sector": "소비자 기술",
+        "business": "iPhone, Mac, iPad, 웨어러블과 서비스 생태계를 운영하는 글로벌 소비자 기술 기업입니다.",
+        "why": "브랜드·서비스 수익 기반이 강하지만, 이 화면에서는 검증 AQR 랭크와 가격 모멘텀을 우선합니다.",
+        "risks": ("iPhone 교체 수요 둔화", "중국 매출과 공급망 리스크", "규제와 앱스토어 수수료 압박"),
+    },
+    "MSFT": {
+        "name": "Microsoft",
+        "sector": "소프트웨어·클라우드",
+        "business": "Azure, Office, Windows, 보안, AI 인프라를 운영하는 글로벌 소프트웨어 플랫폼 기업입니다.",
+        "why": "클라우드와 기업 소프트웨어 기반의 질이 높지만, 매수 여부는 이 화면의 AQR 랭크와 진입 가격으로 판단합니다.",
+        "risks": ("클라우드 성장률 둔화", "AI 인프라 투자 부담", "규제와 대형 고객 IT 지출 둔화"),
+    },
+    "NVDA": {
+        "name": "NVIDIA",
+        "sector": "AI 반도체",
+        "business": "AI 가속기, GPU, 네트워킹, 소프트웨어 생태계를 공급하는 반도체 플랫폼 기업입니다.",
+        "why": "AI 투자 사이클의 대표 수혜주지만, 이 대시보드는 내러티브보다 검증 랭크와 리스크 가격을 우선합니다.",
+        "risks": ("AI 설비투자 둔화", "고객 집중", "수출 규제와 고밸류에이션 압축"),
+    },
+}
+
+
+def _stock_profile(symbol: str) -> dict[str, str | tuple[str, ...]]:
+    normalized = symbol.upper()
+    return _STOCK_PROFILES.get(
+        normalized,
+        {
+            "name": normalized,
+            "sector": "미분류",
+            "business": "이 종목의 사업 설명은 아직 로컬 프로필에 등록되지 않았습니다. 모델 점수와 가격 데이터 기준으로만 판단합니다.",
+            "why": "검증 유니버스 내 상대 랭크, 모멘텀, 가치, 퀄리티 점수와 진입/손절 레벨을 기준으로 매수 후보 여부를 판단합니다.",
+            "risks": (
+                "사업 설명이 미등록되어 정성 리스크 검토가 부족합니다.",
+                "추천기 탭에서 개별 종목 평가를 다시 확인해야 합니다.",
+            ),
+        },
+    )
+
+
+def _model_buy_case(row: dict[str, Any], meta: dict[str, Any] | None = None) -> str:
+    ticker = str(row.get("종목", "")).upper()
+    action = str(row.get("액션", "")).upper()
+    rank = row.get("순위")
+    universe = (meta or {}).get("universe_size") or "?"
+    top_n = (meta or {}).get("top_n") or "?"
+    percentile = row.get("백분위")
+    entry = _fmt_num(row.get("진입"))
+    stop = _fmt_num(row.get("손절"))
+    target = _fmt_num(row.get("목표"))
+    if action not in {"BUY", "HOLD", "AVOID", "SELL"}:
+        basis = row.get("_sort_basis") or row.get("정렬 기준") or "현재 정렬 기준"
+        return (
+            f"{ticker}는 커스텀 스크리너에서 {basis} 기준 #{rank}입니다. "
+            "실제 매수 판단은 검증 선정 또는 추천기 탭에서 액션, 신뢰도, 진입/손절 레벨을 다시 확인해야 합니다."
+        )
+    if action == "BUY":
+        return (
+            f"{ticker}는 검증 유니버스 {universe}개 중 AQR {rank}위, 백분위 {percentile}로 "
+            f"전략 top-{top_n} 보유권 안에 있습니다. 평균 진입 {entry}, 손절 {stop}, 목표 {target}로 "
+            "손실 한도를 먼저 정한 뒤 매수 후보로 봅니다."
+        )
+    if action == "HOLD":
+        return (
+            f"{ticker}는 현재 매수 우선순위는 아니지만 검증 유니버스 내 상대 점수가 남아 있어 "
+            "보유 또는 관찰 대상으로 분류됩니다."
+        )
+    return (
+        f"{ticker}는 현재 모델 기준 매수 조건을 충족하지 않습니다. 랭크, 신뢰도, 진입 가격이 "
+        "개선될 때까지 관찰 대상으로 둡니다."
+    )
+
+
+def _render_stock_brief(symbol: str, row: dict[str, Any], meta: dict[str, Any] | None = None) -> None:
+    profile = _stock_profile(symbol)
+    risks = profile.get("risks", ())
+    risk_items = [risks] if isinstance(risks, str) else list(risks)
+    risk_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in risk_items[:4])
+    st.markdown(
+        f"""
+        <section class="stock-brief">
+          <article class="brief-panel">
+            <div class="brief-label">무슨 종목인가</div>
+            <div class="brief-title">{html.escape(symbol.upper())} · {html.escape(str(profile["name"]))}</div>
+            <div class="brief-meta">{html.escape(str(profile["sector"]))}</div>
+            <div class="brief-body">{html.escape(str(profile["business"]))}</div>
+          </article>
+          <article class="brief-panel">
+            <div class="brief-label">왜 매수 후보인가</div>
+            <div class="brief-body">{html.escape(str(profile["why"]))}</div>
+            <ul class="brief-list">
+              <li>{html.escape(_model_buy_case(row, meta))}</li>
+              <li>모델 판단은 회사 설명이 아니라 검증된 AQR 랭크, 신뢰도, 진입/손절 레벨을 우선합니다.</li>
+            </ul>
+          </article>
+          <article class="brief-panel">
+            <div class="brief-label">매수 조건</div>
+            <ul class="brief-list">
+              <li>평균 진입: {html.escape(_fmt_num(row.get("진입")))}</li>
+              <li>손절: {html.escape(_fmt_num(row.get("손절")))}</li>
+              <li>목표: {html.escape(_fmt_num(row.get("목표")))}</li>
+              <li>현재가: {html.escape(_fmt_num(row.get("현재가")))}</li>
+            </ul>
+          </article>
+          <article class="brief-panel">
+            <div class="brief-label">확인할 리스크</div>
+            <ul class="brief-list">{risk_html}</ul>
+          </article>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_candidate_list(picks: list[dict[str, Any]], meta: dict[str, Any]) -> None:
+    rows: list[str] = []
+    for row in picks:
+        symbol = str(row["종목"]).upper()
+        profile = row.get("_profile") or _stock_profile(symbol)
+        rows.append(
+            '<article class="candidate-row">'
+            "<div>"
+            f'<div class="candidate-rank">#{html.escape(str(row["순위"]))} / '
+            f'{html.escape(str(meta["universe_size"]))}</div>'
+            f'<div class="candidate-symbol">{html.escape(symbol)}</div>'
+            f'<div class="candidate-sector">{html.escape(str(row["액션"]))} · '
+            f'{html.escape(str(row["신뢰도"]))}</div>'
+            "</div>"
+            "<div>"
+            f'<div class="candidate-name">{html.escape(str(profile["name"]))}</div>'
+            f'<div class="candidate-sector">{html.escape(str(profile["sector"]))}</div>'
+            f'<div class="candidate-copy">{html.escape(str(profile["business"]))}</div>'
+            "</div>"
+            f'<div class="candidate-copy">{html.escape(_model_buy_case(row, meta))}</div>'
+            '<div class="candidate-levels">'
+            f'현재 {_fmt_num(row.get("현재가"))}<br>'
+            f'진입 {_fmt_num(row.get("진입"))}<br>'
+            f'손절 {_fmt_num(row.get("손절"))}<br>'
+            f'목표 {_fmt_num(row.get("목표"))}'
+            "</div>"
+            "</article>"
+        )
+    st.markdown(
+        f'<section class="candidate-list">{"".join(rows)}</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_section_header(
+    title: str,
+    note: str = "",
+    *,
+    kicker: str = "Workspace",
+    side: str = "",
+) -> None:
+    side_html = f'<div class="section-side">{html.escape(side)}</div>' if side else ""
+    st.markdown(
+        f"""
+        <section class="section-head">
+          <div>
+            <div class="section-kicker">{html.escape(kicker)}</div>
+            <h2 class="section-title">{html.escape(title)}</h2>
+            {f'<p class="section-note">{html.escape(note)}</p>' if note else ''}
+          </div>
+          {side_html}
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_app_header(cov: list[Any]) -> None:
+    total_bars = sum(c.rows for c in cov)
+    markets = " / ".join(sorted({c.market for c in cov})) if cov else "—"
+    refreshed = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+    st.markdown(
+        f"""
+        <section class="app-hero">
+          <div>
+            <div class="hero-kicker">Local trading operations</div>
+            <h1 class="hero-title">재무관리 모델</h1>
+            <p class="hero-copy">
+              종목 선정, 차트 판정, 추천 근거, 검증 결과를 확인합니다.
+              페이퍼 원장과 실거래 티켓도 같은 화면에서 점검합니다.
+            </p>
+          </div>
+          <div class="hero-metrics" aria-label="대시보드 상태">
+            <div class="hero-metric">
+              <div class="hero-metric-label">Catalog</div>
+              <div class="hero-metric-value">{len(cov):,}</div>
+              <div class="hero-metric-foot">tracked symbols</div>
+            </div>
+            <div class="hero-metric">
+              <div class="hero-metric-label">Bars</div>
+              <div class="hero-metric-value">{total_bars:,}</div>
+              <div class="hero-metric-foot">stored observations</div>
+            </div>
+            <div class="hero-metric">
+              <div class="hero-metric-label">Markets</div>
+              <div class="hero-metric-value compact">{html.escape(markets)}</div>
+              <div class="hero-metric-foot">available universes</div>
+            </div>
+            <div class="hero-metric">
+              <div class="hero-metric-label">Runtime</div>
+              <div class="hero-metric-value">Local</div>
+              <div class="hero-metric-foot">{refreshed}</div>
+            </div>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,18 +1091,55 @@ def _validated_scan_rows() -> tuple[dict, list[dict]]:
 
     def _row(r) -> dict:
         ep = r.entry_plan
-        return {
+        confidence_score = _confidence_score(r.confidence)
+        confidence_band = getattr(r.confidence, "band", "—")
+        profile = _stock_profile(r.ticker)
+        if r.rank is not None:
+            selection_reason = (
+                f"AQR {r.rank}/{r.universe_size}위 · 백분위 {r.percentile:.0f} · "
+                f"{'전략 보유권' if r.in_top_n else f'top-{strat.top_n} 밖'}"
+            )
+        else:
+            selection_reason = "검증 유니버스 밖 · forward edge 미확인"
+        risk_parts = []
+        if not r.valuation_credible:
+            risk_parts.append("DCF 참고용")
+        if not r.in_validated_universe:
+            risk_parts.append("검증 밖")
+        if str(confidence_band).lower() not in {"high", "높음"}:
+            risk_parts.append(f"신뢰도 {confidence_band}")
+        row = {
             "순위": r.rank,
             "종목": r.ticker,
+            "기업": str(profile["name"]),
+            "무슨 종목": _short_text(str(profile["business"]), 58),
             "액션": r.action,
-            "신뢰도": r.confidence.band,
+            "신뢰도": confidence_band,
             "백분위": round(r.percentile),
+            "선정 근거": selection_reason,
+            "리스크/제약": " · ".join(risk_parts) if risk_parts else "주요 제약 없음",
             "현재가": round(r.current_price, 2) if r.current_price is not None else None,
             "진입": round(ep.target_entry, 2) if ep else None,
             "손절": round(ep.stop_loss, 2) if ep else None,
             "목표": round(ep.target_exit, 2) if ep else None,
+            "합성": round(r.composite, 3) if r.composite is not None else None,
+            "모멘텀%": round(r.momentum * 100, 2) if r.momentum is not None else None,
+            "가치": round(r.value, 3) if r.value is not None else None,
+            "퀄리티": round(r.quality, 3) if r.quality is not None else None,
             "_pick": bool(r.in_top_n),
+            "_confidence_score": confidence_score,
+            "_reasons": tuple(r.reasons),
+            "_composite": r.composite,
+            "_momentum": r.momentum,
+            "_value": r.value,
+            "_quality": r.quality,
+            "_profile": profile,
         }
+        row["왜 매수"] = _short_text(
+            _model_buy_case(row, {"universe_size": r.universe_size, "top_n": strat.top_n}),
+            92,
+        )
+        return row
 
     return meta, [_row(r) for r in results]
 
@@ -173,8 +1147,8 @@ def _validated_scan_rows() -> tuple[dict, list[dict]]:
 def _render_validated_scan() -> None:
     """전략이 실제 매수하는 검증 선정(상위 N)을 항상 먼저 보여준다 — '8개' 착시 해소."""
     head = st.columns([5, 1])
-    head[0].markdown("#### 🎯 검증 선정 — 전략이 실제 매수하는 상위 N (재현 가능)")
-    if head[1].button("↻ 새로고침", key="vscan_refresh", help="스냅샷 갱신 후 재스캔"):
+    head[0].markdown("#### 검증 선정 — 전략이 실제 매수하는 상위 N")
+    if head[1].button("새로고침", key="vscan_refresh", help="스냅샷 갱신 후 재스캔"):
         _validated_scan_rows.clear()
     try:
         meta, rows = _validated_scan_rows()
@@ -189,28 +1163,108 @@ def _render_validated_scan() -> None:
         f"asof {meta['asof']} · 전략 {meta['strategy']} · 유니버스 {meta['universe_size']}개 "
         f"→ 선정 {len(picks)}개 (top_n={meta['top_n']}) · 핀드 스냅샷 기반(재현 가능)"
     )
-    pick_df = pd.DataFrame([{k: v for k, v in r.items() if k != "_pick"} for r in picks])
-    st.dataframe(pick_df, use_container_width=True, hide_index=True)
-    with st.expander(f"전체 랭킹 {meta['universe_size']}개 보기 (★ = 선정)"):
+
+    scores = [r["_confidence_score"] for r in picks if r.get("_confidence_score") is not None]
+    buy_count = sum(1 for r in picks if str(r["액션"]).upper() == "BUY")
+    hold_count = sum(1 for r in picks if str(r["액션"]).upper() == "HOLD")
+    top_pick = picks[0] if picks else rows[0]
+    m = st.columns(4)
+    m[0].metric("선정 종목", f"{len(picks)}개")
+    m[1].metric("BUY / HOLD", f"{buy_count} / {hold_count}")
+    m[2].metric("평균 신뢰도", f"{sum(scores) / len(scores):.0f}%" if scores else "—")
+    m[3].metric("최상위", f"{top_pick['종목']} #{top_pick['순위']}")
+
+    display_cols = [
+        "순위",
+        "종목",
+        "기업",
+        "무슨 종목",
+        "액션",
+        "신뢰도",
+        "백분위",
+        "왜 매수",
+        "리스크/제약",
+        "현재가",
+        "진입",
+        "손절",
+        "목표",
+    ]
+    pick_df = pd.DataFrame([{k: r.get(k) for k in display_cols} for r in picks])
+    _render_candidate_list(picks, meta)
+    with st.expander("선정 후보 표로 보기"):
+        st.dataframe(pick_df, use_container_width=True, hide_index=True)
+
+    if picks:
+        detail_labels = [f"#{r['순위']} {r['종목']} · {r['액션']}" for r in picks]
+        detail_label = st.selectbox("선정 종목 상세 근거", detail_labels, key="vscan_detail")
+        detail = picks[detail_labels.index(detail_label)]
+        st.markdown('<div class="section-kicker">Selection Evidence</div>', unsafe_allow_html=True)
+        st.markdown(f"##### {detail['종목']} 선정 근거")
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("AQR 랭크", f"{detail['순위']}/{meta['universe_size']}")
+        d2.metric("백분위", f"{detail['백분위']:.0f}")
+        d3.metric("액션", str(detail["액션"]))
+        d4.metric("신뢰도", str(detail["신뢰도"]))
+        st.markdown(f'<p class="evidence-note">{detail["선정 근거"]}</p>', unsafe_allow_html=True)
+        _render_stock_brief(str(detail["종목"]), detail, meta)
+        c1, c2 = st.columns([1.2, 1])
+        with c1:
+            st.dataframe(
+                pd.DataFrame(
+                    _factor_rows(
+                        {
+                            "composite": detail.get("_composite"),
+                            "momentum": detail.get("_momentum"),
+                            "value": detail.get("_value"),
+                            "quality": detail.get("_quality"),
+                        }
+                    )
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        with c2:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"항목": "현재가", "값": _fmt_num(detail.get("현재가"))},
+                        {"항목": "평균 진입", "값": _fmt_num(detail.get("진입"))},
+                        {"항목": "손절", "값": _fmt_num(detail.get("손절"))},
+                        {"항목": "목표", "값": _fmt_num(detail.get("목표"))},
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if detail.get("_reasons"):
+            st.markdown("**핵심 근거**")
+            for reason in detail["_reasons"][:5]:
+                st.markdown(f"- {reason}")
+
+    with st.expander(f"전체 랭킹 {meta['universe_size']}개 보기"):
         usize = max(meta["top_n"], len(rows))
         n = st.slider("표시 개수", meta["top_n"], usize, min(20, usize), key="vscan_top")
         full = []
         for r in rows[:n]:
-            row = {k: v for k, v in r.items() if k != "_pick"}
-            # 컬럼 타입을 문자열로 통일(★ 유무로 int/str 혼합 → pyarrow 직렬화 경고 방지)
-            row["순위"] = f"{r['순위']}★" if r["_pick"] else str(r["순위"])
+            row = {k: v for k, v in r.items() if not k.startswith("_")}
+            row["선정"] = "선정" if r["_pick"] else ""
             full.append(row)
         st.dataframe(pd.DataFrame(full), use_container_width=True, hide_index=True)
     st.caption(
-        "★ = 전략의 top-N 보유(실제 매수 대상). 라이브 카탈로그가 아니라 검증 스냅샷을 "
+        "선정 = 전략의 top-N 보유(실제 매수 대상). 라이브 카탈로그가 아니라 검증 스냅샷을 "
         "쓰므로 `python -m scripts.scan_universe`와 결과가 일치합니다."
     )
 
 
 def _render_screener(catalog) -> None:
-    st.subheader("종목 선정 — AQR 팩터 · 모멘텀 랭크")
+    _render_section_header(
+        "종목 선정",
+        "검증 전략의 실제 매수 후보와 커스텀 유니버스 랭킹을 같은 기준으로 확인합니다.",
+        kicker="Selection",
+        side="AQR / Momentum / Entry levels",
+    )
     _render_validated_scan()
-    st.markdown("---")
+    st.divider()
     st.markdown("##### 커스텀 유니버스 랭킹 (탐색용 · 라이브/멀티마켓)")
     c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
     with c1:
@@ -278,14 +1332,26 @@ def _render_screener(catalog) -> None:
     for s in bars:
         m = mom.get(s)
         a = aqr.get(s)
+        profile = _stock_profile(s)
+        if a:
+            reason = (
+                f"AQR 합성 {a.composite:.3f} · 모멘텀 "
+                f"{_fmt_pct(m.lookback_return if m else None)} · 가치 {_fmt_num(a.value, 3)} "
+                f"· 퀄리티 {_fmt_num(a.quality, 3)}"
+            )
+        else:
+            reason = f"펀더멘털 부족 · 모멘텀 {_fmt_pct(m.lookback_return if m else None)} 기준"
         rows.append(
             {
                 "종목": s,
+                "기업": str(profile["name"]),
+                "무슨 종목": _short_text(str(profile["business"]), 58),
                 "현재가": round(m.close, 2) if m else None,
                 "모멘텀%": round(m.lookback_return * 100, 2) if m else None,
                 "AQR합성": round(a.composite, 3) if a else None,
                 "가치": round(a.value, 3) if a else None,
                 "퀄리티": round(a.quality, 3) if a else None,
+                "선정 근거": reason,
             }
         )
     df = pd.DataFrame(rows)
@@ -297,21 +1363,53 @@ def _render_screener(catalog) -> None:
         f"정렬 기준: {sort_col} (펀더멘털 없으면 모멘텀만 — KOSPI/US 펀더멘털은 `trader fundamentals`로 수집)"
     )
 
-    # 차트리딩 연동
-    pick = st.selectbox("차트로 볼 종목", [""] + list(df["종목"]), key="scr_pick")
-    if pick and st.button(f"▸ {pick} 차트리딩으로", key="scr_to_chart"):
+    pick = st.selectbox("상세/차트로 볼 종목", [""] + list(df["종목"]), key="scr_pick")
+    if pick:
+        row = df.loc[df["종목"] == pick].iloc[0].to_dict()
+        row["_sort_basis"] = sort_col
+        st.markdown(f"##### {pick} 랭킹 근거")
+        cols = st.columns(5)
+        momentum_pct = _safe_float(row.get("모멘텀%"))
+        cols[0].metric("순위", f"#{int(row['순위'])}")
+        cols[1].metric("현재가", _fmt_num(row.get("현재가")))
+        cols[2].metric("모멘텀", f"{momentum_pct:+.1f}%" if momentum_pct is not None else "—")
+        cols[3].metric("AQR 합성", _fmt_num(row.get("AQR합성"), 3))
+        cols[4].metric("정렬 기준", sort_col)
+        st.markdown(f'<p class="evidence-note">{row.get("선정 근거", "—")}</p>', unsafe_allow_html=True)
+        _render_stock_brief(pick, row, None)
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"항목": "가치", "값": _fmt_num(row.get("가치"), 3)},
+                    {"항목": "퀄리티", "값": _fmt_num(row.get("퀄리티"), 3)},
+                    {
+                        "항목": "데이터 상태",
+                        "값": "AQR 사용" if pd.notna(row.get("AQR합성")) else "모멘텀만 사용",
+                    },
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if pick and st.button(f"{pick} 차트리딩으로", key="scr_to_chart"):
         st.session_state["cr_symbol_in"] = pick
         st.session_state["cr_market_in"] = market
-        st.success(f"{pick} 설정 완료 — 상단 '📊 차트리딩' 탭을 눌러 실행하세요.")
+        st.success(f"{pick} 설정 완료. 상단 '차트 리딩' 탭에서 실행하세요.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 탭 2 — 차트리딩 (기존 로직 유지)
 # ─────────────────────────────────────────────────────────────────────────────
 def _render_chart_read_tab(catalog) -> None:
-    st.subheader("차트 리딩 — SMC/ICT 컨플루언스")
+    _render_section_header(
+        "차트 리딩",
+        "SMC/ICT 신호를 컨플루언스 점수, 진입 구간, 무효화 레벨, 반대 신호로 분해합니다.",
+        kicker="Chart evidence",
+        side="Advisory timing only",
+    )
     st.caption(
-        "⚠ 차트리딩은 백테스트상 38–42% 적중(엣지 미검증)으로 **참고용**. 진입 판단은 종목선정/추천기 우선."
+        "차트리딩은 백테스트상 38-42% 적중으로 엣지가 검증되지 않았습니다. 진입 판단은 종목선정/추천기를 우선합니다."
     )
     st.session_state.setdefault("cr_symbol_in", "BTC/USDT")
     c1, c2, c3, c4 = st.columns(4)
@@ -359,6 +1457,52 @@ def _render_chart_read_tab(catalog) -> None:
     m1.markdown(f"### {_badge(decision_val)}", unsafe_allow_html=True)
     m2.metric("컨플루언스", f"{confluence:.1f} / 100")
     m3.metric("추세 bias", getattr(chart_read.trend_bias, "value", str(chart_read.trend_bias)))
+
+    features = chart_read.features or {}
+    range_pos = _safe_float(features.get("range_pos"))
+    range_label = f"{range_pos * 100:.0f}%" if range_pos is not None else "—"
+    active_votes = [c for c in chart_read.contributions if c.weight > 0]
+    top_votes = sorted(active_votes, key=lambda c: abs(c.weight), reverse=True)[:8]
+
+    st.markdown("#### 판정 근거")
+    if chart_read.vetoed:
+        st.error(f"하드 VETO: {features.get('veto_reason') or '진입 금지 조건 발생'}")
+    elif decision_val == "AVOID":
+        st.warning("컨플루언스가 진입 기준에 미달했습니다. 진입보다 대기/회피가 기본값입니다.")
+    elif decision_val == "WAIT_FOR_PULLBACK":
+        st.info("방향성은 일부 있으나 즉시 진입보다 되돌림 대기가 우선입니다.")
+    else:
+        st.success("컨플루언스 기준상 진입 후보입니다. 아래 레벨과 반대 신호를 확인하세요.")
+
+    lv = st.columns(5)
+    lv[0].metric("현재가", _fmt_num(bars[-1].close))
+    lv[1].metric("진입 구간", _entry_zone_text(chart_read.entry_zone))
+    lv[2].metric("무효화", _fmt_num(chart_read.invalidation))
+    lv[3].metric("활성 신호", str(features.get("n_active_votes", len(active_votes))))
+    lv[4].metric("레인지 위치", range_label)
+
+    if top_votes:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "레이어": c.layer,
+                        "신호": c.name,
+                        "판정": _signal_direction_label(c.direction),
+                        "가중치": round(c.weight, 3),
+                        "기여": round(c.weight * c.direction, 3),
+                        "메모": c.note,
+                    }
+                    for c in top_votes
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    if chart_read.reasons:
+        st.markdown("**요약 근거**")
+        for reason in chart_read.reasons[:5]:
+            st.markdown(f"- {reason}")
 
     ts = [b.ts for b in bars]
     fig = go.Figure(
@@ -451,6 +1595,7 @@ def _render_chart_read_tab(catalog) -> None:
             use_container_width=True,
             hide_index=True,
         )
+        st.caption("전체 신호: +1 우호, 0 중립, -1 반대. 컨플루언스 점수는 가중 방향 투표입니다.")
     with st.expander("전체 리포트"):
         st.text(format_chart_read(chart_read))
 
@@ -459,7 +1604,12 @@ def _render_chart_read_tab(catalog) -> None:
 # 탭 3 — 추천기 (evaluate_ticker)
 # ─────────────────────────────────────────────────────────────────────────────
 def _render_recommender(catalog) -> None:
-    st.subheader("추천기 — AQR 검증신호 + 정직한 신뢰도 + 진입 플랜")
+    _render_section_header(
+        "추천기",
+        "AQR 검증 신호, DCF 참고값, 신뢰도, ATR 진입 사다리를 한 종목 기준으로 재계산합니다.",
+        kicker="Single-name review",
+        side="Validated signal + advisory chart",
+    )
     c1, c2, c3 = st.columns([2, 1, 3])
     with c1:
         ticker = st.text_input("종목", "NVDA", key="rec_tkr")
@@ -488,22 +1638,25 @@ def _render_recommender(catalog) -> None:
     except Exception as e:
         st.error(f"검증 전략 로드 실패: {e}")
         return
+    eval_symbol = ticker.strip().upper()
     syms = [s.strip().upper() for s in uni.split(",") if s.strip()]
     if not syms and market == "us":
         # 빈칸 → 검증 정본 유니버스 전체. 랭크·신뢰도가 evaluate_ticker 파이프라인과 일치.
         syms = _ideal_universe()
-    if ticker.strip().upper() not in syms:
-        syms.append(ticker.strip().upper())
+    if eval_symbol not in syms:
+        syms.append(eval_symbol)
     with st.spinner("유니버스 로드 + 평가 중…"):
         bars = _load_universe(catalog, syms, market, live=True)
         funds = _load_fundamentals(catalog, list(bars), market)
         try:
             ev = evaluate_ticker(
-                ticker=ticker.strip().upper(),
+                ticker=eval_symbol,
                 bars_by_symbol=bars,
                 fundamentals_by_symbol=funds,
                 strategy=strategy,
                 asof_ts=datetime.now(tz=UTC).replace(tzinfo=None),
+                bars=bars.get(eval_symbol, []),
+                with_chart=True,
             )
         except Exception as e:
             st.error(f"평가 실패: {e}")
@@ -524,35 +1677,114 @@ def _render_recommender(catalog) -> None:
     f[1].metric("모멘텀", f"{ev.momentum * 100:+.1f}%" if ev.momentum is not None else "—")
     f[2].metric("가치", f"{ev.value:.3f}" if ev.value is not None else "—")
     f[3].metric("퀄리티", f"{ev.quality:.3f}" if ev.quality is not None else "—")
+
+    ev_row = {
+        "순위": ev.rank,
+        "종목": ev.ticker,
+        "액션": ev.action,
+        "백분위": round(ev.percentile),
+        "현재가": ev.current_price,
+        "진입": getattr(ev.entry_plan, "target_entry", None),
+        "손절": getattr(ev.entry_plan, "stop_loss", None),
+        "목표": getattr(ev.entry_plan, "target_exit", None),
+    }
+    _render_stock_brief(
+        ev.ticker,
+        ev_row,
+        {"universe_size": ev.universe_size, "top_n": strategy.top_n},
+    )
+
+    st.markdown("#### 판단 근거")
+    if ev.in_top_n:
+        st.success("검증 전략의 top-N 보유권 안에 들어온 종목입니다.")
+    elif ev.in_validated_universe:
+        st.info("검증 유니버스 안에 있지만 현재 전략 보유권 밖입니다.")
+    else:
+        st.warning("검증 유니버스 밖 종목입니다. 신뢰도 상한이 적용됩니다.")
+
+    c1, c2 = st.columns([1.1, 1])
+    with c1:
+        st.dataframe(
+            pd.DataFrame(
+                _factor_rows(
+                    {
+                        "composite": ev.composite,
+                        "momentum": ev.momentum,
+                        "value": ev.value,
+                        "quality": ev.quality,
+                    }
+                )
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    with c2:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "항목": "검증 유니버스",
+                        "값": "포함" if ev.in_validated_universe else "미포함",
+                    },
+                    {"항목": "전략 보유권", "값": "포함" if ev.in_top_n else "미포함"},
+                    {"항목": "밸류에이션", "값": "참고 가능" if ev.valuation_credible else "참고용"},
+                    {"항목": "평가 기준일", "값": ev.as_of.strftime("%Y-%m-%d")},
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if ev.reasons:
+        st.markdown("**추천 근거**")
+        for reason in ev.reasons[:6]:
+            st.markdown(f"- {reason}")
+    if ev.chart_summary:
+        cs = ev.chart_summary
+        st.markdown("#### 차트 타이밍 (참고)")
+        cm = st.columns(4)
+        cm[0].metric("차트 판정", cs.decision)
+        cm[1].metric("컨플루언스", f"{cs.confluence:.0f}/100")
+        cm[2].metric("추세", cs.trend_bias)
+        cm[3].metric("방향", cs.direction)
+        st.caption("차트 타이밍은 추천 액션/신뢰도/랭크에 반영하지 않는 참고 정보입니다.")
+
     if ev.entry_plan:
         ep = ev.entry_plan
-        st.markdown("**진입 플랜 (ATR 사다리)**")
-        st.json(
-            {
-                k: getattr(ep, k)
-                for k in (
-                    "target_entry",
-                    "stop_loss",
-                    "target_exit",
-                    "risk_reward",
-                    "expected_holding_days",
-                )
-                if hasattr(ep, k)
-            }
-        )
-    if ev.reasons:
-        st.markdown("**근거**")
-        for r in ev.reasons:
-            st.markdown(f"- {r}")
-    if not ev.in_validated_universe:
-        st.warning("검증 유니버스 밖 종목 — 신뢰도 25% 상한. 횡단면 신호 신뢰 제한.")
+        st.markdown("#### 진입 플랜 (ATR 사다리)")
+        st.dataframe(pd.DataFrame(_entry_plan_rows(ep)), use_container_width=True, hide_index=True)
+        try:
+            ladder = json.loads(ep.ladder_json)
+        except (TypeError, ValueError):
+            ladder = []
+        if ladder:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "단계": i + 1,
+                            "가격": _fmt_num(step.get("price")),
+                            "비중": _fmt_pct(step.get("weight"), signed=False),
+                            "근거": step.get("reason", ""),
+                        }
+                        for i, step in enumerate(ladder)
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 탭 4 — 검증결과
 # ─────────────────────────────────────────────────────────────────────────────
 def _render_validation() -> None:
-    st.subheader("검증 결과 — chartbloom 실증 · 백테스트")
+    _render_section_header(
+        "검증 결과",
+        "chartbloom 실증 문서와 백테스트 산출물을 확인합니다.",
+        kicker="Validation",
+        side="Reports / CSV outputs",
+    )
     sub1, sub2 = st.tabs(["chartbloom A-1/B 검증", "백테스트 산출물 (out/*.csv)"])
     with sub1:
         md = MERR / "CHARTBLOOM_VALIDATION_RESULTS.md"
@@ -625,7 +1857,12 @@ def _latest_rate_forecast(region: str) -> dict | None:
 
 
 def _render_forecast() -> None:
-    st.subheader("예측 — 기준금리 결정 / 물가")
+    _render_section_header(
+        "예측",
+        "기준금리 결정 확률과 CPI 관련 원장을 확인합니다.",
+        kicker="Forecast",
+        side="Rate ledger / CPI",
+    )
     region = st.radio("지역", ["us", "kr"], horizontal=True, key="fc_region")
     if st.button("금리 결정 예측 실행", type="primary", key="fc_rate"):
         r = _latest_rate_forecast(region)
@@ -650,7 +1887,7 @@ def _render_forecast() -> None:
                     go.Bar(
                         x=list(probs),
                         y=[v * 100 for v in probs.values()],
-                        marker_color=["#26a69a", "#ffca28", "#ef5350"],
+                        marker_color=["#2c6d5c", "#8a6726", "#a34842"],
                     )
                 ]
             )
@@ -685,7 +1922,12 @@ def _render_forecast() -> None:
 # 탭 6 — 페이퍼 원장 (forward-OOS)
 # ─────────────────────────────────────────────────────────────────────────────
 def _render_ledgers() -> None:
-    st.subheader("페이퍼 원장 — forward-OOS 트랙레코드")
+    _render_section_header(
+        "페이퍼 원장",
+        "forward-OOS 신호와 채점 전후 기록을 누적 원장 기준으로 확인합니다.",
+        kicker="Forward OOS",
+        side="Paper trail",
+    )
     leds = []
     if OUT_DIR.exists():
         leds = sorted(OUT_DIR.glob("*ledger*.jsonl")) + sorted(OUT_DIR.glob("*oos*.jsonl"))
@@ -719,7 +1961,12 @@ def _render_ledgers() -> None:
 # 탭 7 — RAG 챗봇
 # ─────────────────────────────────────────────────────────────────────────────
 def _render_rag() -> None:
-    st.subheader("RAG — 경제분석 챗봇 (메르/호돌이/홍춘욱/chartbloom/퀀트영상)")
+    _render_section_header(
+        "RAG",
+        "경제 분석 코퍼스와 로컬 챗봇 상태를 확인합니다.",
+        kicker="Research assistant",
+        side="localhost:8800",
+    )
     import socket
 
     up = False
@@ -731,7 +1978,7 @@ def _render_rag() -> None:
     if up:
         import streamlit.components.v1 as components
 
-        st.success(f"RAG 서버 가동 중 → {RAG_URL}")
+        st.success(f"RAG 서버 가동 중: {RAG_URL}")
         components.iframe(RAG_URL, height=720, scrolling=True)
     else:
         st.warning("RAG 서버 미가동. 아래 명령으로 띄운 뒤 새로고침하세요:")
@@ -740,37 +1987,258 @@ def _render_rag() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 탭 8 — 실거래 콘솔 (로컬 웹 → CLI 게이트)
+# ─────────────────────────────────────────────────────────────────────────────
+def _run_trader_command(argv: list[str], env: dict[str, str]) -> tuple[int, str]:
+    """Run trader.cli in-process with a temporary env overlay and captured output."""
+    from trader import cli as trader_cli
+
+    old_env: dict[str, str | None] = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = trader_cli.main(argv)
+    except SystemExit as exc:
+        code = int(exc.code) if isinstance(exc.code, int) else 1
+    except Exception as exc:  # noqa: BLE001 - render command failures inside the local console.
+        code = 1
+        stderr.write(f"{exc.__class__.__name__}: {exc}\n")
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    output = stdout.getvalue()
+    err = stderr.getvalue()
+    if err:
+        output = f"{output}\n[stderr]\n{err}".strip()
+    return code, output.strip()
+
+
+def _env_default(name: str, fallback: str) -> str:
+    value = os.getenv(name, "").strip()
+    return value if value else fallback
+
+
+def _render_command_result(title: str, result: tuple[int, str] | None) -> None:
+    if result is None:
+        return
+    code, output = result
+    if code == 0:
+        st.success(f"{title}: PASS")
+    else:
+        st.error(f"{title}: exit {code}")
+    st.code(output or "(no output)", language="markdown")
+
+
+def _live_console_env(
+    *,
+    broker: str,
+    strategy_id: str,
+    max_capital: float,
+    policy_version: str,
+    account_id: str,
+    cash: float,
+    equity: float,
+    buying_power: float,
+    market_open: bool,
+    positions: str,
+) -> dict[str, str]:
+    return {
+        "LIVE_TRADING_ENABLED": "true",
+        "LIVE_TRADING_ACK_RISK": "true",
+        "LIVE_ORDER_SUBMISSION_ENABLED": "true",
+        "LIVE_STRATEGY_ID": strategy_id.strip(),
+        "LIVE_BROKER": broker,
+        "LIVE_MAX_CAPITAL": f"{max_capital:.8f}",
+        "LIVE_POLICY_VERSION": policy_version.strip(),
+        "LIVE_MANUAL_ACCOUNT_ID": account_id.strip(),
+        "LIVE_MANUAL_CASH": f"{cash:.8f}",
+        "LIVE_MANUAL_EQUITY": f"{equity:.8f}",
+        "LIVE_MANUAL_BUYING_POWER": f"{buying_power:.8f}",
+        "LIVE_MANUAL_MARKET_OPEN": "true" if market_open else "false",
+        "LIVE_MANUAL_POSITIONS": positions.strip(),
+    }
+
+
+def _render_live_console() -> None:
+    _render_section_header(
+        "실거래 콘솔",
+        "브로커 없이 로컬에서 가격 적재, 준비도 확인, 수동 주문 티켓 생성을 실행합니다.",
+        kicker="Live operations",
+        side="Manual broker path",
+    )
+    left, mid, right = st.columns([1.1, 1.1, 1])
+    with left:
+        broker = st.selectbox("브로커", ["manual-paper", "manual-live"], key="lc_broker")
+        strategy_id = st.text_input(
+            "전략 ID",
+            _env_default("LIVE_STRATEGY_ID", "aqr_top7_cap20_trail10_pit110"),
+            key="lc_strategy",
+        )
+        policy_version = st.text_input(
+            "정책 버전", _env_default("LIVE_POLICY_VERSION", "manual-web-v1"), key="lc_policy"
+        )
+        max_capital = st.number_input(
+            "최대 운용자본", min_value=0.0, value=float(_env_default("LIVE_MAX_CAPITAL", "10000"))
+        )
+    with mid:
+        account_id = st.text_input(
+            "계좌 ID", _env_default("LIVE_MANUAL_ACCOUNT_ID", "manual-local"), key="lc_account"
+        )
+        cash = st.number_input(
+            "현금", min_value=0.0, value=float(_env_default("LIVE_MANUAL_CASH", "100000"))
+        )
+        equity = st.number_input(
+            "평가자산", min_value=0.0, value=float(_env_default("LIVE_MANUAL_EQUITY", "100000"))
+        )
+        buying_power = st.number_input(
+            "매수가능금액",
+            min_value=0.0,
+            value=float(_env_default("LIVE_MANUAL_BUYING_POWER", "100000")),
+        )
+    with right:
+        symbol = st.text_input("심볼", "QQQ", key="lc_symbol").strip().upper()
+        as_of = st.date_input("기준일", datetime.now(tz=UTC).date(), key="lc_asof").isoformat()
+        price = st.number_input("브로커 가격", min_value=0.0, value=100.0, step=0.01)
+        market_open = st.toggle("시장 열림", value=True, key="lc_open")
+        positions = st.text_input("포지션", _env_default("LIVE_MANUAL_POSITIONS", ""), key="lc_pos")
+
+    env = _live_console_env(
+        broker=broker,
+        strategy_id=strategy_id,
+        max_capital=max_capital,
+        policy_version=policy_version,
+        account_id=account_id,
+        cash=cash,
+        equity=equity,
+        buying_power=buying_power,
+        market_open=market_open,
+        positions=positions,
+    )
+
+    st.divider()
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        if st.button("가격 적재", type="primary", use_container_width=True):
+            st.session_state["lc_price_result"] = _run_trader_command(
+                [
+                    "live-price-ingest",
+                    symbol,
+                    "--source",
+                    "external",
+                    "--price",
+                    f"{price:.8f}",
+                    "--price-as-of",
+                    as_of,
+                    "--ack-external-price",
+                    "--catalog-db",
+                    str(LIVE_CATALOG_PATH),
+                ],
+                env,
+            )
+    with p2:
+        if st.button("준비도 확인", use_container_width=True):
+            st.session_state["lc_ready_result"] = _run_trader_command(
+                [
+                    "live-readiness",
+                    "--require-order-submission",
+                    "--require-broker-preflight",
+                    "--require-price",
+                    symbol,
+                    "--as-of",
+                    as_of,
+                    "--catalog-db",
+                    str(LIVE_CATALOG_PATH),
+                    "--halt-state",
+                    str(LIVE_HALT_STATE),
+                ],
+                env,
+            )
+    with p3:
+        if st.button("티켓 생성", use_container_width=True):
+            st.session_state["lc_ticket_result"] = _run_trader_command(
+                [
+                    "live-ticket",
+                    symbol,
+                    "--side",
+                    st.session_state.get("lc_side", "buy"),
+                    "--qty",
+                    f"{float(st.session_state.get('lc_qty', 1.0)):.8f}",
+                    "--price",
+                    f"{price:.8f}",
+                    "--order-type",
+                    st.session_state.get("lc_order_type", "limit"),
+                    "--limit-price",
+                    f"{float(st.session_state.get('lc_limit', price)):.8f}",
+                    "--ack-manual-ticket",
+                    "--as-of",
+                    as_of,
+                    "--catalog-db",
+                    str(LIVE_CATALOG_PATH),
+                    "--ticket-log",
+                    str(MANUAL_TICKET_LOG),
+                    "--halt-state",
+                    str(LIVE_HALT_STATE),
+                    "--equity-state",
+                    str(LIVE_EQUITY_STATE),
+                ],
+                env,
+            )
+
+    t1, t2, t3 = st.columns(3)
+    with t1:
+        st.selectbox("방향", ["buy", "sell"], key="lc_side")
+    with t2:
+        st.number_input("수량", min_value=0.0, value=1.0, step=1.0, key="lc_qty")
+    with t3:
+        st.selectbox("주문유형", ["limit", "market"], key="lc_order_type")
+        st.number_input("지정가", min_value=0.0, value=price if price > 0 else 100.0, step=0.01, key="lc_limit")
+
+    _render_command_result("가격 적재", st.session_state.get("lc_price_result"))
+    _render_command_result("준비도", st.session_state.get("lc_ready_result"))
+    _render_command_result("티켓", st.session_state.get("lc_ticket_result"))
+
+    if MANUAL_TICKET_LOG.exists():
+        try:
+            rows = [
+                json.loads(line)
+                for line in MANUAL_TICKET_LOG.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except Exception:
+            rows = []
+        tickets = [row for row in rows if row.get("record_type") == "manual_ticket"]
+        if tickets:
+            st.markdown("#### 최근 티켓")
+            st.dataframe(pd.DataFrame(tickets[-10:]), use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    st.set_page_config(page_title="재무관리 모델", layout="wide", page_icon="📈")
+    st.set_page_config(page_title="재무관리 모델", layout="wide")
     st.markdown(_CSS, unsafe_allow_html=True)
-    st.title("📈 재무관리 모델 — 통합 대시보드")
     catalog = MarketDataCatalog(CATALOG_PATH)
 
     cov = catalog.coverage()
-    k = st.columns(4)
-    k[0].metric("카탈로그 종목", len(cov))
-    k[1].metric("총 바", f"{sum(c.rows for c in cov):,}")
-    mkts = sorted({c.market for c in cov})
-    k[2].metric("시장", ", ".join(mkts) if mkts else "—")
-    k[3].metric("RAG", "localhost:8800")
-    st.markdown(
-        '<div class="hdr-sub">종목선정 → 차트리딩 연동 · 추천기 · 검증결과 · 예측 · 페이퍼원장 · RAG · 로컬 전용</div>',
-        unsafe_allow_html=True,
-    )
-    st.divider()
+    _render_app_header(cov)
 
     tabs = st.tabs(
         [
-            "🎯 종목선정",
-            "📊 차트리딩",
-            "💡 추천기",
-            "🔬 검증결과",
-            "🔮 예측",
-            "📒 페이퍼원장",
-            "💬 RAG",
-            "🗄 카탈로그",
+            "종목 선정",
+            "차트 리딩",
+            "추천기",
+            "검증 결과",
+            "예측",
+            "페이퍼 원장",
+            "실거래",
+            "RAG",
+            "카탈로그",
         ]
     )
     with tabs[0]:
@@ -786,9 +2254,16 @@ def main() -> None:
     with tabs[5]:
         _render_ledgers()
     with tabs[6]:
-        _render_rag()
+        _render_live_console()
     with tabs[7]:
-        st.subheader("카탈로그 커버리지")
+        _render_rag()
+    with tabs[8]:
+        _render_section_header(
+            "카탈로그 커버리지",
+            "저장된 심볼, 시장, 바 수, 데이터 커버리지를 점검합니다.",
+            kicker="Data catalog",
+            side=str(CATALOG_PATH),
+        )
         if cov:
             st.dataframe(
                 pd.DataFrame([c.__dict__ for c in cov]), use_container_width=True, hide_index=True

@@ -93,3 +93,12 @@ def test_paper_broker_has_no_live_floor(monkeypatch) -> None:
     assert policy.min_paper_days == 0
     assert policy.min_shadow_days == 0
     assert policy.min_paper_oos_vs_backtest == 0.0
+
+
+def test_manual_live_broker_uses_live_floor(monkeypatch) -> None:
+    monkeypatch.setenv("LIVE_BROKER", "manual-live")
+    policy = load_live_trading_policy()
+    assert policy.min_paper_oos_periods == 6
+    assert policy.min_paper_days == 30
+    assert policy.min_shadow_days == 10
+    assert policy.min_paper_oos_vs_backtest == 0.5

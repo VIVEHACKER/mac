@@ -94,8 +94,8 @@ original gaps; closures cite their evidence)
 | # | Gap | Owner | Severity | Status |
 |---|---|---|---|---|
 | 1 | Paper-trading OOS ≥30 days plus scoreable ledger periods/performance | operator + code | **blocker** | 🔄 accruing — 2 automated tracks (IDEAL + combined-80/20), first closed period ~07-06; `live-readiness` now fails `alpaca-live` until `LIVE_MIN_PAPER_OOS_PERIODS` and `LIVE_MIN_PAPER_OOS_VS_BACKTEST` are met from `LIVE_PAPER_OOS_PRICES` |
-| 2 | Kill-switch / halt latch vs a real broker | operator + code | **blocker** | ◐ logic drilled end-to-end vs BrokerAdapter stand-in (CI: test_kill_switch_drill) + fail-closed arming guard; remaining: adapter-level drill vs real Alpaca (needs keys) |
-| 3 | Broker (Alpaca) keys; live-prices DB | operator | **blocker** | ◐ keys pending; DB populated via keyless `live-price-ingest --source yahoo` |
+| 2 | Kill-switch / halt latch vs a real broker | operator + code | **blocker** | ◐ logic drilled end-to-end vs BrokerAdapter stand-in (CI: test_kill_switch_drill) + fail-closed arming guard; remaining: adapter-level drill vs real Alpaca or manual external-broker ticket flow |
+| 3 | Broker connectivity or manual external-broker line; live-prices DB | operator | **blocker** | ◐ Alpaca keys pending; manual line can use `manual-paper`/`manual-live` with operator-attested account env plus `live-price-ingest --source external --ack-external-price` |
 | 4 | Independent Codex review | operator | — | ✅ closed 2026-06-12 — full-program review (af74961→main); both findings (P1 untracked forecast modules, P2 submit-fake arming crash) fixed |
 | 5 | Fundamentals refresh + re-snapshot manual/unscheduled | code/ops | high | ❌ open |
 | 6 | 21-trading-day cadence not calendar-gated in code | code | — | ✅ closed — cadence gates wired to daily crons (paper_drill_cadence 13:15, paper_drill_combined 13:20) |
