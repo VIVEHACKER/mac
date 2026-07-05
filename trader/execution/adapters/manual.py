@@ -48,3 +48,9 @@ class ManualBrokerAdapter:
 
     def get_order(self, client_order_id: str) -> BrokerOrder | None:
         return None
+
+    def cancel_order(self, client_order_id: str) -> BrokerOrder | None:
+        raise BrokerRejectedError(
+            "manual broker does not cancel orders automatically; cancel the order directly in "
+            "the external broker"
+        )

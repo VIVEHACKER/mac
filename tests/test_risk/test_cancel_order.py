@@ -171,6 +171,21 @@ def test_paper_broker_cancel_conforms_to_contract() -> None:
     assert broker.cancel_order("trd-nope") is None
 
 
+def test_manual_broker_cancel_conforms_to_contract_and_directs_to_external() -> None:
+    # Adding cancel_order to the BrokerAdapter protocol requires ManualBrokerAdapter (operator-
+    # attested external broker) to implement it too. It cannot cancel via API — mirror its
+    # submit_order: reject with guidance to cancel at the external broker (BrokerRejectedError,
+    # which live-cancel surfaces as exit 1, not a crash).
+    import pytest
+
+    from trader.execution.adapters.manual import ManualBrokerAdapter
+    from trader.execution.broker import AccountSnapshot, BrokerRejectedError
+
+    broker = ManualBrokerAdapter(account=AccountSnapshot("manual", 0.0, 0.0, 0.0))
+    with pytest.raises(BrokerRejectedError, match="external broker"):
+        broker.cancel_order("trd-anything")
+
+
 # ---------------------------------------------------------------- ledger integration
 
 
