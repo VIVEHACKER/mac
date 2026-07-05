@@ -67,8 +67,11 @@ def run(
     benchmark: str = BENCHMARK,
     cli_main: Callable[[list[str]], int] | None = None,
 ) -> int:
-    if cli_main is None:  # lazy: keep the trader CLI import off the test path
-        from trader.cli import main as cli_main  # type: ignore[no-redef]
+    runner: Callable[[list[str]], int]
+    if cli_main is not None:
+        runner = cli_main
+    else:  # lazy: keep the trader CLI import off the test path
+        from trader.cli import main as runner
     # The documented key path puts ALPACA keys ONLY in .env; cron does not export them, and
     # trader.cli loads dotenv only after --source is already fixed. Load .env here so the
     # source decision sees the keys — otherwise the cron never upgrades to IEX (codex P1).
@@ -87,7 +90,7 @@ def run(
             "Set the keys in .env to switch this same cron to broker-grade IEX bars."
         )
     argv = ["live-price-ingest", ",".join(symbols), "--source", source]
-    return int(cli_main(argv) or 0)
+    return int(runner(argv) or 0)
 
 
 if __name__ == "__main__":
