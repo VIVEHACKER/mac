@@ -14,7 +14,9 @@ from urllib.request import Request, urlopen
 
 from data.models import MacroObservation
 
-FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={start}&coed={end}"
+FRED_CSV_URL = (
+    "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={start}&coed={end}"
+)
 FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 CBOE_VIX_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 TREASURY_YIELD_XML_URL = (
@@ -440,6 +442,10 @@ def _fetch_text(url: str) -> str:
         with urlopen(request, timeout=10) as response:
             return response.read().decode("utf-8")
     except (TimeoutError, URLError):
+        # 시크릿(api_key) 포함 URL은 curl argv로 넘기지 않는다 — ps 목록에 노출됨.
+        # 호출부(fetch_fred_series)가 키 없는 CSV 경로로 폴백하므로 fail-open 유지.
+        if "api_key=" in url:
+            raise
         return _fetch_text_with_curl(url)
 
 
