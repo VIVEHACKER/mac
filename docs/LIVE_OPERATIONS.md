@@ -361,6 +361,10 @@ uncertain broker submit activates the persistent halt latch.
 --submit` is blocked for these brokers. After readiness passes, create an
 external execution ticket and place it manually in the broker UI:
 
+Run the order-specific gate first. This uses the same policy, strategy, OOS,
+broker, price, sector, protection, and pretrade checks as ticket creation but
+does not append a `manual_ticket` record:
+
 ```bash
 uv run trader live-ticket QQQ \
   --side buy \
@@ -368,6 +372,25 @@ uv run trader live-ticket QQQ \
   --price 100 \
   --order-type limit \
   --limit-price 99.50 \
+  --stop-loss 89.55 \
+  --target-exit 114.43 \
+  --verify-only \
+  --ticket-log data/store/manual-order-tickets.jsonl \
+  --halt-state data/store/live-halt.json
+```
+
+After operator review, rerun without `--verify-only` and with the explicit
+ticket acknowledgement:
+
+```bash
+uv run trader live-ticket QQQ \
+  --side buy \
+  --qty 2 \
+  --price 100 \
+  --order-type limit \
+  --limit-price 99.50 \
+  --stop-loss 89.55 \
+  --target-exit 114.43 \
   --ack-manual-ticket \
   --ticket-log data/store/manual-order-tickets.jsonl \
   --halt-state data/store/live-halt.json
@@ -375,6 +398,60 @@ uv run trader live-ticket QQQ \
 
 The ticket log is not a fill ledger. Record broker-confirmed fills separately and
 run reconciliation before any next order.
+
+### Local web recommendation flow
+
+Open `http://localhost:8501`, select **실거래**, then run **최신 추천·주문안 생성**.
+The web command uses `rebalance-plan --preview-only`, so reviewing a plan does not
+change paper positions or append the forward-OOS ledger. The resulting JSON and
+Markdown reports include:
+
+- validated AQR rank, confidence and model reasons;
+- strategy execution limit and the separate advisory pullback entry;
+- ATR invalidation price plus the tighter ticket stop required by the 2% NAV
+  per-name loss cap and minimum 1.5R;
+- target weight/quantity, expected stop loss, sector-cap cash retention and exact
+  delta orders;
+- recommendation and pretrade PASS/BLOCK status.
+
+US quantities default to six-decimal fractional shares so a small account does
+not silently omit an expensive Top-N name. Use **정수주만** only when the external
+broker cannot accept fractional shares. Alpaca documents fractional market/limit
+orders with `time_in_force=day`; the generated live path uses day orders.
+
+Selecting a BUY delta pre-fills symbol, quantity, limit, stop and target. The
+operator still has to attest the current external-broker quote: a local plan price
+must never be relabeled as a broker quote. A generated manual ticket records the
+protective levels but does not place them at the external broker.
+
+The web **전체 검증 게이트 실행** action registers the attested quote and runs
+`live-ticket --verify-only`. It hashes the complete order, account snapshot,
+broker state, policy version, positions, and price. Changing any input invalidates
+the pass and disables ticket issuance. A web pass also expires after five minutes.
+**검증 통과 티켓 발행** reruns the same fail-closed checks before writing the
+ticket, so a state change between review and issuance is still blocked.
+
+### Local chart and expanded candidate feed
+
+The local dashboard can fetch chart bars without Alpaca:
+
+- US equities: Yahoo 1m/5m/15m/1h/daily bars; 4h is aggregated from consecutive
+  1h bars. Intraday history is limited to the recent window supported by Yahoo.
+- KOSPI/KOSDAQ: Yahoo indicative intraday bars and pykrx daily bars.
+- Crypto: Binance public OHLCV through CCXT for 1m/5m/15m/1h/4h/daily bars.
+
+The chart can refresh every 15 seconds and always shows provider, final bar time,
+and `LIVE` versus `시장 마감/지연`. The stock-selection tab exposes 25
+candidates by default and can show up to 40 with batched Yahoo one-minute marks.
+Only the validated Top-7 is a strategy holding candidate; ranks below Top-7 are
+explicitly labeled as watch candidates and are not eligible for an order ticket.
+Single-name evaluation overlays the selected ticker's one-minute mark while the
+106-name comparison set stays on its stored validated history, avoiding a slow
+and non-reproducible full-universe intraday rerank on every click.
+
+Yahoo/yfinance is a personal-use research feed, not an execution-quality quote.
+Its values may be delayed or revised. The broker-quote attestation and stale-mark
+gates remain mandatory before creating any real order ticket.
 
 ## Reconciliation
 

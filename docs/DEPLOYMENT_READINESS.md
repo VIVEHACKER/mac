@@ -1,6 +1,6 @@
 # Deployment Readiness — IDEAL line (`aqr_top7_cap20_trail10`)
 
-_Last assessed: 2026-06-13. Research-only; not investment advice._
+_Last assessed: 2026-07-13. Research-only; not investment advice._
 
 ## Verdict
 
@@ -17,8 +17,10 @@ broker keys, live kill-switch test) that code cannot satisfy.
 | Reproducibility (fundamentals + prices) | ✅ pinned via content-hashed snapshots |
 | Backtest↔order-gen parity | ✅ backtest and order generation can pin matching snapshots |
 | Pre-trade risk path / kill switch | ✅ drilled end-to-end vs BrokerAdapter stand-in (CI-enforced); fail-closed arming guard; ⚠️ real-Alpaca drill pending keys |
-| Paper-trading OOS | 🔄 accruing — 2 tracks (IDEAL T0 06-05, combined-80/20 T0 06-10) on automated daily cadence crons; first closed period ~07-06 |
-| Live env + broker keys | ❌ keys pending; readiness now reports broker preflight and operational confidence |
+| Paper-trading OOS | 🔄 accruing — IDEAL has 1/6 scoreable closed periods; the hard live floor remains unmet |
+| Live env + broker keys | ❌ placeholder keys; local web/manual-paper flow is available but real-money readiness remains blocked |
+| Recommendation report → order ticket | ✅ latest preview emits ranked rationale, execution price, advisory entry, risk-capped stop, target, fractional target quantity, sector adjustment, pretrade result, JSON and Markdown |
+| Local charts + expanded candidates | ✅ 1m–1d Yahoo/CCXT charts, 15s polling, 25 default/40 max candidate watchlist; ⚠️ Yahoo marks remain research-grade and only validated Top-7 names are trade candidates |
 | Independent (Codex) code review | ⚠️ blocked by usage limit (resets 2026-05-31) |
 
 ## What this means
@@ -105,6 +107,13 @@ original gaps; closures cite their evidence)
 | 10 | Portfolio-level exposure monitoring | code | — | ✅ closed — `trader paper-exposure` (gross/net/single-name vs limits, fail-closed on stale marks) over `risk/exposure.py` |
 | 11 | Crisis stress-window evidence (live gate's `min_stress_windows=2`, `worst≥+30%`) | code/operator | **blocker** | ◐ MEASURED (`scripts/stress_windows_validation.py` → `out/aqr-ideal-stress-windows.md`): 3 windows (COVID +35.07%, 2022 +23.12%, 2018Q4 −16.42%; GFC untestable pre-2008 pin). Fails absolute +30% bar AND relative bar (2018Q4 excess −5.40% — momentum fell MORE than SPY). The +30% bar was built for crash-HEDGED sleeves; a long-only book can't meet it. **Operator decision: adopt a strategy-appropriate stress gate, OR accept the equity-beta crash risk.** Standard hedge TESTED & REJECTED (2026-06-14): SPY-200d-MA cash filter worsened worst-stress (whipsaw) AND halved the walk-forward edge (`out/ideal-defensive-walkforward.md`) — trend-filter crash-hardening does not work for this book. Will NOT lower the +30% threshold to force a pass |
 
+The 2026-07-13 preview closes the order-plan mechanics: fractional quantities keep
+expensive Top-N names in the target book, crowded sectors are scaled to the live
+35% cap with excess retained as cash, and ticket stops are bounded by both a 2%
+NAV per-name loss cap and a minimum 1.5R reward/risk. These are risk overlays, not
+new alpha claims. The current preview plan passes recommendation and pretrade
+checks; real-money submission still fails the credential and time gates above.
+
 ## Go / no-go checklist (before any real capital)
 
 1. `python scripts/snapshot_fundamentals.py fundamentals-<date>` — pin data.
@@ -120,7 +129,10 @@ original gaps; closures cite their evidence)
    passes with `Operational Confidence | 100%`; for `alpaca-live` this includes the
    current paper OOS ledger meeting `LIVE_MIN_PAPER_OOS_PERIODS` scoreable closed
    periods and `LIVE_MIN_PAPER_OOS_VS_BACKTEST` using `LIVE_PAPER_OOS_PRICES`.
-7. Set `LIVE_*` gates (see `LIVE_OPERATIONS.md`), start at ≤5% capital, Kelly ≤0.25.
+7. Run the exact order through `trader live-ticket --verify-only` or the local web
+   **전체 검증 게이트 실행** action. Any order/account/price change invalidates the
+   web pass, and ticket creation reruns the gate.
+8. Set `LIVE_*` gates (see `LIVE_OPERATIONS.md`), start at ≤5% capital, Kelly ≤0.25.
 
 Live activation (`LIVE_TRADING_ENABLED`, broker keys, capital) is an explicit
 operator decision and is intentionally NOT automated.

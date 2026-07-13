@@ -239,6 +239,9 @@ class _CancelOnPollBroker:
             submitted_at=datetime(2026, 5, 12, tzinfo=UTC),
         )
 
+    def cancel_order(self, client_order_id: str) -> BrokerOrder:
+        return self.get_order(client_order_id)
+
 
 def test_terminal_nofill_poll_does_not_project(tmp_path) -> None:
     # Codex Step-2 P1: a buy that polls to a terminal canceled (filled_qty=0) must NOT project

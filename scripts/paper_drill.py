@@ -32,8 +32,10 @@ import json
 import math
 import sys
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from typing import TypedDict
 
 import pandas as pd
 import yfinance as yf
@@ -50,6 +52,12 @@ from scripts.aqr_ideal_walkforward import (  # noqa: E402  (validated 106-name u
     MEGACAPS,
 )
 from strategies.factor_aqr import rank_aqr_factors  # noqa: E402
+from trader.execution.rebalance import targets_from_weights  # noqa: E402
+from trader.recommendation_report import (  # noqa: E402
+    build_trade_recommendations,
+    recommendation_markdown,
+)
+from valuation.recommendation import load_validated_strategy, scan_universe  # noqa: E402
 
 OUT_DIR = ROOT / "out"
 LEGACY_STATE_PATH = OUT_DIR / "paper-drill-state.json"  # pre-conc5 single-strategy state (top7)
@@ -68,6 +76,15 @@ CAP = 0.20
 KNOWN_STRATEGY_IDS = {5: "aqr_top5_cap20_trail10_pit110", 7: "aqr_top7_cap20_trail10_pit110"}
 STRATEGY_ID = KNOWN_STRATEGY_IDS[TOP_N]
 DEFAULT_CAPITAL = 10_000.0
+
+
+class TargetOrder(TypedDict):
+    symbol: str
+    side: str
+    qty: float
+    price: float
+    weight: float
+    dollar: float
 
 
 def build_bars(prices, symbol, end, lookback=260):
@@ -143,6 +160,43 @@ def weights_from_picks(picks, prices, rebal, cap=0.20):
                 for s in free:
                     raw[s] *= (ft + excess * total) / ft
     return {s: x / sum(raw.values()) for s, x in raw.items()}
+
+
+def cap_weights_by_sector(
+    weights: dict[str, float],
+    sectors: dict[str, str] | None,
+    max_sector_weight: float,
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """Scale crowded sectors to the live cap and leave the difference in cash.
+
+    The selector and ranking stay unchanged. Excess is deliberately not redistributed
+    to other names because that would create an unvalidated allocation rule.
+    """
+
+    if sectors is None or max_sector_weight <= 0 or max_sector_weight >= 1:
+        return dict(weights), {}
+    sector_map = {symbol.upper(): sector for symbol, sector in sectors.items()}
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for symbol in weights:
+        sector = sector_map.get(symbol.upper())
+        if sector:
+            grouped[sector].append(symbol)
+
+    adjusted = dict(weights)
+    changes: dict[str, dict[str, float]] = {}
+    for sector, symbols in grouped.items():
+        before = sum(weights[symbol] for symbol in symbols)
+        if before <= max_sector_weight + 1e-12:
+            continue
+        scale = max_sector_weight / before
+        for symbol in symbols:
+            adjusted[symbol] = weights[symbol] * scale
+        changes[sector] = {
+            "before": before,
+            "after": max_sector_weight,
+            "cash_retained": before - max_sector_weight,
+        }
+    return adjusted, changes
 
 
 def state_path_for(strategy_id: str) -> Path:
@@ -251,6 +305,7 @@ def build_delta_plan(
     nav: float,
     target_capital: float,
     sectors: dict[str, str] | None = None,
+    fractional_decimals: int | None = 6,
     work_dir: Path | None = None,
     generated_at: datetime | None = None,
 ) -> dict:
@@ -275,7 +330,12 @@ def build_delta_plan(
     from trader.execution.runner import process_order_intents
 
     generated = generated_at or datetime.now(UTC)
-    targets = targets_from_weights(weights, marks, target_capital)
+    targets = targets_from_weights(
+        weights,
+        marks,
+        target_capital,
+        fractional_decimals=fractional_decimals,
+    )
     plan = plan_rebalance(
         strategy=strategy_id,
         rebalance_key=rebalance_key,
@@ -355,6 +415,7 @@ def build_delta_plan(
         "generated_at": generated.isoformat(),
         "nav": nav,
         "target_capital": target_capital,
+        "fractional_decimals": fractional_decimals,
         "target_book": {t.symbol: t.target_qty for t in targets},
         "intents": [
             {
@@ -442,6 +503,18 @@ def main(argv: list[str] | None = None):
         help="skip appending this rebalance to the pre-registered forward-OOS ledger "
         "(recording is on by default — it is how paper trading becomes evidence).",
     )
+    parser.add_argument(
+        "--whole-shares",
+        action="store_true",
+        help="Floor target quantities to whole shares. The default uses 6-decimal fractional "
+        "shares so a small account does not silently drop expensive top-N names.",
+    )
+    parser.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Generate the current report and plan without changing paper positions or the "
+        "forward-OOS ledger. Intended for the local web console review flow.",
+    )
     args = parser.parse_args(argv)
     top_n = args.top_n
     if top_n < 1:
@@ -517,18 +590,43 @@ def main(argv: list[str] | None = None):
     print(f"Universe with data: {len(bars_by_sym)}")
     scores = rank_aqr_factors(bars_by_sym, fund_by_sym, lookback=126)
     picks = scores[:top_n]
-    weights = weights_from_picks(picks, prices, rebal, cap=CAP)
+    raw_weights = weights_from_picks(picks, prices, rebal, cap=CAP)
+    sector_files = sorted(
+        (ROOT / "data" / "sectors").glob("*-sectors.csv"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    sectors = None
+    if sector_files:
+        from risk.sectors import load_sector_map
 
-    # Build order list (the TARGET book view — feeds the picks table and the OOS ledger)
-    orders = []
-    for sym, w in weights.items():
-        dollar = target_capital * w
+        sectors = load_sector_map(sector_files[0])
+    from engine.live import live_risk_policy
+
+    sector_limit = live_risk_policy().max_sector_weight
+    weights, sector_adjustments = cap_weights_by_sector(raw_weights, sectors, sector_limit)
+    fractional_decimals = None if args.whole_shares else 6
+
+    plan_marks: dict[str, float] = {}
+    for sym in set(weights) | set(state.get("positions") or {}):
         try:
-            price = float(prices.loc[rebal, sym])
+            plan_marks[sym] = float(prices.loc[rebal, sym])
         except KeyError:
             continue
-        qty = int(dollar / price)
-        if qty < 1:
+    target_positions = targets_from_weights(
+        weights,
+        plan_marks,
+        target_capital,
+        fractional_decimals=fractional_decimals,
+    )
+    target_qty = {target.symbol: target.target_qty for target in target_positions}
+
+    # Build order list (the TARGET book view — feeds the picks table and the OOS ledger)
+    orders: list[TargetOrder] = []
+    for sym, w in weights.items():
+        price = plan_marks.get(sym)
+        qty = target_qty.get(sym, 0.0)
+        if price is None or qty <= 0:
             continue
         orders.append(
             {
@@ -545,22 +643,6 @@ def main(argv: list[str] | None = None):
     # names first, then delta buys — pre-validated by the live gates incl. the sector cap.
     rebal_key = f"{strategy_id}-{rebal.date()}"
     prior_positions = resolve_plan_prior(state, str(rebal.date()))
-    plan_marks: dict[str, float] = {}
-    for sym in {o["symbol"] for o in orders} | set(prior_positions):
-        try:
-            plan_marks[sym] = float(prices.loc[rebal, sym])
-        except KeyError:
-            continue  # a prior holding with no price today surfaces as a pretrade block
-    sector_files = sorted(
-        (ROOT / "data" / "sectors").glob("*-sectors.csv"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    sectors = None
-    if sector_files:
-        from risk.sectors import load_sector_map
-
-        sectors = load_sector_map(sector_files[0])
     plan_dict = build_delta_plan(
         strategy_id=strategy_id,
         rebalance_key=rebal_key,
@@ -570,19 +652,56 @@ def main(argv: list[str] | None = None):
         nav=nav,
         target_capital=target_capital,
         sectors=sectors,
+        fractional_decimals=fractional_decimals,
+    )
+
+    report_strategy = replace(
+        load_validated_strategy(),
+        strategy_id=strategy_id,
+        top_n=top_n,
+    )
+    evaluations = scan_universe(
+        bars_by_symbol=bars_by_sym,
+        fundamentals_by_symbol=fund_by_sym,
+        strategy=report_strategy,
+        asof_ts=as_of_dt,
+    )
+    recommendation_rows = build_trade_recommendations(
+        evaluations,
+        target_weights=weights,
+        target_book=plan_dict["target_book"],
+        intents=plan_dict["intents"],
+        pretrade=plan_dict["pretrade"],
+        target_capital=target_capital,
+        nav=nav,
+    )
+    plan_dict["data_as_of"] = str(rebal.date())
+    plan_dict["price_source"] = "yfinance auto_adjusted daily close"
+    plan_dict["fundamentals_source"] = provenance
+    plan_dict["raw_target_weights"] = raw_weights
+    plan_dict["sector_cap"] = sector_limit
+    plan_dict["sector_adjustments"] = sector_adjustments
+    plan_dict["recommendations"] = [row.to_dict() for row in recommendation_rows]
+    plan_dict["recommendations_all_actionable"] = all(
+        row.actionable for row in recommendation_rows
+    )
+    plan_dict["pretrade_all_pass"] = plan_dict["all_pass"]
+    plan_dict["all_pass"] = bool(
+        plan_dict["pretrade_all_pass"] and plan_dict["recommendations_all_actionable"]
     )
     plan_path = write_plan_json(plan_dict)
 
-    # Update state
-    state["last_rebal"] = str(rebal.date())
-    # Persist the delta base actually used, so a same-day rerun stays idempotent (codex P1).
-    state["plan_prior"] = prior_positions
-    state["positions"] = {o["symbol"]: o["qty"] for o in orders}
-    save_state(state, state_path)
+    if not args.preview_only:
+        # Persist only an accepted operating run. Web previews must never pretend an order filled.
+        state["last_rebal"] = str(rebal.date())
+        # Persist the delta base actually used, so a same-day rerun stays idempotent (codex P1).
+        state["plan_prior"] = prior_positions
+        state["positions"] = {o["symbol"]: o["qty"] for o in orders}
+        save_state(state, state_path)
 
     # Pre-register this rebalance in the append-only forward-OOS ledger (the record that
     # turns paper trading into evidence). Idempotent: re-running the same date is refused.
-    if args.record_oos:
+    if args.record_oos and not args.preview_only:
         ledger_path = OUT_DIR / f"paper-oos-ledger-{strategy_id}.jsonl"
         try:
             bench_price = float(prices.loc[rebal, BENCHMARK])
@@ -609,8 +728,12 @@ def main(argv: list[str] | None = None):
     lines = [
         f"# Paper Drill — {rebal.date()} — {strategy_id}",
         "",
+        f"Mode: {'PREVIEW (state/OOS unchanged)' if args.preview_only else 'OPERATING RUN'}  |  "
+        f"Generated: {datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Fundamentals: {provenance}  |  Universe: {len(MEGACAPS)} names  |  "
         f"Eligible: {len(bars_by_sym)}",
+        f"Price as-of: {rebal.date()} (yfinance adjusted close)  |  "
+        f"Quantity: {'whole shares' if args.whole_shares else 'fractional, 6 decimals'}",
         f"NAV: ${nav:,.2f}  |  Peak: ${peak:,.2f}  |  DD: {drawdown * 100:+.2f}%",
         f"Exposure: {exposure * 100:.0f}%  |  Target deployed: ${target_capital:,.2f}",
         "",
@@ -625,8 +748,24 @@ def main(argv: list[str] | None = None):
         comp = s.composite if s else 0.0
         lines.append(
             f"| {o['symbol']} | {comp:.2f} | {o['weight'] * 100:.1f}% | "
-            f"${o['price']:.2f} | {o['qty']} | ${o['dollar']:,.2f} |"
+            f"${o['price']:.2f} | {o['qty']:g} | ${o['dollar']:,.2f} |"
         )
+
+    if sector_adjustments:
+        lines += ["", "### 섹터 상한 조정", ""]
+        for sector, change in sorted(sector_adjustments.items()):
+            lines.append(
+                f"- {sector}: {change['before']:.1%} → {change['after']:.1%}; "
+                f"{change['cash_retained']:.1%}는 다른 종목에 재배분하지 않고 현금 유지"
+            )
+
+    lines += [""]
+    lines += recommendation_markdown(
+        recommendation_rows,
+        nav=nav,
+        target_capital=target_capital,
+        fractional=not args.whole_shares,
+    )
 
     # Delta section — the orders that would actually be sent (sells of dropped names first,
     # then delta buys), each pre-validated by the live gates. THIS list is what the operator
@@ -635,9 +774,12 @@ def main(argv: list[str] | None = None):
     lines += [
         "",
         f"## Delta orders vs prior book ({len(prior_positions)} holdings) — "
-        f"pretrade {'ALL PASS' if plan_dict['all_pass'] else 'BLOCKED ITEMS PRESENT'}",
+        f"pretrade {'ALL PASS' if plan_dict['pretrade_all_pass'] else 'BLOCKED ITEMS PRESENT'}",
         "",
         f"Plan JSON: {plan_path}",
+        f"Recommendation gate: "
+        f"{'ALL ACTIONABLE' if plan_dict['recommendations_all_actionable'] else 'BLOCKED'}",
+        f"Overall plan: {'PASS' if plan_dict['all_pass'] else 'BLOCKED'}",
         f"Sector map: {'yes' if plan_dict['sector_map_used'] else 'MISSING (sector cap inactive)'}",
     ]
     if plan_dict["warning"]:

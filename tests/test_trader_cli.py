@@ -1310,6 +1310,10 @@ def test_live_ticket_writes_manual_execution_ticket(tmp_path, monkeypatch, capsy
             "1",
             "--price",
             "100",
+            "--stop-loss",
+            "90",
+            "--target-exit",
+            "115",
             "--ack-manual-ticket",
             "--as-of",
             "2026-05-25",
@@ -1335,7 +1339,117 @@ def test_live_ticket_writes_manual_execution_ticket(tmp_path, monkeypatch, capsy
     assert tickets
     assert tickets[0]["broker"] == "manual-paper"
     assert tickets[0]["symbol"] == "QQQ"
+    assert tickets[0]["stop_loss"] == 90.0
+    assert tickets[0]["target_exit"] == 115.0
+    assert tickets[0]["protection_status"] == "external_protective_orders_required"
     assert tickets[0]["status"] == "ticket_created_external_execution_required"
+
+
+def test_live_ticket_verify_only_runs_exact_gate_without_creating_ticket(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    ticket_log = tmp_path / "tickets.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="manual-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    _set_manual_broker_env(monkeypatch)
+
+    result = cli.main(
+        [
+            "live-ticket",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--price",
+            "100",
+            "--stop-loss",
+            "90",
+            "--target-exit",
+            "115",
+            "--verify-only",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+            "--ticket-log",
+            str(ticket_log),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Manual Order Verification Gate" in captured.out
+    assert "Mode | verification only" in captured.out
+    assert "Gate Coverage" in captured.out
+    rows = [json.loads(line) for line in ticket_log.read_text().splitlines()]
+    assert not any(row.get("record_type") == "manual_ticket" for row in rows)
+
+
+def test_live_ticket_rejects_invalid_protective_price_order(tmp_path, monkeypatch, capsys) -> None:
+    catalog_db = tmp_path / "catalog.duckdb"
+    registry = tmp_path / "registry.jsonl"
+    MarketDataCatalog(catalog_db).put_bars([_live_price_bar("QQQ", date(2026, 5, 25), 100)])
+    _approve_strategy(registry, "approved-live")
+    _set_live_env(
+        monkeypatch,
+        strategy_id="approved-live",
+        broker="manual-paper",
+        min_paper_days="0",
+        min_shadow_days="0",
+        min_paper_oos_periods="0",
+    )
+    _set_manual_broker_env(monkeypatch)
+
+    result = cli.main(
+        [
+            "live-ticket",
+            "QQQ",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--price",
+            "100",
+            "--stop-loss",
+            "105",
+            "--target-exit",
+            "115",
+            "--ack-manual-ticket",
+            "--as-of",
+            "2026-05-25",
+            "--registry",
+            str(registry),
+            "--halt-state",
+            str(tmp_path / "halt.json"),
+            "--drill-log",
+            str(tmp_path / "drills.jsonl"),
+            "--catalog-db",
+            str(catalog_db),
+            "--ticket-log",
+            str(tmp_path / "tickets.jsonl"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "stop-loss < entry price < target-exit" in captured.out
 
 
 def test_live_readiness_ignores_future_paper_oos_rows_before_as_of(

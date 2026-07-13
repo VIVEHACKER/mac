@@ -27,20 +27,30 @@ def targets_from_weights(
     capital: float,
     *,
     market: str = "us",
+    fractional_decimals: int | None = None,
 ) -> list[TargetPosition]:
-    """Whole-share target positions for ``capital`` allocated by ``weights`` at ``marks``.
+    """Target positions for ``capital`` allocated by ``weights`` at ``marks``.
 
     A symbol with no mark (or a non-positive mark) is skipped — it cannot be sized.
-    Callers that require full coverage should validate ``marks`` before calling.
+    Callers that require full coverage should validate ``marks`` before calling. By
+    default quantities are whole shares. ``fractional_decimals`` floors fractional
+    quantities to that precision so target notional never exceeds the allocation.
     """
     if capital < 0:
         raise ValueError("capital must be non-negative")
+    if fractional_decimals is not None and not 0 <= fractional_decimals <= 9:
+        raise ValueError("fractional_decimals must be between 0 and 9")
     targets: list[TargetPosition] = []
     for symbol, weight in weights.items():
         mark = marks.get(symbol) or marks.get(symbol.upper())
         if mark is None or mark <= 0:
             continue
-        qty = math.floor(capital * weight / mark)
+        raw_qty = capital * weight / mark
+        if fractional_decimals is None:
+            qty = float(math.floor(raw_qty))
+        else:
+            scale = 10**fractional_decimals
+            qty = math.floor(raw_qty * scale) / scale
         targets.append(TargetPosition(symbol=symbol.upper(), market=market, target_qty=float(qty)))
     return targets
 

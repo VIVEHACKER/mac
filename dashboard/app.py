@@ -15,7 +15,8 @@ import io
 import json
 import math
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,8 @@ import pandas as pd
 import streamlit as st
 
 from data.catalog import DEFAULT_CATALOG_PATH, MarketDataCatalog
+from data.ingest.yahoo import YahooQuote
+from data.models import PriceBar
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = ROOT / DEFAULT_CATALOG_PATH
@@ -33,6 +36,11 @@ LIVE_CATALOG_PATH = ROOT / "data" / "store" / "live-prices.duckdb"
 MANUAL_TICKET_LOG = ROOT / "data" / "store" / "manual-order-tickets.jsonl"
 LIVE_HALT_STATE = ROOT / "data" / "store" / "live-halt.json"
 LIVE_EQUITY_STATE = ROOT / "data" / "store" / "live-equity.json"
+CHART_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
+CHART_LOOKBACK_DAYS = {"1m": 7, "5m": 30, "15m": 59, "1h": 59, "4h": 59, "1d": 420}
+CRYPTO_CHART_LOOKBACK_DAYS = {"1m": 1, "5m": 2, "15m": 4, "1h": 14, "4h": 60, "1d": 420}
+LIVE_QUOTE_TTL_SECONDS = 12
+LIVE_ORDER_GATE_TTL_SECONDS = 300
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / 테마
@@ -61,9 +69,23 @@ _CSS = """
     --mono: "SFMono-Regular", "JetBrains Mono", "Menlo", monospace;
   }
 
-  html, body, [class*="css"], [class*="st-"] {
+  html, body, .stApp {
     font-family: "Pretendard", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
     letter-spacing: 0;
+  }
+
+  [data-testid="stIconMaterial"] {
+    font-family: "Material Symbols Rounded" !important;
+    font-weight: 400;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: nowrap;
+    overflow-wrap: normal;
+    direction: ltr;
+    font-feature-settings: "liga";
+    -webkit-font-smoothing: antialiased;
   }
 
   html, body, .stApp {
@@ -115,6 +137,14 @@ _CSS = """
   code, pre, [data-testid="stMetricValue"], .stDataFrame {
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
+  }
+
+  div[data-testid="stCode"] pre,
+  div[data-testid="stCode"] pre > div,
+  div[data-testid="stCode"] code {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .app-hero {
@@ -636,9 +666,7 @@ def _fmt_num(value: Any, digits: int = 2) -> str:
     return f"{numeric:,.{digits}f}"
 
 
-def _fmt_pct(
-    value: Any, digits: int = 1, *, already_pct: bool = False, signed: bool = True
-) -> str:
+def _fmt_pct(value: Any, digits: int = 1, *, already_pct: bool = False, signed: bool = True) -> str:
     numeric = _safe_float(value)
     if numeric is None:
         return "—"
@@ -663,7 +691,11 @@ def _confidence_score(confidence: Any) -> float | None:
 
 def _factor_rows(values: dict[str, Any]) -> list[dict[str, str]]:
     return [
-        {"항목": "AQR 합성", "값": _fmt_num(values.get("composite"), 3), "해석": "횡단면 최종 점수"},
+        {
+            "항목": "AQR 합성",
+            "값": _fmt_num(values.get("composite"), 3),
+            "해석": "횡단면 최종 점수",
+        },
         {"항목": "모멘텀", "값": _fmt_pct(values.get("momentum")), "해석": "최근 추세 강도"},
         {"항목": "가치", "값": _fmt_num(values.get("value"), 3), "해석": "밸류에이션 팩터"},
         {"항목": "퀄리티", "값": _fmt_num(values.get("quality"), 3), "해석": "수익성/재무 품질"},
@@ -682,7 +714,9 @@ def _entry_zone_text(entry_zone: tuple[float, float] | None) -> str:
     if not entry_zone:
         return "—"
     lo, hi = entry_zone
-    return f"{_fmt_num(lo)} ~ {_fmt_num(hi)}"
+    largest = max(abs(lo), abs(hi))
+    digits = 0 if largest >= 1_000 else (2 if largest >= 1 else 4)
+    return f"{_fmt_num(lo, digits)}–{_fmt_num(hi, digits)}"
 
 
 def _entry_plan_rows(entry_plan: Any) -> list[dict[str, str]]:
@@ -776,12 +810,38 @@ _STOCK_PROFILES: dict[str, dict[str, str | tuple[str, ...]]] = {
             "장비주는 기대가 앞서면 밸류에이션 압축이 빠르게 나타납니다.",
         ),
     },
+    "AMD": {
+        "name": "Advanced Micro Devices",
+        "sector": "반도체",
+        "business": "데이터센터·PC용 CPU, AI 가속기, GPU와 임베디드 반도체를 설계하는 팹리스 기업입니다.",
+        "why": "데이터센터와 AI 가속기 매출 기대가 가격 상대강도에 반영되며, 현재 가치·모멘텀·퀄리티 합성 랭크가 검증 전략의 보유권에 진입했습니다.",
+        "risks": (
+            "AI 가속기 시장에서 NVIDIA와의 성능·생태계 경쟁이 강합니다.",
+            "TSMC 생산 의존과 첨단 패키징 공급 제약이 있습니다.",
+            "높아진 기대 대비 매출 전환이 늦으면 변동성이 커질 수 있습니다.",
+        ),
+    },
+    "QCOM": {
+        "name": "Qualcomm",
+        "sector": "통신 반도체",
+        "business": "스마트폰 애플리케이션 프로세서와 모뎀, RF 칩, 자동차·IoT 반도체 및 무선통신 특허를 보유한 기업입니다.",
+        "why": "스마트폰 외 자동차·엣지 AI로 수익원이 확장되는 가운데, 현 시점의 AQR 합성 점수가 검증 전략 Top-N에 포함됐습니다.",
+        "risks": (
+            "스마트폰 출하량과 중국 안드로이드 수요에 민감합니다.",
+            "주요 고객의 자체 모뎀 전환이 장기 매출을 줄일 수 있습니다.",
+            "특허 라이선스 규제와 경쟁사 가격 압력이 리스크입니다.",
+        ),
+    },
     "AAPL": {
         "name": "Apple",
         "sector": "소비자 기술",
         "business": "iPhone, Mac, iPad, 웨어러블과 서비스 생태계를 운영하는 글로벌 소비자 기술 기업입니다.",
         "why": "브랜드·서비스 수익 기반이 강하지만, 이 화면에서는 검증 AQR 랭크와 가격 모멘텀을 우선합니다.",
-        "risks": ("iPhone 교체 수요 둔화", "중국 매출과 공급망 리스크", "규제와 앱스토어 수수료 압박"),
+        "risks": (
+            "iPhone 교체 수요 둔화",
+            "중국 매출과 공급망 리스크",
+            "규제와 앱스토어 수수료 압박",
+        ),
     },
     "MSFT": {
         "name": "Microsoft",
@@ -824,6 +884,7 @@ def _model_buy_case(row: dict[str, Any], meta: dict[str, Any] | None = None) -> 
     universe = (meta or {}).get("universe_size") or "?"
     top_n = (meta or {}).get("top_n") or "?"
     percentile = row.get("백분위")
+    entry_label = str(row.get("_entry_label") or "평균 진입")
     entry = _fmt_num(row.get("진입"))
     stop = _fmt_num(row.get("손절"))
     target = _fmt_num(row.get("목표"))
@@ -836,7 +897,7 @@ def _model_buy_case(row: dict[str, Any], meta: dict[str, Any] | None = None) -> 
     if action == "BUY":
         return (
             f"{ticker}는 검증 유니버스 {universe}개 중 AQR {rank}위, 백분위 {percentile}로 "
-            f"전략 top-{top_n} 보유권 안에 있습니다. 평균 진입 {entry}, 손절 {stop}, 목표 {target}로 "
+            f"전략 top-{top_n} 보유권 안에 있습니다. {entry_label} {entry}, 손절 {stop}, 목표 {target}로 "
             "손실 한도를 먼저 정한 뒤 매수 후보로 봅니다."
         )
     if action == "HOLD":
@@ -850,11 +911,26 @@ def _model_buy_case(row: dict[str, Any], meta: dict[str, Any] | None = None) -> 
     )
 
 
-def _render_stock_brief(symbol: str, row: dict[str, Any], meta: dict[str, Any] | None = None) -> None:
+def _render_stock_brief(
+    symbol: str, row: dict[str, Any], meta: dict[str, Any] | None = None
+) -> None:
     profile = _stock_profile(symbol)
     risks = profile.get("risks", ())
     risk_items = [risks] if isinstance(risks, str) else list(risks)
     risk_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in risk_items[:4])
+    entry_label = str(row.get("_entry_label") or "평균 진입")
+    advisory_entry = _safe_float(row.get("참고진입"))
+    conditions = [
+        f"{entry_label}: {_fmt_num(row.get('진입'))}",
+    ]
+    if advisory_entry is not None:
+        conditions.append(f"참고 평균진입: {_fmt_num(advisory_entry)}")
+    conditions += [
+        f"손절: {_fmt_num(row.get('손절'))}",
+        f"목표: {_fmt_num(row.get('목표'))}",
+        f"현재가: {_fmt_num(row.get('현재가'))}",
+    ]
+    condition_html = "".join(f"<li>{html.escape(item)}</li>" for item in conditions)
     st.markdown(
         f"""
         <section class="stock-brief">
@@ -874,12 +950,7 @@ def _render_stock_brief(symbol: str, row: dict[str, Any], meta: dict[str, Any] |
           </article>
           <article class="brief-panel">
             <div class="brief-label">매수 조건</div>
-            <ul class="brief-list">
-              <li>평균 진입: {html.escape(_fmt_num(row.get("진입")))}</li>
-              <li>손절: {html.escape(_fmt_num(row.get("손절")))}</li>
-              <li>목표: {html.escape(_fmt_num(row.get("목표")))}</li>
-              <li>현재가: {html.escape(_fmt_num(row.get("현재가")))}</li>
-            </ul>
+            <ul class="brief-list">{condition_html}</ul>
           </article>
           <article class="brief-panel">
             <div class="brief-label">확인할 리스크</div>
@@ -900,10 +971,10 @@ def _render_candidate_list(picks: list[dict[str, Any]], meta: dict[str, Any]) ->
             '<article class="candidate-row">'
             "<div>"
             f'<div class="candidate-rank">#{html.escape(str(row["순위"]))} / '
-            f'{html.escape(str(meta["universe_size"]))}</div>'
+            f"{html.escape(str(meta['universe_size']))}</div>"
             f'<div class="candidate-symbol">{html.escape(symbol)}</div>'
             f'<div class="candidate-sector">{html.escape(str(row["액션"]))} · '
-            f'{html.escape(str(row["신뢰도"]))}</div>'
+            f"{html.escape(str(row['신뢰도']))}</div>"
             "</div>"
             "<div>"
             f'<div class="candidate-name">{html.escape(str(profile["name"]))}</div>'
@@ -912,10 +983,10 @@ def _render_candidate_list(picks: list[dict[str, Any]], meta: dict[str, Any]) ->
             "</div>"
             f'<div class="candidate-copy">{html.escape(_model_buy_case(row, meta))}</div>'
             '<div class="candidate-levels">'
-            f'현재 {_fmt_num(row.get("현재가"))}<br>'
-            f'진입 {_fmt_num(row.get("진입"))}<br>'
-            f'손절 {_fmt_num(row.get("손절"))}<br>'
-            f'목표 {_fmt_num(row.get("목표"))}'
+            f"현재 {_fmt_num(row.get('현재가'))}<br>"
+            f"진입 {_fmt_num(row.get('진입'))}<br>"
+            f"손절 {_fmt_num(row.get('손절'))}<br>"
+            f"목표 {_fmt_num(row.get('목표'))}"
             "</div>"
             "</article>"
         )
@@ -939,7 +1010,7 @@ def _render_section_header(
           <div>
             <div class="section-kicker">{html.escape(kicker)}</div>
             <h2 class="section-title">{html.escape(title)}</h2>
-            {f'<p class="section-note">{html.escape(note)}</p>' if note else ''}
+            {f'<p class="section-note">{html.escape(note)}</p>' if note else ""}
           </div>
           {side_html}
         </section>
@@ -994,8 +1065,13 @@ def _render_app_header(cov: list[Any]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # 데이터 로더
 # ─────────────────────────────────────────────────────────────────────────────
-def _live_fetch(symbol: str, market: str, tf: str = "1d", days: int = 420):
-    """카탈로그에 없을 때 라이브 페치(crypto=ccxt, us=yahoo, kospi/kosdaq=pykrx)."""
+def _live_fetch(symbol: str, market: str, tf: str = "1d", days: int | None = None):
+    """Fetch fresh OHLCV, using no-key providers available to the local dashboard."""
+
+    if tf not in CHART_TIMEFRAMES:
+        raise ValueError(f"unsupported chart timeframe: {tf}")
+    if days is None:
+        days = CRYPTO_CHART_LOOKBACK_DAYS[tf] if market == "crypto" else CHART_LOOKBACK_DAYS[tf]
     end = datetime.now(tz=UTC).date()
     start = end - timedelta(days=days)
     if market == "crypto":
@@ -1004,10 +1080,20 @@ def _live_fetch(symbol: str, market: str, tf: str = "1d", days: int = 420):
         return fetch_ccxt_bars(
             symbol, start, end, timeframe=tf, exchange_id="binance", intraday=(tf != "1d")
         )
-    if market == "us":
-        from data.ingest.yahoo import fetch_yahoo_bars
+    if market == "us" or (market in ("kospi", "kosdaq") and tf != "1d"):
+        from data.ingest.yahoo import aggregate_intraday_bars, fetch_yahoo_bars
 
-        return fetch_yahoo_bars(symbol, market="us", start=start, end=end, interval="1d")
+        yahoo_interval = "1h" if tf == "4h" else tf
+        bars = fetch_yahoo_bars(
+            symbol,
+            market=market,
+            start=start,
+            end=end,
+            interval=yahoo_interval,
+        )
+        if tf == "4h":
+            return aggregate_intraday_bars(bars, bars_per_bucket=4, frequency="4h")
+        return bars
     if market in ("kospi", "kosdaq"):
         from data.ingest.pykrx_kr import fetch_pykrx_bars
 
@@ -1015,17 +1101,121 @@ def _live_fetch(symbol: str, market: str, tf: str = "1d", days: int = 420):
     return []
 
 
-def _load_universe(catalog, symbols, market, live=False, tf="1d"):
-    bars_by_symbol = {}
-    for s in symbols:
-        b = catalog.get_bars(s, market=market)
-        if not b and live:
+@st.cache_data(ttl=LIVE_QUOTE_TTL_SECONDS, show_spinner=False)
+def _cached_yahoo_quotes(symbols: tuple[str, ...], market: str) -> dict[str, YahooQuote]:
+    from data.ingest.yahoo import fetch_yahoo_quotes
+
+    return fetch_yahoo_quotes(symbols, market)
+
+
+def _bar_date(value: date) -> date:
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _overlay_live_quotes(
+    bars_by_symbol: dict[str, list[PriceBar]],
+    quotes: dict[str, YahooQuote],
+    market: str,
+) -> dict[str, list[PriceBar]]:
+    """Overlay the latest quote as a daily mark without rewriting historical bars."""
+
+    updated = {symbol: list(bars) for symbol, bars in bars_by_symbol.items()}
+    for symbol, quote in quotes.items():
+        bars = updated.get(symbol)
+        if not bars:
+            continue
+        quote_date = quote.timestamp.date()
+        last = bars[-1]
+        last_date = _bar_date(last.ts)
+        if quote_date < last_date:
+            continue
+        if quote_date == last_date:
+            bars[-1] = PriceBar(
+                symbol=last.symbol,
+                market=last.market,
+                source_symbol=quote.source_symbol,
+                ts=last.ts,
+                open=last.open,
+                high=max(last.high, quote.price),
+                low=min(last.low, quote.price),
+                close=quote.price,
+                volume=last.volume,
+                freq=last.freq,
+                currency=quote.currency or last.currency,
+                source=quote.source,
+            )
+            continue
+        open_value = quote.day_open if quote.day_open is not None else quote.price
+        bars.append(
+            PriceBar(
+                symbol=symbol,
+                market=market,
+                source_symbol=quote.source_symbol,
+                ts=quote_date,
+                open=open_value,
+                high=max(open_value, quote.price),
+                low=min(open_value, quote.price),
+                close=quote.price,
+                volume=0.0,
+                freq="1d",
+                currency=quote.currency,
+                source=quote.source,
+            )
+        )
+    return updated
+
+
+def _load_universe(
+    catalog,
+    symbols,
+    market,
+    live=False,
+    tf="1d",
+    live_symbols: tuple[str, ...] | None = None,
+):
+    normalized = list(
+        dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip())
+    )
+    bars_by_symbol: dict[str, list[PriceBar]] = {}
+
+    if live and tf != "1d":
+        for symbol in normalized:
             try:
-                b = _live_fetch(s, market, tf)
+                bars = _live_fetch(symbol, market, tf)
             except Exception:
-                b = []
-        if b:
-            bars_by_symbol[s] = b
+                bars = []
+            if bars:
+                bars_by_symbol[symbol] = bars
+        return bars_by_symbol
+
+    for symbol in normalized:
+        bars = catalog.get_bars(symbol, market=market)
+        if bars:
+            bars_by_symbol[symbol] = bars
+
+    if live and market in {"us", "kospi", "kosdaq"}:
+        requested_live = set(live_symbols or ())
+        quote_symbols = (
+            normalized
+            if live_symbols is None
+            else [symbol for symbol in normalized if symbol in requested_live]
+        )
+        try:
+            quotes = _cached_yahoo_quotes(tuple(quote_symbols), market) if quote_symbols else {}
+        except Exception:
+            quotes = {}
+        bars_by_symbol = _overlay_live_quotes(bars_by_symbol, quotes, market)
+
+    if live:
+        for symbol in normalized:
+            if symbol in bars_by_symbol:
+                continue
+            try:
+                bars = _live_fetch(symbol, market, tf)
+            except Exception:
+                bars = []
+            if bars:
+                bars_by_symbol[symbol] = bars
     return bars_by_symbol
 
 
@@ -1057,6 +1247,13 @@ def _ideal_universe() -> list[str]:
         return list(MEGACAPS)
     except Exception:
         return ["MSFT", "AAPL", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "TSLA"]
+
+
+def _apply_quick_symbol(picker_key: str, symbol_key: str, market_key: str) -> None:
+    symbol = str(st.session_state.get(picker_key) or "").strip().upper()
+    if symbol:
+        st.session_state[symbol_key] = symbol
+        st.session_state[market_key] = "us"
 
 
 @st.cache_data(show_spinner=False)
@@ -1144,6 +1341,82 @@ def _validated_scan_rows() -> tuple[dict, list[dict]]:
     return meta, [_row(r) for r in results]
 
 
+def _quote_state(timestamp: datetime, *, now: datetime | None = None) -> str:
+    current = now or datetime.now(tz=UTC)
+    moment = timestamp if timestamp.tzinfo is not None else timestamp.replace(tzinfo=UTC)
+    age_seconds = max((current - moment.astimezone(UTC)).total_seconds(), 0.0)
+    return "LIVE" if age_seconds <= 180 else "시장 마감/지연"
+
+
+def _live_candidate_rows(
+    rows: list[dict[str, Any]], quotes: dict[str, YahooQuote]
+) -> list[dict[str, Any]]:
+    display: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row.get("종목", ""))
+        quote = quotes.get(symbol)
+        quote_price = quote.price if quote is not None else _safe_float(row.get("현재가"))
+        day_change = None
+        if quote is not None and quote.day_open is not None and quote.day_open != 0:
+            day_change = quote.price / quote.day_open - 1
+        entry = _safe_float(row.get("진입"))
+        entry_distance = None
+        if quote_price is not None and entry is not None and entry != 0:
+            entry_distance = quote_price / entry - 1
+        display.append(
+            {
+                "순위": row.get("순위"),
+                "종목": symbol,
+                "기업": row.get("기업"),
+                "구분": "검증 매수 후보" if row.get("_pick") else "관찰 후보",
+                "모델 판단": row.get("액션"),
+                "신뢰도": row.get("신뢰도"),
+                "실시간가": round(quote_price, 4) if quote_price is not None else None,
+                "시가 대비%": round(day_change * 100, 2) if day_change is not None else None,
+                "진입가 대비%": round(entry_distance * 100, 2)
+                if entry_distance is not None
+                else None,
+                "진입": row.get("진입"),
+                "손절": row.get("손절"),
+                "목표": row.get("목표"),
+                "시세 상태": _quote_state(quote.timestamp) if quote is not None else "수집 실패",
+                "시세 시각": quote.timestamp.strftime("%Y-%m-%d %H:%M UTC")
+                if quote is not None
+                else "—",
+            }
+        )
+    return display
+
+
+def _render_live_candidate_table(meta: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    symbols = tuple(str(row["종목"]) for row in rows)
+    try:
+        quotes = _cached_yahoo_quotes(symbols, "us")
+        failure = None
+    except Exception as exc:
+        quotes = {}
+        failure = type(exc).__name__
+    display = _live_candidate_rows(rows, quotes)
+    live_count = sum(1 for quote in quotes.values() if _quote_state(quote.timestamp) == "LIVE")
+    status = st.columns(4)
+    status[0].metric("후보 수", f"{len(rows)}개")
+    status[1].metric("시세 수집", f"{len(quotes)}/{len(rows)}")
+    status[2].metric("실시간", f"{live_count}개")
+    status[3].metric("모델 기준일", str(meta.get("asof") or "—"))
+    if failure:
+        st.warning(f"실시간 시세 배치 수집 실패({failure}). 저장 가격을 표시합니다.")
+    st.dataframe(pd.DataFrame(display), width="stretch", hide_index=True)
+    st.caption(
+        "순위·액션은 핀된 검증 모델, 실시간가는 Yahoo 1분 지표 시세입니다. "
+        f"실제 매수 보유권은 Top-{meta.get('top_n', '—')}만 해당하며 나머지는 관찰 후보입니다."
+    )
+
+
+@st.fragment(run_every="15s")
+def _render_live_candidate_fragment(meta: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    _render_live_candidate_table(meta, rows)
+
+
 def _render_validated_scan() -> None:
     """전략이 실제 매수하는 검증 선정(상위 N)을 항상 먼저 보여준다 — '8개' 착시 해소."""
     head = st.columns([5, 1])
@@ -1174,6 +1447,26 @@ def _render_validated_scan() -> None:
     m[2].metric("평균 신뢰도", f"{sum(scores) / len(scores):.0f}%" if scores else "—")
     m[3].metric("최상위", f"{top_pick['종목']} #{top_pick['순위']}")
 
+    st.markdown("#### 실시간 추천·관찰 후보")
+    watch_controls = st.columns([1, 1, 3])
+    candidate_count = watch_controls[0].select_slider(
+        "후보 종목 수",
+        options=[7, 15, 25, 40],
+        value=25,
+        key="vscan_live_count",
+    )
+    auto_refresh = watch_controls[1].toggle(
+        "15초 자동 갱신",
+        value=True,
+        key="vscan_live_auto",
+        help="Yahoo 1분 지표 시세를 15초마다 다시 받습니다.",
+    )
+    candidate_rows = rows[:candidate_count]
+    if auto_refresh:
+        _render_live_candidate_fragment(meta, candidate_rows)
+    else:
+        _render_live_candidate_table(meta, candidate_rows)
+
     display_cols = [
         "순위",
         "종목",
@@ -1192,7 +1485,7 @@ def _render_validated_scan() -> None:
     pick_df = pd.DataFrame([{k: r.get(k) for k in display_cols} for r in picks])
     _render_candidate_list(picks, meta)
     with st.expander("선정 후보 표로 보기"):
-        st.dataframe(pick_df, use_container_width=True, hide_index=True)
+        st.dataframe(pick_df, width="stretch", hide_index=True)
 
     if picks:
         detail_labels = [f"#{r['순위']} {r['종목']} · {r['액션']}" for r in picks]
@@ -1220,7 +1513,7 @@ def _render_validated_scan() -> None:
                         }
                     )
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         with c2:
@@ -1233,7 +1526,7 @@ def _render_validated_scan() -> None:
                         {"항목": "목표", "값": _fmt_num(detail.get("목표"))},
                     ]
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         if detail.get("_reasons"):
@@ -1249,7 +1542,7 @@ def _render_validated_scan() -> None:
             row = {k: v for k, v in r.items() if not k.startswith("_")}
             row["선정"] = "선정" if r["_pick"] else ""
             full.append(row)
-        st.dataframe(pd.DataFrame(full), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(full), width="stretch", hide_index=True)
     st.caption(
         "선정 = 전략의 top-N 보유(실제 매수 대상). 라이브 카탈로그가 아니라 검증 스냅샷을 "
         "쓰므로 `python -m scripts.scan_universe`와 결과가 일치합니다."
@@ -1286,7 +1579,7 @@ def _render_screener(catalog) -> None:
             "라이브 페치",
             value=True,
             key="scr_live",
-            help="카탈로그에 없으면 yahoo/ccxt/pykrx로 즉시 수집",
+            help="저장 이력에 Yahoo 1분 최신가를 합성하고, 데이터가 없으면 외부에서 수집합니다.",
         )
     if not st.button("스크리닝 실행", type="primary", key="scr_run"):
         st.info(
@@ -1307,7 +1600,8 @@ def _render_screener(catalog) -> None:
     if not bars:
         st.error("데이터를 못 불러왔습니다. 심볼/시장 확인 또는 '라이브 페치' 체크 후 재시도.")
         return
-    st.caption(f"로드됨: {len(bars)}/{len(syms)} 종목")
+    live_note = " · 1분 최신가 합성" if live and market in {"us", "kospi", "kosdaq"} else ""
+    st.caption(f"로드됨: {len(bars)}/{len(syms)} 종목{live_note}")
 
     rows = []
     # 모멘텀 랭크 (bars만 필요 — 항상 동작)
@@ -1358,7 +1652,7 @@ def _render_screener(catalog) -> None:
     sort_col = "AQR합성" if df["AQR합성"].notna().any() else "모멘텀%"
     df = df.sort_values(sort_col, ascending=False, na_position="last").reset_index(drop=True)
     df.insert(0, "순위", df.index + 1)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
     st.caption(
         f"정렬 기준: {sort_col} (펀더멘털 없으면 모멘텀만 — KOSPI/US 펀더멘털은 `trader fundamentals`로 수집)"
     )
@@ -1375,7 +1669,9 @@ def _render_screener(catalog) -> None:
         cols[2].metric("모멘텀", f"{momentum_pct:+.1f}%" if momentum_pct is not None else "—")
         cols[3].metric("AQR 합성", _fmt_num(row.get("AQR합성"), 3))
         cols[4].metric("정렬 기준", sort_col)
-        st.markdown(f'<p class="evidence-note">{row.get("선정 근거", "—")}</p>', unsafe_allow_html=True)
+        st.markdown(
+            f'<p class="evidence-note">{row.get("선정 근거", "—")}</p>', unsafe_allow_html=True
+        )
         _render_stock_brief(pick, row, None)
         st.dataframe(
             pd.DataFrame(
@@ -1388,7 +1684,7 @@ def _render_screener(catalog) -> None:
                     },
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -1399,43 +1695,70 @@ def _render_screener(catalog) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 탭 2 — 차트리딩 (기존 로직 유지)
+# 탭 2 — 차트리딩
 # ─────────────────────────────────────────────────────────────────────────────
-def _render_chart_read_tab(catalog) -> None:
-    _render_section_header(
-        "차트 리딩",
-        "SMC/ICT 신호를 컨플루언스 점수, 진입 구간, 무효화 레벨, 반대 신호로 분해합니다.",
-        kicker="Chart evidence",
-        side="Advisory timing only",
-    )
-    st.caption(
-        "차트리딩은 백테스트상 38-42% 적중으로 엣지가 검증되지 않았습니다. 진입 판단은 종목선정/추천기를 우선합니다."
-    )
-    st.session_state.setdefault("cr_symbol_in", "BTC/USDT")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        symbol = st.text_input("심볼", key="cr_symbol_in")
-    with c2:
-        market = st.selectbox("시장", ["crypto", "us", "kospi", "kosdaq"], key="cr_market_in")
-    with c3:
-        timeframe = st.selectbox("타임프레임", ["1d", "4h", "1h", "15m"], key="cr_tf")
-    with c4:
-        direction = st.selectbox("방향", ["long", "short"], key="cr_dir")
-    if not st.button("차트리딩 실행", type="primary", key="cr_run"):
-        st.info("파라미터 설정 후 실행하세요.")
-        return
+def _feed_summary(
+    bars: list[PriceBar], timeframe: str, *, now: datetime | None = None
+) -> tuple[str, str, str]:
+    latest = bars[-1]
+    source = latest.source.lower()
+    if "yahoo" in source:
+        provider = "Yahoo"
+    elif "ccxt" in source:
+        provider = "Binance"
+    elif "pykrx" in source:
+        provider = "KRX / pykrx"
+    else:
+        provider = latest.source or "catalog"
 
+    if isinstance(latest.ts, datetime):
+        moment = latest.ts if latest.ts.tzinfo is not None else latest.ts.replace(tzinfo=UTC)
+        moment = moment.astimezone(UTC)
+        latest_label = moment.strftime("%m-%d %H:%M UTC")
+        current = now or datetime.now(tz=UTC)
+        age = max((current - moment).total_seconds(), 0.0)
+        limits = {"1m": 180, "5m": 900, "15m": 2_700, "1h": 10_800, "4h": 32_400}
+        state = "LIVE" if age <= limits.get(timeframe, 180) else "시장 마감/지연"
+    else:
+        latest_label = latest.ts.isoformat()
+        state = "최근 종가"
+    return provider, latest_label, state
+
+
+def _render_chart_analysis(
+    catalog: MarketDataCatalog,
+    symbol: str,
+    market: str,
+    timeframe: str,
+    direction: str,
+) -> None:
     sym_upper = symbol.strip().upper()
-    bars = catalog.get_bars(sym_upper, market=market)
+    if not sym_upper or len(sym_upper) > 24:
+        st.error("심볼은 1~24자로 입력하세요.")
+        return
+    live_error: str | None = None
+    try:
+        bars = _live_fetch(sym_upper, market, timeframe)
+    except Exception as exc:
+        live_error = type(exc).__name__
+        bars = catalog.get_bars(sym_upper, market=market) if timeframe == "1d" else []
     if not bars:
-        try:
-            bars = _live_fetch(sym_upper, market, timeframe)
-        except Exception as exc:
-            st.warning(f"라이브 페치 실패: {exc}")
-    if not bars:
-        st.error("바 데이터 없음. 심볼/시장 확인 또는 데이터 수집 필요.")
+        suffix = f" ({live_error})" if live_error else ""
+        st.error(f"최신 바 데이터를 불러오지 못했습니다{suffix}.")
         return
     bars = bars[-300:]
+    provider, latest_label, feed_state = _feed_summary(bars, timeframe)
+    feed = st.columns(4)
+    feed[0].metric("데이터", f"{provider} · {timeframe}")
+    feed[1].metric("마지막 바", latest_label)
+    feed[2].metric("시세 상태", feed_state)
+    feed[3].metric("조회 시각", datetime.now(tz=UTC).strftime("%H:%M:%S UTC"))
+    if live_error:
+        st.caption(f"외부 수집 실패({live_error})로 저장된 일봉을 표시합니다.")
+    elif market != "crypto":
+        st.caption(
+            "Yahoo 일중 시세는 로컬 분석용 지표값입니다. 주문 직전에는 브로커 호가로 다시 확인합니다."
+        )
 
     import plotly.graph_objects as go
 
@@ -1496,7 +1819,7 @@ def _render_chart_read_tab(catalog) -> None:
                     for c in top_votes
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     if chart_read.reasons:
@@ -1576,7 +1899,7 @@ def _render_chart_read_tab(catalog) -> None:
                 )
     except Exception:
         pass
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     if chart_read.contributions:
         st.dataframe(
@@ -1592,12 +1915,80 @@ def _render_chart_read_tab(catalog) -> None:
                     for c in chart_read.contributions
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         st.caption("전체 신호: +1 우호, 0 중립, -1 반대. 컨플루언스 점수는 가중 방향 투표입니다.")
     with st.expander("전체 리포트"):
         st.text(format_chart_read(chart_read))
+
+
+@st.fragment(run_every="15s")
+def _render_live_chart_fragment(
+    catalog: MarketDataCatalog,
+    symbol: str,
+    market: str,
+    timeframe: str,
+    direction: str,
+) -> None:
+    _render_chart_analysis(catalog, symbol, market, timeframe, direction)
+
+
+def _render_chart_read_tab(catalog: MarketDataCatalog) -> None:
+    _render_section_header(
+        "차트 리딩",
+        "최신 OHLCV와 SMC/ICT 신호를 컨플루언스, 진입 구간, 무효화 레벨로 분해합니다.",
+        kicker="Chart evidence",
+        side="1m–1d · 15s refresh",
+    )
+    st.caption(
+        "차트리딩은 백테스트상 38-42% 적중으로 엣지가 검증되지 않았습니다. "
+        "종목 선정은 검증 추천을 우선하고 차트는 진입 타이밍에만 사용합니다."
+    )
+    st.session_state.setdefault("cr_symbol_in", "BTC/USDT")
+    st.selectbox(
+        "검증 유니버스 빠른 선택",
+        [""] + _ideal_universe(),
+        key="cr_quick_pick",
+        format_func=lambda value: (
+            "직접 입력" if not value else f"{value} · {_stock_profile(value)['name']}"
+        ),
+        on_change=_apply_quick_symbol,
+        args=("cr_quick_pick", "cr_symbol_in", "cr_market_in"),
+        help="106개 검증 종목을 검색해 바로 차트에 설정합니다.",
+    )
+    controls = st.columns(4)
+    with controls[0]:
+        symbol = st.text_input("심볼", key="cr_symbol_in")
+    with controls[1]:
+        market = st.selectbox("시장", ["crypto", "us", "kospi", "kosdaq"], key="cr_market_in")
+    with controls[2]:
+        timeframe = st.selectbox("타임프레임", CHART_TIMEFRAMES, index=2, key="cr_tf")
+    with controls[3]:
+        direction = st.selectbox("방향", ["long", "short"], key="cr_dir")
+
+    actions = st.columns([1, 1, 4])
+    run_chart = actions[0].button("최신 차트 실행", type="primary", key="cr_run")
+    auto_refresh = actions[1].toggle(
+        "15초 자동 갱신",
+        value=True,
+        key="cr_auto",
+        help="외부 데이터 소스에서 최신 봉을 15초마다 다시 받습니다.",
+    )
+    current_request = (symbol.strip().upper(), market, timeframe, direction)
+    if run_chart:
+        st.session_state["cr_active_request"] = current_request
+    active_request = st.session_state.get("cr_active_request")
+    if active_request is None:
+        st.info("심볼과 주기를 선택한 뒤 '최신 차트 실행'을 누르세요.")
+        return
+    if tuple(active_request) != current_request:
+        st.info("파라미터가 바뀌었습니다. 최신 차트를 다시 실행하세요.")
+        return
+    if auto_refresh:
+        _render_live_chart_fragment(catalog, *current_request)
+    else:
+        _render_chart_analysis(catalog, *current_request)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1608,11 +1999,23 @@ def _render_recommender(catalog) -> None:
         "추천기",
         "AQR 검증 신호, DCF 참고값, 신뢰도, ATR 진입 사다리를 한 종목 기준으로 재계산합니다.",
         kicker="Single-name review",
-        side="Validated signal + advisory chart",
+        side="106 validated + custom symbols",
+    )
+    st.session_state.setdefault("rec_tkr", "NVDA")
+    st.selectbox(
+        "검증 유니버스 빠른 선택",
+        [""] + _ideal_universe(),
+        key="rec_quick_pick",
+        format_func=lambda value: (
+            "직접 입력" if not value else f"{value} · {_stock_profile(value)['name']}"
+        ),
+        on_change=_apply_quick_symbol,
+        args=("rec_quick_pick", "rec_tkr", "rec_mkt"),
+        help="106개 검증 종목 중 하나를 검색합니다. 검증 밖 종목은 아래 입력칸에 직접 입력할 수 있습니다.",
     )
     c1, c2, c3 = st.columns([2, 1, 3])
     with c1:
-        ticker = st.text_input("종목", "NVDA", key="rec_tkr")
+        ticker = st.text_input("종목", key="rec_tkr")
     with c2:
         market = st.selectbox("시장", ["us", "kospi", "kosdaq", "crypto"], key="rec_mkt")
     with c3:
@@ -1639,6 +2042,9 @@ def _render_recommender(catalog) -> None:
         st.error(f"검증 전략 로드 실패: {e}")
         return
     eval_symbol = ticker.strip().upper()
+    if not eval_symbol or len(eval_symbol) > 24:
+        st.error("종목 심볼은 1~24자로 입력하세요.")
+        return
     syms = [s.strip().upper() for s in uni.split(",") if s.strip()]
     if not syms and market == "us":
         # 빈칸 → 검증 정본 유니버스 전체. 랭크·신뢰도가 evaluate_ticker 파이프라인과 일치.
@@ -1646,8 +2052,20 @@ def _render_recommender(catalog) -> None:
     if eval_symbol not in syms:
         syms.append(eval_symbol)
     with st.spinner("유니버스 로드 + 평가 중…"):
-        bars = _load_universe(catalog, syms, market, live=True)
+        bars = _load_universe(
+            catalog,
+            syms,
+            market,
+            live=True,
+            live_symbols=(eval_symbol,),
+        )
         funds = _load_fundamentals(catalog, list(bars), market)
+        live_quote = None
+        if market in {"us", "kospi", "kosdaq"}:
+            try:
+                live_quote = _cached_yahoo_quotes((eval_symbol,), market).get(eval_symbol)
+            except Exception:
+                live_quote = None
         try:
             ev = evaluate_ticker(
                 ticker=eval_symbol,
@@ -1672,6 +2090,11 @@ def _render_recommender(catalog) -> None:
     cur = ev.current_price or 0
     disc = ((ev.fair_value - cur) / ev.fair_value * 100) if (ev.fair_value and cur) else None
     m[3].metric("현재가", f"{cur:,.2f}", f"{disc:+.1f}% 할인" if disc is not None else None)
+    if live_quote is not None:
+        st.caption(
+            f"시세 {live_quote.price:,.4f} · {live_quote.timestamp.strftime('%Y-%m-%d %H:%M UTC')} "
+            f"· {_quote_state(live_quote.timestamp)} · 평가 대상 Yahoo 1분가 / 비교군 저장 이력"
+        )
     f = st.columns(4)
     f[0].metric("합성", f"{ev.composite:.3f}" if ev.composite is not None else "—")
     f[1].metric("모멘텀", f"{ev.momentum * 100:+.1f}%" if ev.momentum is not None else "—")
@@ -1715,7 +2138,7 @@ def _render_recommender(catalog) -> None:
                     }
                 )
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     with c2:
@@ -1727,11 +2150,14 @@ def _render_recommender(catalog) -> None:
                         "값": "포함" if ev.in_validated_universe else "미포함",
                     },
                     {"항목": "전략 보유권", "값": "포함" if ev.in_top_n else "미포함"},
-                    {"항목": "밸류에이션", "값": "참고 가능" if ev.valuation_credible else "참고용"},
+                    {
+                        "항목": "밸류에이션",
+                        "값": "참고 가능" if ev.valuation_credible else "참고용",
+                    },
                     {"항목": "평가 기준일", "값": ev.as_of.strftime("%Y-%m-%d")},
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -1752,7 +2178,7 @@ def _render_recommender(catalog) -> None:
     if ev.entry_plan:
         ep = ev.entry_plan
         st.markdown("#### 진입 플랜 (ATR 사다리)")
-        st.dataframe(pd.DataFrame(_entry_plan_rows(ep)), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(_entry_plan_rows(ep)), width="stretch", hide_index=True)
         try:
             ladder = json.loads(ep.ladder_json)
         except (TypeError, ValueError):
@@ -1770,7 +2196,7 @@ def _render_recommender(catalog) -> None:
                         for i, step in enumerate(ladder)
                     ]
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1809,7 +2235,7 @@ def _render_validation() -> None:
             ]
             if eq:
                 st.line_chart(num[eq])
-            st.dataframe(df.tail(200), use_container_width=True, hide_index=True)
+            st.dataframe(df.tail(200), width="stretch", hide_index=True)
         except Exception as e:
             st.error(f"로드 실패: {e}")
 
@@ -1897,7 +2323,7 @@ def _render_forecast() -> None:
                 yaxis_title="확률 %",
                 title=f"{region.upper()} 기준금리 결정 확률",
             )
-            c2.plotly_chart(fig, use_container_width=True)
+            c2.plotly_chart(fig, width="stretch")
             st.caption(
                 f"기록일 {r.get('recorded_at', '—')} · 상태 {r.get('status', '—')} "
                 "— 포워드-OOS 원장에 회의 전 사전 기록된 예측(재현 가능)."
@@ -1911,7 +2337,7 @@ def _render_forecast() -> None:
         try:
             rows = [json.loads(x) for x in led.read_text().splitlines() if x.strip()]
             st.caption(f"금리 예측 원장: {len(rows)} 기록")
-            st.dataframe(pd.DataFrame(rows).tail(50), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows).tail(50), width="stretch", hide_index=True)
         except Exception as e:
             st.caption(f"원장 로드 스킵: {e}")
     else:
@@ -1954,7 +2380,7 @@ def _render_ledgers() -> None:
             "성숙분 채점: `python -m scripts.chartbloom_paper_score --tf 4h` (수 주 누적 후 spread 판정)"
         )
     if rows:
-        st.dataframe(pd.DataFrame(rows).tail(100), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows).tail(100), width="stretch", hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2064,26 +2490,371 @@ def _live_console_env(
     }
 
 
+def _live_ticket_args(
+    *,
+    symbol: str,
+    side: str,
+    qty: float,
+    quote: float,
+    limit_price: float,
+    order_key: str,
+    as_of: str,
+    stop_loss: float | None,
+    target_exit: float | None,
+    verify_only: bool,
+) -> list[str]:
+    args = [
+        "live-ticket",
+        symbol,
+        "--side",
+        side,
+        "--qty",
+        f"{qty:.8f}",
+        "--price",
+        f"{quote:.8f}",
+        "--order-type",
+        "limit",
+        "--limit-price",
+        f"{limit_price:.8f}",
+        "--rebalance-key",
+        order_key,
+        "--as-of",
+        as_of,
+        "--catalog-db",
+        str(LIVE_CATALOG_PATH),
+        "--ticket-log",
+        str(MANUAL_TICKET_LOG),
+        "--halt-state",
+        str(LIVE_HALT_STATE),
+        "--equity-state",
+        str(LIVE_EQUITY_STATE),
+    ]
+    args.append("--verify-only" if verify_only else "--ack-manual-ticket")
+    if (
+        side == "buy"
+        and stop_loss is not None
+        and target_exit is not None
+        and 0 < stop_loss < limit_price < target_exit
+    ):
+        args += [
+            "--stop-loss",
+            f"{stop_loss:.8f}",
+            "--target-exit",
+            f"{target_exit:.8f}",
+        ]
+    return args
+
+
+def _order_gate_fingerprint(argv: list[str], env: dict[str, str]) -> str:
+    mode_flags = {"--verify-only", "--ack-manual-ticket"}
+    payload = {
+        "argv": [value for value in argv if value not in mode_flags],
+        "env": {key: env[key] for key in sorted(env)},
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _order_gate_passed(
+    *, prerequisites: bool, result: tuple[int, str] | None, is_current: bool
+) -> bool:
+    return bool(prerequisites and is_current and result is not None and result[0] == 0)
+
+
+def _order_gate_receipt_is_current(
+    receipt: object,
+    fingerprint: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if not isinstance(receipt, dict) or receipt.get("fingerprint") != fingerprint:
+        return False
+    checked_at = receipt.get("checked_at_epoch")
+    if not isinstance(checked_at, int | float):
+        return False
+    current = now or datetime.now(UTC)
+    age_seconds = current.timestamp() - float(checked_at)
+    return 0 <= age_seconds <= LIVE_ORDER_GATE_TTL_SECONDS
+
+
+def _order_gate_rows(
+    *,
+    recommendation_status: str,
+    quote_attested: bool,
+    result: tuple[int, str] | None,
+    is_current: bool,
+) -> list[dict[str, str]]:
+    local_rows = [
+        {
+            "검증 항목": "추천 적합성",
+            "상태": "PASS" if recommendation_status != "BLOCK" else "BLOCK",
+            "판정 기준": "검증 전략 보유권과 주문안 actionable 상태",
+        },
+        {
+            "검증 항목": "브로커 가격 대조",
+            "상태": "PASS" if quote_attested else "BLOCK",
+            "판정 기준": "운영자가 외부 브로커 현재가를 직접 확인",
+        },
+    ]
+    remote_rows = [
+        ("환경·정책", ("[live-policy:", "order submission")),
+        ("모델·OOS 증거", ("[model-gate:", "[live-drill:", "[paper-oos:")),
+        ("브로커·시장", ("[broker-preflight:", "market is closed", "account is blocked")),
+        ("중지·킬스위치", ("[halt:", "halted:", "kill-switch")),
+        ("가격·카탈로그", ("[price:", "[mark:", "deviates", "fresh mark")),
+        (
+            "주문·노출 한도",
+            ("risk_block", "notional", "buying power", "cash", "exposure", "weight", "daily"),
+        ),
+        ("섹터·보호가격", ("[sectors:", "[protection:", "stop-loss", "target-exit")),
+    ]
+    if result is None:
+        remote_status = "대기"
+        output = ""
+    elif not is_current:
+        remote_status = "재검증"
+        output = ""
+    elif result[0] == 0:
+        remote_status = "PASS"
+        output = result[1].lower()
+    else:
+        remote_status = "검토"
+        output = result[1].lower()
+    rows = list(local_rows)
+    for label, blockers in remote_rows:
+        status = remote_status
+        if (
+            result is not None
+            and is_current
+            and result[0] != 0
+            and any(token in output for token in blockers)
+        ):
+            status = "BLOCK"
+        rows.append(
+            {
+                "검증 항목": label,
+                "상태": status,
+                "판정 기준": "CLI fail-closed 주문 게이트",
+            }
+        )
+    return rows
+
+
+def _latest_rebalance_plan(strategy_id: str) -> tuple[Path, dict[str, Any]] | None:
+    candidates = sorted(
+        OUT_DIR.glob(f"rebalance-plan-{strategy_id}-*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            if path.stat().st_size > 5_000_000:
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("strategy_id") == strategy_id:
+            return path, payload
+    return None
+
+
+def _plan_recommendation(plan: dict[str, Any], symbol: str) -> dict[str, Any]:
+    for row in plan.get("recommendations", []):
+        if isinstance(row, dict) and str(row.get("symbol", "")).upper() == symbol.upper():
+            return row
+    return {}
+
+
+def _plan_report_path(strategy_id: str) -> Path:
+    return OUT_DIR / f"paper-drill-orders-{strategy_id}.md"
+
+
+def _render_plan_overview(path: Path, plan: dict[str, Any]) -> None:
+    recommendations = [row for row in plan.get("recommendations", []) if isinstance(row, dict)]
+    intents = [row for row in plan.get("intents", []) if isinstance(row, dict)]
+    risk_to_stop = sum(float(row.get("risk_to_stop") or 0.0) for row in recommendations)
+    nav = float(plan.get("nav") or 0.0)
+    metrics = st.columns(4)
+    metrics[0].metric("데이터 기준일", str(plan.get("data_as_of") or "—"))
+    metrics[1].metric("추천 / 주문", f"{len(recommendations)} / {len(intents)}")
+    metrics[2].metric("손절 위험", _fmt_pct(risk_to_stop / nav, signed=False) if nav > 0 else "—")
+    metrics[3].metric("전체 게이트", "PASS" if plan.get("all_pass") else "BLOCK")
+    st.caption(
+        f"{path.name} · 가격 {plan.get('price_source', '—')} · 펀더멘털 "
+        f"{plan.get('fundamentals_source', '—')}"
+    )
+    if recommendations:
+        display = []
+        for row in recommendations:
+            display.append(
+                {
+                    "순위": row.get("rank"),
+                    "종목": row.get("symbol"),
+                    "판단": row.get("decision"),
+                    "신뢰도": f"{float(row.get('confidence_score') or 0):.0f} · {row.get('confidence_band', '—')}",
+                    "목표비중": _fmt_pct(row.get("target_weight"), signed=False),
+                    "목표수량": _fmt_num(row.get("target_qty"), 6),
+                    "실행가": _fmt_num(row.get("execution_limit")),
+                    "참고진입": _fmt_num(row.get("advisory_entry")),
+                    "손절": _fmt_num(row.get("stop_loss")),
+                    "손절 기준": row.get("stop_basis"),
+                    "목표": _fmt_num(row.get("target_exit")),
+                    "상태": "PASS" if row.get("actionable") else "BLOCK",
+                }
+            )
+        st.dataframe(pd.DataFrame(display), width="stretch", hide_index=True)
+
+    report_path = _plan_report_path(str(plan.get("strategy_id", "")))
+    actions = st.columns([1, 1, 4])
+    actions[0].download_button(
+        "JSON 리포트",
+        data=json.dumps(plan, ensure_ascii=False, indent=2),
+        file_name=path.name,
+        mime="application/json",
+        width="stretch",
+    )
+    if report_path.exists():
+        actions[1].download_button(
+            "매매 리포트",
+            data=report_path.read_text(encoding="utf-8"),
+            file_name=report_path.name,
+            mime="text/markdown",
+            width="stretch",
+        )
+
+
 def _render_live_console() -> None:
     _render_section_header(
         "실거래 콘솔",
-        "브로커 없이 로컬에서 가격 적재, 준비도 확인, 수동 주문 티켓 생성을 실행합니다.",
+        "검증 전략의 최신 추천 리포트를 만들고, 선택한 델타 주문을 보호가격 포함 티켓으로 전환합니다.",
         kicker="Live operations",
-        side="Manual broker path",
+        side="Recommendation → risk gate → ticket",
     )
-    left, mid, right = st.columns([1.1, 1.1, 1])
+
+    setup_left, setup_mid, setup_right = st.columns([1, 1, 2])
+    with setup_left:
+        top_n = st.selectbox("검증 전략", [7, 5], format_func=lambda value: f"AQR Top-{value}")
+    with setup_mid:
+        whole_shares = st.toggle("정수주만", value=False, help="분할주 미지원 브로커에서만 켭니다.")
+    strategy_id = f"aqr_top{top_n}_cap20_trail10_pit110"
+    with setup_right:
+        plan_args = [
+            "rebalance-plan",
+            "--top-n",
+            str(top_n),
+            "--strategy-id",
+            strategy_id,
+            "--no-record-oos",
+            "--preview-only",
+        ]
+        if whole_shares:
+            plan_args.append("--whole-shares")
+        if st.button("최신 추천·주문안 생성", type="primary", width="stretch"):
+            with st.spinner("최신 가격, PIT 펀더멘털, 리스크 게이트를 계산하는 중입니다."):
+                st.session_state["lc_plan_result"] = _run_trader_command(plan_args, {})
+
+    plan_ref = _latest_rebalance_plan(strategy_id)
+    plan_path: Path | None = None
+    plan: dict[str, Any] = {}
+    if plan_ref is not None:
+        plan_path, plan = plan_ref
+        _render_plan_overview(plan_path, plan)
+    else:
+        st.warning(
+            "선택한 전략의 운용안이 없습니다. 위 버튼으로 최신 추천·주문안을 먼저 생성하세요."
+        )
+
+    if st.session_state.get("lc_plan_result") is not None:
+        with st.expander("운용안 생성 로그"):
+            _render_command_result("추천·주문안", st.session_state.get("lc_plan_result"))
+
+    manual_override = st.toggle("직접 주문 입력", value=False, key="lc_manual_override")
+    intents = [row for row in plan.get("intents", []) if isinstance(row, dict)]
+    selected_intent: dict[str, Any] = {}
+    selected_recommendation: dict[str, Any] = {}
+    if intents and not manual_override:
+        labels = [
+            f"{str(row.get('side', '')).upper()} {row.get('symbol')} · "
+            f"{_fmt_num(row.get('qty'), 6)}주 @ {_fmt_num(row.get('limit_price'))}"
+            for row in intents
+        ]
+        selected_label = st.selectbox("실행할 추천 주문", labels, key="lc_plan_order")
+        selected_intent = intents[labels.index(selected_label)]
+        selected_recommendation = _plan_recommendation(plan, str(selected_intent.get("symbol", "")))
+
+    if selected_intent:
+        symbol = str(selected_intent.get("symbol", "")).upper()
+        side = str(selected_intent.get("side", "buy"))
+        qty = float(selected_intent.get("qty") or 0.0)
+        limit_price = float(selected_intent.get("limit_price") or 0.0)
+        stop_loss = _safe_float(selected_recommendation.get("stop_loss"))
+        target_exit = _safe_float(selected_recommendation.get("target_exit"))
+        order_key = str(plan.get("rebalance_key") or datetime.now(tz=UTC).date().isoformat())
+        order_status = (
+            "PASS"
+            if (side == "sell" or selected_recommendation.get("actionable", False))
+            else "BLOCK"
+        )
+        order_metrics = st.columns(6)
+        order_metrics[0].metric("종목", symbol)
+        order_metrics[1].metric("방향", side.upper())
+        order_metrics[2].metric("수량", _fmt_num(qty, 4))
+        order_metrics[3].metric("실행가", _fmt_num(limit_price))
+        order_metrics[4].metric(
+            "손절 / 목표", f"{_fmt_num(stop_loss, 0)} / {_fmt_num(target_exit, 0)}"
+        )
+        order_metrics[5].metric("추천 게이트", order_status)
+        if selected_recommendation:
+            brief_row = {
+                "순위": selected_recommendation.get("rank"),
+                "종목": symbol,
+                "액션": selected_recommendation.get("action"),
+                "백분위": round(
+                    100
+                    - 100
+                    * (float(selected_recommendation.get("rank") or 1) - 1)
+                    / max(float(selected_recommendation.get("universe_size") or 1) - 1, 1),
+                    1,
+                ),
+                "현재가": selected_recommendation.get("current_price"),
+                "진입": selected_recommendation.get("execution_limit"),
+                "참고진입": selected_recommendation.get("advisory_entry"),
+                "손절": selected_recommendation.get("stop_loss"),
+                "목표": selected_recommendation.get("target_exit"),
+                "_entry_label": "실행 지정가",
+            }
+            _render_stock_brief(
+                symbol,
+                brief_row,
+                {
+                    "universe_size": selected_recommendation.get("universe_size"),
+                    "top_n": top_n,
+                },
+            )
+    else:
+        input_cols = st.columns(4)
+        symbol = input_cols[0].text_input("심볼", "QQQ", key="lc_symbol").strip().upper()
+        side = input_cols[1].selectbox("방향", ["buy", "sell"], key="lc_side")
+        qty = float(input_cols[2].number_input("수량", min_value=0.0, value=1.0, step=0.001))
+        limit_price = float(
+            input_cols[3].number_input("지정가", min_value=0.0, value=100.0, step=0.01)
+        )
+        stop_loss = None
+        target_exit = None
+        order_key = datetime.now(tz=UTC).date().isoformat()
+        order_status = "MANUAL"
+
+    st.markdown("#### 계좌 및 브로커 확인")
+    left, mid, right = st.columns(3)
     with left:
         broker = st.selectbox("브로커", ["manual-paper", "manual-live"], key="lc_broker")
-        strategy_id = st.text_input(
-            "전략 ID",
-            _env_default("LIVE_STRATEGY_ID", "aqr_top7_cap20_trail10_pit110"),
-            key="lc_strategy",
-        )
         policy_version = st.text_input(
-            "정책 버전", _env_default("LIVE_POLICY_VERSION", "manual-web-v1"), key="lc_policy"
+            "정책 버전", _env_default("LIVE_POLICY_VERSION", "manual-web-v2"), key="lc_policy"
         )
         max_capital = st.number_input(
-            "최대 운용자본", min_value=0.0, value=float(_env_default("LIVE_MAX_CAPITAL", "10000"))
+            "최대 운용자본",
+            min_value=0.0,
+            value=float(plan.get("nav") or _env_default("LIVE_MAX_CAPITAL", "10000")),
         )
     with mid:
         account_id = st.text_input(
@@ -2101,11 +2872,25 @@ def _render_live_console() -> None:
             value=float(_env_default("LIVE_MANUAL_BUYING_POWER", "100000")),
         )
     with right:
-        symbol = st.text_input("심볼", "QQQ", key="lc_symbol").strip().upper()
-        as_of = st.date_input("기준일", datetime.now(tz=UTC).date(), key="lc_asof").isoformat()
-        price = st.number_input("브로커 가격", min_value=0.0, value=100.0, step=0.01)
+        as_of = st.date_input("가격 기준일", datetime.now(tz=UTC).date(), key="lc_asof").isoformat()
+        quote_key = str(selected_intent.get("client_order_id") or f"manual-{symbol}")
+        quote = st.number_input(
+            "외부 브로커 현재가",
+            min_value=0.0,
+            value=limit_price if limit_price > 0 else 100.0,
+            step=0.01,
+            key=f"lc_quote_{quote_key}",
+            help="실거래에서는 브로커 화면의 현재가와 대조합니다. 계획가는 자동으로 채워집니다.",
+        )
+        quote_attested = st.checkbox(
+            "브로커 화면의 가격과 대조했습니다",
+            value=False,
+            key=f"lc_quote_ack_{quote_key}",
+        )
         market_open = st.toggle("시장 열림", value=True, key="lc_open")
-        positions = st.text_input("포지션", _env_default("LIVE_MANUAL_POSITIONS", ""), key="lc_pos")
+        positions = st.text_input(
+            "현재 포지션", _env_default("LIVE_MANUAL_POSITIONS", ""), key="lc_pos"
+        )
 
     env = _live_console_env(
         broker=broker,
@@ -2120,18 +2905,106 @@ def _render_live_console() -> None:
         positions=positions,
     )
 
+    verify_args = _live_ticket_args(
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        quote=quote,
+        limit_price=limit_price,
+        order_key=order_key,
+        as_of=as_of,
+        stop_loss=stop_loss,
+        target_exit=target_exit,
+        verify_only=True,
+    )
+    ticket_args = _live_ticket_args(
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        quote=quote,
+        limit_price=limit_price,
+        order_key=order_key,
+        as_of=as_of,
+        stop_loss=stop_loss,
+        target_exit=target_exit,
+        verify_only=False,
+    )
+    gate_fingerprint = _order_gate_fingerprint(ticket_args, env)
+    gate_result = st.session_state.get("lc_gate_result")
+    gate_receipt = st.session_state.get("lc_gate_receipt")
+    gate_is_current = _order_gate_receipt_is_current(gate_receipt, gate_fingerprint)
+    gate_prerequisites = bool(
+        quote_attested
+        and math.isfinite(quote)
+        and quote > 0
+        and math.isfinite(qty)
+        and qty > 0
+        and math.isfinite(limit_price)
+        and limit_price > 0
+        and order_status != "BLOCK"
+    )
+    gate_passed = _order_gate_passed(
+        prerequisites=gate_prerequisites,
+        result=gate_result if isinstance(gate_result, tuple) else None,
+        is_current=gate_is_current,
+    )
+
     st.divider()
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        if st.button("가격 적재", type="primary", use_container_width=True):
-            st.session_state["lc_price_result"] = _run_trader_command(
+    st.markdown("#### 주문 검증 게이트")
+    st.caption(
+        "현재 주문·계좌·가격을 하나의 검증 단위로 잠급니다. 통과 후 값이 하나라도 바뀌면 "
+        "티켓 발행 권한이 자동으로 폐기되며, 통과는 5분 동안만 유효합니다."
+    )
+    gate_metrics = st.columns(4)
+    if gate_passed:
+        gate_label = "PASS"
+    elif gate_result is not None and gate_is_current:
+        gate_label = "BLOCK"
+    elif gate_result is not None:
+        gate_label = "재검증"
+    else:
+        gate_label = "대기"
+    gate_metrics[0].metric("전체 게이트", gate_label)
+    gate_metrics[1].metric("추천 주문", order_status)
+    gate_metrics[2].metric("가격 대조", "PASS" if quote_attested else "BLOCK")
+    gate_metrics[3].metric("주문 지문", gate_fingerprint[:8].upper())
+    st.dataframe(
+        pd.DataFrame(
+            _order_gate_rows(
+                recommendation_status=order_status,
+                quote_attested=quote_attested,
+                result=gate_result if isinstance(gate_result, tuple) else None,
+                is_current=gate_is_current,
+            )
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    if gate_result is not None and not gate_is_current:
+        st.warning(
+            "검증 이후 주문·계좌 값이 변경되었거나 5분이 지났습니다. 전체 게이트를 다시 실행하세요."
+        )
+    elif gate_result is not None and gate_is_current and not gate_passed:
+        st.error("현재 주문은 검증 게이트를 통과하지 못했습니다. 차단 근거를 확인하세요.")
+    elif gate_passed and isinstance(gate_receipt, dict):
+        st.success(f"검증 통과 · {gate_receipt.get('checked_at', '방금')} · 현재 입력에만 유효")
+
+    controls = st.columns([1, 1, 2])
+    with controls[0]:
+        if st.button(
+            "전체 검증 게이트 실행",
+            type="primary",
+            width="stretch",
+            disabled=not gate_prerequisites,
+        ):
+            price_result = _run_trader_command(
                 [
                     "live-price-ingest",
                     symbol,
                     "--source",
                     "external",
                     "--price",
-                    f"{price:.8f}",
+                    f"{quote:.8f}",
                     "--price-as-of",
                     as_of,
                     "--ack-external-price",
@@ -2140,67 +3013,47 @@ def _render_live_console() -> None:
                 ],
                 env,
             )
-    with p2:
-        if st.button("준비도 확인", use_container_width=True):
-            st.session_state["lc_ready_result"] = _run_trader_command(
-                [
-                    "live-readiness",
-                    "--require-order-submission",
-                    "--require-broker-preflight",
-                    "--require-price",
-                    symbol,
-                    "--as-of",
-                    as_of,
-                    "--catalog-db",
-                    str(LIVE_CATALOG_PATH),
-                    "--halt-state",
-                    str(LIVE_HALT_STATE),
-                ],
-                env,
-            )
-    with p3:
-        if st.button("티켓 생성", use_container_width=True):
-            st.session_state["lc_ticket_result"] = _run_trader_command(
-                [
-                    "live-ticket",
-                    symbol,
-                    "--side",
-                    st.session_state.get("lc_side", "buy"),
-                    "--qty",
-                    f"{float(st.session_state.get('lc_qty', 1.0)):.8f}",
-                    "--price",
-                    f"{price:.8f}",
-                    "--order-type",
-                    st.session_state.get("lc_order_type", "limit"),
-                    "--limit-price",
-                    f"{float(st.session_state.get('lc_limit', price)):.8f}",
-                    "--ack-manual-ticket",
-                    "--as-of",
-                    as_of,
-                    "--catalog-db",
-                    str(LIVE_CATALOG_PATH),
-                    "--ticket-log",
-                    str(MANUAL_TICKET_LOG),
-                    "--halt-state",
-                    str(LIVE_HALT_STATE),
-                    "--equity-state",
-                    str(LIVE_EQUITY_STATE),
-                ],
-                env,
-            )
+            st.session_state["lc_price_result"] = price_result
+            if price_result[0] == 0:
+                gate_result = _run_trader_command(verify_args, env)
+            else:
+                gate_result = (
+                    price_result[0],
+                    "# Manual Order Verification Gate\n\n"
+                    "BLOCKED: [price:external] broker-attested price registration failed.\n\n"
+                    + price_result[1],
+                )
+            st.session_state["lc_gate_result"] = gate_result
+            st.session_state["lc_gate_receipt"] = {
+                "fingerprint": gate_fingerprint,
+                "code": gate_result[0],
+                "checked_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "checked_at_epoch": datetime.now(UTC).timestamp(),
+            }
+            st.rerun()
+    with controls[1]:
+        if st.button(
+            "검증 통과 티켓 발행",
+            width="stretch",
+            disabled=not gate_passed,
+        ):
+            st.session_state["lc_ticket_result"] = _run_trader_command(ticket_args, env)
+            st.session_state.pop("lc_gate_receipt", None)
+            st.rerun()
+    with controls[2]:
+        st.caption(
+            "게이트는 티켓을 생성하지 않습니다. 티켓 발행 시 동일 검사를 한 번 더 실행해 "
+            "검증과 실행 사이의 상태 변경도 차단합니다."
+        )
 
-    t1, t2, t3 = st.columns(3)
-    with t1:
-        st.selectbox("방향", ["buy", "sell"], key="lc_side")
-    with t2:
-        st.number_input("수량", min_value=0.0, value=1.0, step=1.0, key="lc_qty")
-    with t3:
-        st.selectbox("주문유형", ["limit", "market"], key="lc_order_type")
-        st.number_input("지정가", min_value=0.0, value=price if price > 0 else 100.0, step=0.01, key="lc_limit")
-
-    _render_command_result("가격 적재", st.session_state.get("lc_price_result"))
-    _render_command_result("준비도", st.session_state.get("lc_ready_result"))
-    _render_command_result("티켓", st.session_state.get("lc_ticket_result"))
+    for title, key in (
+        ("브로커 가격 등록", "lc_price_result"),
+        ("주문 검증 게이트", "lc_gate_result"),
+        ("주문 티켓", "lc_ticket_result"),
+    ):
+        if st.session_state.get(key) is not None:
+            with st.expander(f"{title} 결과", expanded=key == "lc_ticket_result"):
+                _render_command_result(title, st.session_state.get(key))
 
     if MANUAL_TICKET_LOG.exists():
         try:
@@ -2214,7 +3067,20 @@ def _render_live_console() -> None:
         tickets = [row for row in rows if row.get("record_type") == "manual_ticket"]
         if tickets:
             st.markdown("#### 최근 티켓")
-            st.dataframe(pd.DataFrame(tickets[-10:]), use_container_width=True, hide_index=True)
+            display_tickets = [
+                {
+                    "생성": row.get("created_at"),
+                    "종목": row.get("symbol"),
+                    "방향": row.get("side"),
+                    "수량": row.get("qty"),
+                    "지정가": row.get("limit_price"),
+                    "손절": row.get("stop_loss"),
+                    "목표": row.get("target_exit"),
+                    "상태": row.get("status"),
+                }
+                for row in reversed(tickets[-10:])
+            ]
+            st.dataframe(pd.DataFrame(display_tickets), width="stretch", hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2265,9 +3131,7 @@ def main() -> None:
             side=str(CATALOG_PATH),
         )
         if cov:
-            st.dataframe(
-                pd.DataFrame([c.__dict__ for c in cov]), use_container_width=True, hide_index=True
-            )
+            st.dataframe(pd.DataFrame([c.__dict__ for c in cov]), width="stretch", hide_index=True)
         else:
             st.info("저장된 데이터 없음. `trader ingest --symbols … --market …` 로 수집.")
         st.caption("수집 예: `trader ingest --symbols AAPL,MSFT --market us`")

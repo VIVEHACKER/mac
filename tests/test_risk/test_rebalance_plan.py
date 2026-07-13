@@ -9,6 +9,28 @@ def test_targets_from_weights_whole_shares() -> None:
     assert {t.symbol: t.target_qty for t in targets} == {"AAA": 50.0, "BBB": 25.0}
 
 
+def test_targets_from_weights_fractional_preserves_expensive_name() -> None:
+    targets = targets_from_weights(
+        {"EXPENSIVE": 0.2},
+        {"EXPENSIVE": 5_000.0},
+        10_000.0,
+        fractional_decimals=6,
+    )
+    assert targets[0].target_qty == 0.4
+
+
+def test_targets_from_weights_rejects_invalid_fractional_precision() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="between 0 and 9"):
+        targets_from_weights(
+            {"AAA": 0.5},
+            {"AAA": 100.0},
+            10_000.0,
+            fractional_decimals=10,
+        )
+
+
 def test_targets_skip_unpriced_symbol() -> None:
     targets = targets_from_weights({"AAA": 0.5, "ZZZ": 0.5}, {"AAA": 100.0}, 10_000.0)
     assert {t.symbol for t in targets} == {"AAA"}

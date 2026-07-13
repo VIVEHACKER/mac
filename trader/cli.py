@@ -942,6 +942,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip appending this rebalance to the forward-OOS ledger.",
     )
+    rebalance_plan.add_argument(
+        "--whole-shares",
+        action="store_true",
+        help="Disable fractional sizing for brokers that only support whole shares.",
+    )
+    rebalance_plan.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Generate report/JSON without changing paper positions or the OOS ledger.",
+    )
 
     live_price_ingest = sub.add_parser(
         "live-price-ingest",
@@ -1096,6 +1106,16 @@ def build_parser() -> argparse.ArgumentParser:
     live_ticket.add_argument("--price", type=float, required=True)
     live_ticket.add_argument("--order-type", default="limit", choices=["market", "limit"])
     live_ticket.add_argument("--limit-price", type=float)
+    live_ticket.add_argument(
+        "--stop-loss",
+        type=float,
+        help="Protective stop level recorded on a BUY ticket for external broker entry.",
+    )
+    live_ticket.add_argument(
+        "--target-exit",
+        type=float,
+        help="Profit target recorded on a BUY ticket for external broker entry.",
+    )
     live_ticket.add_argument("--time-in-force", default="day", choices=["day", "gtc", "ioc", "fok"])
     live_ticket.add_argument("--rebalance-key", default=date.today().isoformat())
     live_ticket.add_argument("--broker", choices=["manual-paper", "manual-live"], default=None)
@@ -1103,6 +1123,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ack-manual-ticket",
         action="store_true",
         help="Required to create a manual execution ticket.",
+    )
+    live_ticket.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Run the exact order-specific readiness and risk gates without creating a ticket.",
     )
     live_ticket.add_argument("--as-of", default=date.today().isoformat())
     live_ticket.add_argument("--max-price-age-days", type=int, default=2)
@@ -2983,6 +3008,10 @@ def _run_rebalance_plan(args: argparse.Namespace) -> int:
         argv += ["--allow-live-fundamentals"]
     if args.no_record_oos:
         argv += ["--no-record-oos"]
+    if args.whole_shares:
+        argv += ["--whole-shares"]
+    if args.preview_only:
+        argv += ["--preview-only"]
     return int(paper_drill.main(argv) or 0)
 
 
@@ -3691,7 +3720,7 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
                 f"--broker {args.broker} does not match LIVE_BROKER={policy.broker}",
             )
         )
-    if not args.ack_manual_ticket:
+    if not args.verify_only and not args.ack_manual_ticket:
         issues.append(
             DataQualityIssue(
                 "error",
@@ -3728,6 +3757,42 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
                     f"{_flag} must be a finite positive number (got {_val})",
                 )
             )
+    protection_values = (args.stop_loss, args.target_exit)
+    if any(value is not None for value in protection_values):
+        if args.side != "buy":
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-ticket",
+                    "protection",
+                    "--stop-loss/--target-exit are supported only for BUY tickets",
+                )
+            )
+        elif any(value is None for value in protection_values):
+            issues.append(
+                DataQualityIssue(
+                    "error",
+                    "live-ticket",
+                    "protection",
+                    "--stop-loss and --target-exit must be provided together",
+                )
+            )
+        else:
+            assert args.stop_loss is not None and args.target_exit is not None
+            entry_reference = args.limit_price or args.price
+            if not (
+                math.isfinite(args.stop_loss)
+                and math.isfinite(args.target_exit)
+                and 0 < args.stop_loss < entry_reference < args.target_exit
+            ):
+                issues.append(
+                    DataQualityIssue(
+                        "error",
+                        "live-ticket",
+                        "protection",
+                        "BUY protection must satisfy 0 < stop-loss < entry price < target-exit",
+                    )
+                )
     catalog_mark = _latest_catalog_mark(catalog, symbol, args.market)
     if catalog_mark is not None and args.max_mark_deviation >= 0:
         deviation = abs(args.price / catalog_mark - 1.0)
@@ -3751,16 +3816,17 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
     )
     issues.extend(ticket_sector_issues)
     if issues:
-        print(
-            _format_live_readiness(
-                policy,
-                issues,
-                required_prices=required_prices,
-                require_order_submission=True,
-                require_broker_preflight=True,
-                paper_oos_prices=args.paper_oos_prices,
-            )
+        readiness = _format_live_readiness(
+            policy,
+            issues,
+            required_prices=required_prices,
+            require_order_submission=True,
+            require_broker_preflight=True,
+            paper_oos_prices=args.paper_oos_prices,
         )
+        if args.verify_only:
+            readiness = f"# Manual Order Verification Gate\n\n{readiness}"
+        print(readiness)
         return 2
     try:
         broker = _live_broker_adapter(broker_name, args)
@@ -3799,15 +3865,24 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
         # Sector cap fires only with a map; manual-live fails closed above when it is missing.
         sectors=ticket_sectors,
     )[0]
-    if result.status == "accepted":
+    if result.status == "accepted" and not args.verify_only:
         _append_manual_ticket(
-            args.ticket_log, broker_name, policy, intent, args.price, catalog_mark
+            args.ticket_log,
+            broker_name,
+            policy,
+            intent,
+            args.price,
+            catalog_mark,
+            stop_loss=args.stop_loss,
+            target_exit=args.target_exit,
         )
+    verify_only = bool(args.verify_only)
     lines = [
-        "# Manual Order Ticket",
+        "# Manual Order Verification Gate" if verify_only else "# Manual Order Ticket",
         "",
         "| Field | Value |",
         "|---|---:|",
+        f"| Mode | {'verification only' if verify_only else 'ticket creation'} |",
         f"| Ready | {'yes' if result.status == 'accepted' else 'no'} |",
         f"| Broker | {broker_name} |",
         f"| Strategy | {policy.strategy_id} |",
@@ -3819,11 +3894,30 @@ def _run_live_ticket(args: argparse.Namespace) -> int:
         f"| Limit Price | {_number_or_na(limit_price)} |",
         f"| Mark | {args.price:,.2f} |",
         f"| Catalog Mark | {_number_or_na(catalog_mark)} |",
+        f"| Protective Stop | {_number_or_na(args.stop_loss)} |",
+        f"| Profit Target | {_number_or_na(args.target_exit)} |",
         f"| Ticket Log | {args.ticket_log} |",
         f"| Action | {result.action} |",
         f"| Status | {result.status} |",
-        "| Execution Required | external broker manual entry |",
+        (
+            "| Execution Required | none; rerun without --verify-only after operator review |"
+            if verify_only
+            else "| Execution Required | external broker manual entry |"
+        ),
     ]
+    lines.extend(
+        [
+            "",
+            "## Gate Coverage",
+            "",
+            "- live policy and order-submission arming",
+            "- approved strategy, paper/shadow drills, and paper OOS evidence",
+            "- persistent halt latch and broker account/market preflight",
+            "- broker-attested price freshness and catalog-mark deviation",
+            "- order notional, cash, exposure, concentration, and daily limits",
+            "- sector classification and protective-price ordering",
+        ]
+    )
     if result.reasons:
         lines.extend(["", "## Reasons", ""])
         lines.extend(f"- {reason}" for reason in result.reasons)
@@ -3842,6 +3936,9 @@ def _append_manual_ticket(
     intent: OrderIntent,
     price: float,
     catalog_mark: float | None,
+    *,
+    stop_loss: float | None = None,
+    target_exit: float | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -3861,10 +3958,19 @@ def _append_manual_ticket(
         "rebalance_key": intent.rebalance_key,
         "operator_price": price,
         "catalog_mark": catalog_mark,
+        "stop_loss": stop_loss,
+        "target_exit": target_exit,
+        "protection_status": (
+            "external_protective_orders_required"
+            if stop_loss is not None and target_exit is not None
+            else "not_provided"
+        ),
         "status": "ticket_created_external_execution_required",
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _run_model_gate(args: argparse.Namespace) -> int:

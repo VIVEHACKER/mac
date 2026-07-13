@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from scripts.paper_drill import build_delta_plan, write_plan_json
+from scripts.paper_drill import build_delta_plan, cap_weights_by_sector, write_plan_json
 
 _ENV = [
     "LIVE_MAX_CAPITAL",
@@ -102,6 +102,18 @@ def test_empty_target_book_with_holdings_is_full_liquidation_warning(tmp_path) -
     assert plan["warning"] and "liquidat" in plan["warning"].lower()
 
 
+def test_sector_cap_scales_crowded_names_and_keeps_excess_cash() -> None:
+    adjusted, changes = cap_weights_by_sector(
+        {"TGT": 0.20, "HD": 0.20, "AAPL": 0.20},
+        {"TGT": "consumer", "HD": "consumer", "AAPL": "tech"},
+        0.35,
+    )
+    assert adjusted["TGT"] == pytest.approx(0.175)
+    assert adjusted["HD"] == pytest.approx(0.175)
+    assert adjusted["AAPL"] == pytest.approx(0.20)
+    assert changes["consumer"]["cash_retained"] == pytest.approx(0.05)
+
+
 def test_resolve_plan_prior_fresh_day_uses_positions() -> None:
     from scripts.paper_drill import resolve_plan_prior
 
@@ -141,6 +153,8 @@ def test_cli_rebalance_plan_forwards_to_paper_drill(monkeypatch) -> None:
             "--strategy-id",
             "aqr_top7_cap20_trail10_pit110",
             "--no-record-oos",
+            "--preview-only",
+            "--whole-shares",
         ]
     )
 
@@ -148,6 +162,7 @@ def test_cli_rebalance_plan_forwards_to_paper_drill(monkeypatch) -> None:
     argv = captured["argv"]
     assert argv[argv.index("--top-n") + 1] == "7"
     assert "--strategy-id" in argv and "--no-record-oos" in argv
+    assert "--preview-only" in argv and "--whole-shares" in argv
 
 
 def test_write_plan_json_roundtrip(tmp_path) -> None:

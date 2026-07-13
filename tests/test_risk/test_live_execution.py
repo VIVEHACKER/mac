@@ -640,6 +640,9 @@ class _FailingReadBroker:
     def get_order(self, client_order_id: str) -> BrokerOrder | None:
         return None
 
+    def cancel_order(self, client_order_id: str) -> BrokerOrder | None:
+        raise AssertionError("cancel_order must not be reached when reads fail")
+
 
 def test_alpaca_5xx_submit_latches_halt_through_runner(tmp_path) -> None:
     store = JsonlOrderStore(tmp_path / "orders.jsonl")
