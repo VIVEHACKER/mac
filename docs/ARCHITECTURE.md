@@ -153,6 +153,12 @@ trader/
 │       ├── orderbook.py     # L2 OBI / VAMP / 호가벽 — 크립토 전용(ccxt)
 │       ├── open_interest.py # OI 4사분면 / 스퀴즈·캐스케이드 / 펀딩 — 크립토 전용(ccxt)
 │       └── read.py          # 컨플루언스 집계 → EntryState(ENTER_NOW/SCALE_IN/WAIT_FOR_PULLBACK/AVOID) + 진입 가격대·인밸리데이션·근거
+│   └── market_map/          # 마켓 히트맵 정적 페이지 (surgedesk 스타일)
+│       ├── compute.py       # 주별 버킷·4주Δ·risk-on/off 부호·테마 주간수익 (순수 계산, no-lookahead)
+│       ├── themes.py        # 매크로 지표 스펙(방향성)·US 슈퍼테마 매핑·KR 테마 ETF 프록시·티커 칩
+│       ├── fetch.py         # yfinance 배치(+재시도·심볼 폴백) / FRED(기존 fred_macro 재사용)
+│       ├── render.py        # 서버사이드 HTML 렌더 (pctPair 색 램프 포팅, JS는 스크롤 스니펫뿐)
+│       └── build.py         # 카탈로그(US 테마) + yfinance(매크로/KR/칩) + FRED(스프레드) 조립
 ├── pod/                     # Citadel 스타일 멀티전략
 │   ├── allocator.py         # Vol-target 리스크 예산 분배
 │   └── monitor.py           # Pod별 PnL/DD/Sharpe 추적

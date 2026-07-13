@@ -256,6 +256,18 @@ uv run trader quote MSFT --output out/quote-MSFT.md
 uv run trader recommend MSFT --target-price 520 --stop-price 390 --output out/recommend-MSFT.md
 ```
 
+## 마켓 히트맵 (market-map)
+
+돈이 어디로 흐르는지 한 장으로 — 거시 레짐 시계열 히트맵(KOSPI/VIX/DXY/EWY/HYG/TLT/10Y/수익률곡선/HY스프레드/섹터로테이션, 4주Δ risk-on·off 색상)과 테마별 자금흐름 히트맵(US는 로컬 카탈로그 유니버스를 슈퍼테마로 묶고, KR은 테마 ETF 프록시)을 surgedesk 스타일 정적 HTML로 생성한다.
+
+```bash
+uv run trader market-map                        # out/market_map.html 생성
+uv run trader market-map --weeks 12             # 최근 12주만
+uv run trader market-map --offline              # 네트워크 없이 카탈로그만 (US 테마 한정)
+```
+
+데이터: US 테마 = DuckDB 카탈로그(오프라인 가능) · 매크로/KR ETF/티커 칩 = yfinance · 수익률곡선(T10Y2Y)/HY 스프레드(BAMLH0A0HYM2) = FRED 공개 CSV(키 불필요). 수집 실패는 행/셀 단위로 비워지고 페이지는 항상 생성된다.
+
 ## 비용
 
 페이퍼 트레이딩 + 일봉 백테스트 + 크립토 라이브 = **0원**. 인트라데이 미국 데이터가 필요해질 때만 Alpaca SIP $99/월 또는 Polygon $79~$199/월 검토.

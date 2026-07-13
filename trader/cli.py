@@ -195,6 +195,7 @@ CORE_COMMANDS = {
     "robustness",
     "quality",
     "dashboard",
+    "market-map",
     "copilot",
 }
 
@@ -295,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_quality(parsed)
     if parsed.command == "dashboard":
         return _run_dashboard(parsed)
+    if parsed.command == "market-map":
+        return _run_market_map(parsed)
 
     parser.print_help()
     return 2
@@ -1214,6 +1217,27 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = sub.add_parser("dashboard", help="Print or run the local Streamlit dashboard.")
     dashboard.add_argument("--port", type=int, default=8501)
     dashboard.add_argument("--run", action="store_true", help="Start the local Streamlit server.")
+
+    market_map = sub.add_parser(
+        "market-map",
+        help="마켓 히트맵 HTML 생성 — 거시 레짐 시계열 + 테마 자금흐름 (surgedesk 스타일).",
+    )
+    market_map.add_argument(
+        "--weeks", type=_positive_int, default=28, help="표시할 주 수 (기본 28, 최소 1)."
+    )
+    market_map.add_argument(
+        "--out",
+        type=Path,
+        default=ROOT / "out" / "market_map.html",
+        help="출력 HTML 경로 (기본 out/market_map.html).",
+    )
+    market_map.add_argument(
+        "--offline",
+        action="store_true",
+        help="네트워크 없이 로컬 카탈로그 데이터만 사용 (매크로/KR/칩은 비게 됨).",
+    )
+    market_map.add_argument("--dashboard-url", default="http://localhost:8501")
+    market_map.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
 
     copilot = sub.add_parser("copilot", help="Forward arguments to the integrated copilot CLI.")
     copilot.add_argument("args", nargs=argparse.REMAINDER)
@@ -4677,6 +4701,34 @@ def _run_dashboard(args: argparse.Namespace) -> int:
     print(f"Dashboard URL: http://localhost:{args.port}")
     if args.run:
         return subprocess.call(command_args)
+    return 0
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("1 이상이어야 합니다.")
+    return number
+
+
+def _run_market_map(args: argparse.Namespace) -> int:
+    from engine.market_map import build_market_map
+
+    html, stats = build_market_map(
+        weeks_count=args.weeks,
+        catalog_db=args.catalog_db,
+        offline=args.offline,
+        dashboard_url=args.dashboard_url,
+    )
+    out: Path = args.out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html, encoding="utf-8")
+    print(
+        f"market-map: {stats['weeks']}주 · 매크로 {stats['macro_rows_with_data']}/{stats['macro_rows']}행 "
+        f"· US 테마 {stats['us_themes']} · KR 테마 {stats['kr_themes']} · 칩 {stats['chips']} "
+        f"· 카탈로그 심볼 {stats['catalog_symbols']} (최신 {stats['catalog_last_bar'] or '—'})"
+    )
+    print(f"페이지: {out}")
     return 0
 
 
