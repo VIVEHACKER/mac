@@ -3084,6 +3084,74 @@ def _render_live_console() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 딥링크 (market-map → 대시보드): ?tab=recommender&ticker=NVDA&market=us
+# ─────────────────────────────────────────────────────────────────────────────
+_TAB_LABELS = [
+    "종목 선정",
+    "차트 리딩",
+    "추천기",
+    "검증 결과",
+    "예측",
+    "페이퍼 원장",
+    "실거래",
+    "RAG",
+    "카탈로그",
+]
+_TAB_ALIASES = {  # URL 친화 별칭 (market-map 의 dashboard_deeplink 과 계약)
+    "screener": "종목 선정",
+    "chart": "차트 리딩",
+    "recommender": "추천기",
+    "validation": "검증 결과",
+    "forecast": "예측",
+    "ledgers": "페이퍼 원장",
+    "live": "실거래",
+    "rag": "RAG",
+    "catalog": "카탈로그",
+}
+_DEEPLINK_MARKETS = {"us", "kospi", "kosdaq", "crypto"}
+
+
+def _deeplink_updates(
+    params: dict[str, str], consumed: str | None
+) -> tuple[dict[str, str], str | None, str]:
+    """쿼리 파라미터 → (세션 업데이트, 활성화할 탭 라벨, 소비 마커).
+
+    URL 파라미터는 rerun 마다 다시 들어오므로 같은 파라미터는 한 번만 적용한다
+    (마커 비교) — 아니면 사용자가 입력칸을 고칠 때마다 딥링크 값으로 되돌아간다.
+    """
+    marker = repr(sorted((str(k), str(v)) for k, v in params.items()))
+    tab_raw = str(params.get("tab", "")).strip()
+    tab = _TAB_ALIASES.get(tab_raw.lower()) or (tab_raw if tab_raw in _TAB_LABELS else None)
+    if marker == consumed:
+        return {}, None, marker
+    updates: dict[str, str] = {}
+    ticker = str(params.get("ticker", "")).strip().upper()
+    if ticker and len(ticker) <= 12 and ticker.replace(".", "").replace("-", "").isalnum():
+        updates["rec_tkr"] = ticker
+    market = str(params.get("market", "")).strip().lower()
+    if market in _DEEPLINK_MARKETS:
+        updates["rec_mkt"] = market
+    return updates, tab, marker
+
+
+def _activate_tab_js(label: str) -> None:
+    """st.tabs 에는 프로그램적 탭 선택이 없다 — 같은 오리진 iframe 에서 부모 문서의
+    탭 버튼을 클릭한다. 실패해도 무해 (기본 탭이 열릴 뿐, 티커는 이미 프리필됨)."""
+    import streamlit.components.v1 as components
+
+    script = (
+        f"<script>const want={json.dumps(label)};let n=0;"
+        "const t=setInterval(function(){n++;"
+        "try{const doc=window.parent.document;"
+        "const btn=Array.from(doc.querySelectorAll('button[role=\"tab\"]'))"
+        ".find(function(b){return b.innerText.trim()===want});"
+        "if(btn){btn.click();clearInterval(t);return}}catch(e){clearInterval(t);return}"
+        "if(n>20)clearInterval(t)},150);</script>"
+    )
+    components.html(script, height=0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
@@ -3091,22 +3159,18 @@ def main() -> None:
     st.markdown(_CSS, unsafe_allow_html=True)
     catalog = MarketDataCatalog(CATALOG_PATH)
 
+    updates, deeplink_tab, marker = _deeplink_updates(
+        dict(st.query_params), st.session_state.get("_deeplink_consumed")
+    )
+    st.session_state.update(updates)
+    st.session_state["_deeplink_consumed"] = marker
+
     cov = catalog.coverage()
     _render_app_header(cov)
 
-    tabs = st.tabs(
-        [
-            "종목 선정",
-            "차트 리딩",
-            "추천기",
-            "검증 결과",
-            "예측",
-            "페이퍼 원장",
-            "실거래",
-            "RAG",
-            "카탈로그",
-        ]
-    )
+    tabs = st.tabs(_TAB_LABELS)
+    if deeplink_tab:
+        _activate_tab_js(deeplink_tab)
     with tabs[0]:
         _render_screener(catalog)
     with tabs[1]:

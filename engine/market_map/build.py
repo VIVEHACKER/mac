@@ -11,15 +11,16 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from engine.market_map import compute
+from engine.market_map import compute, panels
 from engine.market_map.compute import MacroRow, ThemeRow
 from engine.market_map.render import render_page
 from engine.market_map.themes import (
-    KR_THEME_ETFS,
+    KR_THEMES,
     MACRO_SPECS,
     SECTOR_CYCLICALS,
     SECTOR_DEFENSIVES,
     TICKER_CHIPS,
+    US_SUBTHEMES,
     US_THEMES,
     yfinance_symbols_needed,
 )
@@ -82,6 +83,10 @@ def build_market_map(
     fetch_closes: FetchCloses | None = None,
     fetch_fred: FetchFred | None = None,
     now: datetime | None = None,
+    oos_ledger: Path | str | None = None,
+    copilot_out: Path | str = panels.DEFAULT_COPILOT_OUT,
+    with_selection: bool = True,
+    strategies_root: Path | str = ".",
 ) -> tuple[str, dict[str, object]]:
     """마켓 히트맵 페이지 HTML 과 요약 통계를 만든다."""
     as_of = as_of or date.today()
@@ -89,12 +94,23 @@ def build_market_map(
     weeks = compute.build_weeks(as_of, weeks_count)
     start = weeks[0] - timedelta(weeks=_HISTORY_BUFFER_WEEKS)
 
-    # 1) 로컬 카탈로그 — US 테마 종목 + 카탈로그 소스 매크로 심볼
+    # forward-OOS 원장 — 마킹에 필요한 심볼을 카탈로그 조회에 합류시킨다.
+    # 원장이 히트맵 창보다 길어지면 초기 리밸 경계 마크가 잘려 폐쇄 기간이 사라지므로,
+    # OOS 심볼만은 원장 T0 까지 거슬러 별도 시작점으로 조회한다.
+    if oos_ledger is None:
+        oos_ledger = panels.discover_oos_ledger(".")
+    oos_syms = panels.oos_symbols(oos_ledger)
+    ledger_t0 = panels.oos_start_date(oos_ledger)
+    oos_start = min(start, ledger_t0 - timedelta(days=7)) if ledger_t0 else start
+
+    # 1) 로컬 카탈로그 — US 테마 종목 + 카탈로그 소스 매크로 심볼 (+ OOS 심볼은 긴 창)
     theme_symbols = sorted({s for theme in US_THEMES for s in theme.symbols})
     catalog_macro = [spec.symbol for spec in MACRO_SPECS if spec.source == "catalog"]
-    catalog_series = _catalog_closes(catalog_db, theme_symbols + catalog_macro, start)
+    catalog_series = _catalog_closes(catalog_db, sorted({*theme_symbols, *catalog_macro}), start)
+    if oos_syms:
+        catalog_series.update(_catalog_closes(catalog_db, oos_syms, oos_start))
 
-    # 2) yfinance — 매크로/칩/섹터ETF/KR 테마 ETF (+ 카탈로그에 없던 매크로 폴백)
+    # 2) yfinance — 매크로/칩/섹터ETF/KR 테마 (+ 카탈로그에 없던 매크로/OOS 심볼 폴백)
     yf_series: dict[str, DailySeries] = {}
     if not offline:
         closes_fn: FetchCloses
@@ -109,6 +125,10 @@ def build_market_map(
             if symbol not in catalog_series and symbol not in needed:
                 needed.append(symbol)
         yf_series = closes_fn(needed, start)
+        # OOS 마킹 심볼 중 카탈로그에 없는 것(예: SPY)은 원장 T0 창으로 별도 수집
+        oos_missing = [s for s in oos_syms if s not in catalog_series]
+        if oos_missing:
+            yf_series.update(closes_fn(oos_missing, oos_start))
 
     # 3) FRED — 수익률곡선/HY 스프레드
     fred_series: dict[str, DailySeries] = {}
@@ -159,7 +179,7 @@ def build_market_map(
         if row.n > 0:
             us_rows.append(row)
     kr_rows: list[ThemeRow] = []
-    for theme in KR_THEME_ETFS:
+    for theme in KR_THEMES:
         row = compute.theme_row(
             theme.name,
             {s: yf_series[s] for s in theme.symbols if yf_series.get(s)},
@@ -168,6 +188,43 @@ def build_market_map(
         )
         if row.n > 0:
             kr_rows.append(row)
+
+    # US 하위산업 드릴다운 — 부모 테마 아래 접힌 행 (데이터 잡힌 그룹만)
+    us_sub_rows: dict[str, list[ThemeRow]] = {}
+    for parent_name, sub_specs in US_SUBTHEMES.items():
+        subs = [
+            row
+            for spec in sub_specs
+            if (
+                row := compute.theme_row(
+                    spec.name,
+                    {s: catalog_series[s] for s in spec.symbols if s in catalog_series},
+                    weeks,
+                    as_of=as_of,
+                )
+            ).n
+            > 0
+        ]
+        if subs:
+            us_sub_rows[parent_name] = subs
+
+    # 확장 패널 — 전부 fail-open (없으면 섹션 생략)
+    selection = panels.load_selection_panel() if with_selection else None
+    oos_closes = {s: catalog_series.get(s) or yf_series.get(s) or [] for s in oos_syms}
+    oos_strategy = (
+        Path(oos_ledger).name.removeprefix("paper-oos-ledger-").removesuffix(".jsonl")
+        if oos_ledger
+        else None
+    )
+    oos = panels.load_oos_panel(
+        oos_ledger,
+        oos_closes,
+        as_of,
+        backtest_excess_ann=(
+            panels.strategy_backtest_excess(oos_strategy, strategies_root) if oos_strategy else None
+        ),
+    )
+    forecasts = panels.load_forecast_panel(copilot_out, as_of)
 
     # 상단 티커 칩 — 마지막 종가 vs 직전 종가
     chips: list[tuple[str, float, float]] = []
@@ -203,15 +260,24 @@ def build_market_map(
         dashboard_url=dashboard_url,
         partial_last=partial_last,
         catalog_as_of=catalog_as_of,
+        us_sub_rows=us_sub_rows,
+        selection=selection,
+        oos=oos,
+        forecasts=forecasts,
     )
     stats: dict[str, object] = {
         "weeks": len(weeks),
         "macro_rows": len(macro_rows),
         "macro_rows_with_data": sum(1 for r in macro_rows if any(c is not None for c in r.cells)),
         "us_themes": len(us_rows),
+        "us_subthemes": sum(len(v) for v in us_sub_rows.values()),
         "kr_themes": len(kr_rows),
         "chips": len(chips),
         "catalog_symbols": len(catalog_series),
         "catalog_last_bar": catalog_as_of.isoformat() if catalog_as_of else None,
+        "selection_rows": len(selection.rows) if selection else 0,
+        "oos_entries": oos.n_entries if oos else 0,
+        "oos_closed": oos.n_closed if oos else 0,
+        "forecast_cards": (len(forecasts.rates) + len(forecasts.macros)) if forecasts else 0,
     }
     return html, stats

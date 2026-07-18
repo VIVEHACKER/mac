@@ -292,3 +292,36 @@ def test_single_name_live_load_only_requests_the_target_quote(monkeypatch) -> No
     assert requested == [("AAPL",)]
     assert loaded["AAPL"][-1].close == 105.0
     assert loaded["MSFT"][-1].source == "catalog"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 딥링크 (?tab=recommender&ticker=NVDA&market=us)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_deeplink_updates_maps_alias_and_prefills() -> None:
+    updates, tab, marker = dashboard_app._deeplink_updates(
+        {"tab": "recommender", "ticker": "brk-b", "market": "us"}, None
+    )
+    assert updates == {"rec_tkr": "BRK-B", "rec_mkt": "us"}
+    assert tab == "추천기"
+    assert marker
+
+
+def test_deeplink_updates_consumed_marker_applies_once() -> None:
+    params = {"tab": "recommender", "ticker": "NVDA"}
+    updates, tab, marker = dashboard_app._deeplink_updates(params, None)
+    assert updates and tab == "추천기"
+    # 같은 파라미터가 rerun 으로 다시 들어오면 무시 (사용자 입력 보호)
+    updates2, tab2, marker2 = dashboard_app._deeplink_updates(params, marker)
+    assert updates2 == {} and tab2 is None and marker2 == marker
+
+
+def test_deeplink_updates_rejects_junk() -> None:
+    updates, tab, _ = dashboard_app._deeplink_updates(
+        {"tab": "nope", "ticker": "A" * 20, "market": "mars"}, None
+    )
+    assert updates == {} and tab is None
+
+
+def test_deeplink_updates_accepts_korean_tab_label() -> None:
+    _, tab, _ = dashboard_app._deeplink_updates({"tab": "추천기"}, None)
+    assert tab == "추천기"

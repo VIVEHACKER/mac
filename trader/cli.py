@@ -1238,6 +1238,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     market_map.add_argument("--dashboard-url", default="http://localhost:8501")
     market_map.add_argument("--catalog-db", type=Path, default=DEFAULT_CATALOG_DB)
+    market_map.add_argument(
+        "--no-selection",
+        action="store_true",
+        help="검증 선정(scan_universe) 패널 생략 — 스냅샷 로드/스캔(~수 초)을 건너뛴다.",
+    )
+    market_map.add_argument(
+        "--oos-ledger",
+        type=Path,
+        default=None,
+        help="forward-OOS 원장 경로 명시 (기본: config default 전략에 앵커해 자동 발견 — "
+        "원장이 여러 개고 default 로 못 좁히면 패널 생략 + 경고).",
+    )
 
     copilot = sub.add_parser("copilot", help="Forward arguments to the integrated copilot CLI.")
     copilot.add_argument("args", nargs=argparse.REMAINDER)
@@ -4713,20 +4725,28 @@ def _positive_int(value: str) -> int:
 
 def _run_market_map(args: argparse.Namespace) -> int:
     from engine.market_map import build_market_map
+    from engine.market_map.panels import discover_oos_ledger
 
     html, stats = build_market_map(
         weeks_count=args.weeks,
         catalog_db=args.catalog_db,
         offline=args.offline,
         dashboard_url=args.dashboard_url,
+        # cwd 무관 (cron 방어): 명시 인자 우선, 아니면 config default 전략 앵커 발견
+        oos_ledger=args.oos_ledger or discover_oos_ledger(ROOT),
+        copilot_out=ROOT / "trading-copilot" / "out",
+        with_selection=not args.no_selection,
+        strategies_root=ROOT,
     )
     out: Path = args.out
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
     print(
         f"market-map: {stats['weeks']}주 · 매크로 {stats['macro_rows_with_data']}/{stats['macro_rows']}행 "
-        f"· US 테마 {stats['us_themes']} · KR 테마 {stats['kr_themes']} · 칩 {stats['chips']} "
-        f"· 카탈로그 심볼 {stats['catalog_symbols']} (최신 {stats['catalog_last_bar'] or '—'})"
+        f"· US 테마 {stats['us_themes']}(+하위 {stats.get('us_subthemes', 0)}) · KR 테마 {stats['kr_themes']} "
+        f"· 칩 {stats['chips']} · 카탈로그 심볼 {stats['catalog_symbols']} (최신 {stats['catalog_last_bar'] or '—'}) "
+        f"· 선정 {stats.get('selection_rows', 0)}행 · OOS {stats.get('oos_closed', 0)}/{stats.get('oos_entries', 0)}폐쇄 "
+        f"· 예측 {stats.get('forecast_cards', 0)}카드"
     )
     print(f"페이지: {out}")
     return 0

@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import html
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
+from urllib.parse import urlencode
 
 from engine.market_map.compute import (
     MACRO_SCALE,
@@ -16,6 +17,12 @@ from engine.market_map.compute import (
     MacroRow,
     ThemeRow,
     pct_pair,
+)
+from engine.market_map.panels import (
+    RATE_REGION_LABELS,
+    ForecastPanel,
+    OOSPanel,
+    SelectionPanel,
 )
 
 UP_COLOR = "#D92F2F"  # 상승 = 빨강 (국내 관행)
@@ -81,6 +88,38 @@ table.hm.ts tbody th,table.hm.ts thead th:first-child{min-width:180px;width:180p
 .band h2{font-weight:900;letter-spacing:-.02em;font-size:clamp(22px,3vw,32px)}.band h2 .g{color:var(--green)}
 footer{border-top:1px solid var(--line);color:var(--soft);font-size:12px;padding:30px 0 54px;margin-top:12px;background:var(--soft-bg)}
 footer .wrap>div{margin-top:4px}
+tr.subrow{display:none}
+tr.subrow.open{display:table-row}
+tr.subrow th{padding-left:28px!important;font-weight:600;color:var(--soft);background:#FAFBFC}
+th.has-subs{cursor:pointer}
+th.has-subs .tri{color:var(--green);font-size:9px;margin-right:4px;display:inline-block;transition:transform .15s}
+th.has-subs.open .tri{transform:rotate(90deg)}
+table.panel{border-collapse:collapse;font-size:12.5px;width:100%;font-variant-numeric:tabular-nums}
+table.panel th{color:var(--soft);font-weight:600;font-size:11px;text-align:right;padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.panel td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+table.panel th:nth-child(2),table.panel td:nth-child(2){text-align:left}
+table.panel tr.topn td{font-weight:700;background:#F6FBF8}
+table.panel a{color:var(--ink);text-decoration:none;border-bottom:1px dashed var(--green)}
+table.panel a:hover{color:var(--green)}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:800;letter-spacing:.02em}
+.badge.buy{background:#E3F5EB;color:#00794A}
+.badge.hold{background:#EEF1F5;color:#5A6672}
+.badge.avoid{background:#F6E9E7;color:#A44E30}
+.badge.closed{background:#EEF1F5;color:#5A6672}
+.badge.open-mtm{background:#FFF4E2;color:#8A6410}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+.fcard{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fff;box-shadow:0 1px 3px rgba(14,20,32,.04)}
+.fcard h3{font-size:14px;font-weight:800;margin-bottom:2px}
+.fcard .sub{color:var(--soft);font-size:11.5px;margin-bottom:10px}
+.fcard .foot{color:var(--soft);font-size:11px;margin-top:10px;border-top:1px dashed var(--line);padding-top:8px;line-height:1.55}
+.pline{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:12px}
+.pline .lbl{width:34px;color:var(--soft);font-weight:600}
+.pline .bar{flex:1;height:8px;background:#F0F3F7;border-radius:4px;overflow:hidden}
+.pline .bar i{display:block;height:100%;border-radius:4px}
+.pline .val{width:44px;text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+.pline.modal .val{color:var(--green-d)}
+.numline{font-size:13px;margin:3px 0}
+.numline b{font-variant-numeric:tabular-nums}
 @media(max-width:820px){
 .nav{height:56px}.logo{font-size:19px;flex:0 0 auto}
 .nav-links{display:flex;align-items:center;flex:1;min-width:0;margin-left:14px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;white-space:nowrap}
@@ -99,7 +138,28 @@ function scrollHeatsRight(){
 requestAnimationFrame(function(){requestAnimationFrame(scrollHeatsRight)});
 addEventListener("load",scrollHeatsRight);
 addEventListener("resize",scrollHeatsRight);
+function toggleSubs(group){
+  var head=document.getElementById("subhead-"+group);
+  if(head)head.classList.toggle("open");
+  document.querySelectorAll(".sub-"+group).forEach(function(tr){tr.classList.toggle("open")});
+}
 """
+
+
+def dashboard_deeplink(
+    dashboard_url: str,
+    *,
+    ticker: str | None = None,
+    market: str = "us",
+    tab: str = "recommender",
+) -> str:
+    """대시보드 딥링크 — ?tab=recommender&ticker=NVDA&market=us (app.py 가 해석)."""
+    params: dict[str, str] = {"tab": tab}
+    if ticker:
+        params["ticker"] = ticker
+        params["market"] = market
+    return f"{dashboard_url.rstrip('/')}/?{urlencode(params)}"
+
 
 EMPTY_TD = '<td style="background:#FBF7EE;color:#c3ccd6">·</td>'
 
@@ -171,38 +231,66 @@ def render_macro_table(
     )
 
 
+def _theme_row_cells(row: ThemeRow, partial_last: bool) -> str:
+    tds: list[str] = []
+    for i, value in enumerate(row.series):
+        if value is None:
+            tds.append(EMPTY_TD)
+            continue
+        bg, fg = pct_pair(value, THEME_SCALE)
+        wtd = partial_last and i == len(row.series) - 1
+        title = f"{'주중(WTD)' if wtd else '평균 5d'} {_signed_str(value)}%"
+        tds.append(
+            f'<td style="background:{bg};color:{fg};font-weight:700" '
+            f'title="{html.escape(title)}">{_signed_str(value)}</td>'
+        )
+    avg = row.avg
+    if avg is None:
+        tds.append('<td class="avgcol" style="background:#fff;color:#5A6672">—</td>')
+    else:
+        bg, fg = pct_pair(avg, THEME_SCALE)
+        tds.append(
+            f'<td class="avgcol" style="background:{bg};color:{fg};font-weight:800">'
+            f"{_signed_str(avg)}</td>"
+        )
+    return "".join(tds)
+
+
 def render_theme_table(
-    rows: Sequence[ThemeRow], weeks: Sequence[date], partial_last: bool = False
+    rows: Sequence[ThemeRow],
+    weeks: Sequence[date],
+    partial_last: bool = False,
+    sub_rows: Mapping[str, Sequence[ThemeRow]] | None = None,
+    group_prefix: str = "g",
 ) -> str:
+    """테마 히트맵. sub_rows 가 있으면 부모 행 클릭으로 하위산업 행을 펼친다."""
     body: list[str] = []
-    for row in rows:
+    for gi, row in enumerate(rows):
         name = html.escape(row.name)
         tickers = html.escape(row.tickers)
-        tds: list[str] = [
-            f'<th title="{tickers}">{name} '
-            f'<span style="color:#9a8b7a;font-weight:600">({row.n})</span></th>'
-        ]
-        for i, value in enumerate(row.series):
-            if value is None:
-                tds.append(EMPTY_TD)
-                continue
-            bg, fg = pct_pair(value, THEME_SCALE)
-            wtd = partial_last and i == len(row.series) - 1
-            title = f"{'주중(WTD)' if wtd else '평균 5d'} {_signed_str(value)}%"
-            tds.append(
-                f'<td style="background:{bg};color:{fg};font-weight:700" '
-                f'title="{html.escape(title)}">{_signed_str(value)}</td>'
+        subs = list(sub_rows.get(row.name, [])) if sub_rows else []
+        group = f"{group_prefix}{gi}"
+        if subs:
+            head_th = (
+                f'<th class="has-subs" id="subhead-{group}" onclick="toggleSubs(\'{group}\')" '
+                f'title="{tickers} — 클릭하여 하위산업 펼치기">'
+                f'<span class="tri">▶</span>{name} '
+                f'<span style="color:#9a8b7a;font-weight:600">({row.n})</span></th>'
             )
-        avg = row.avg
-        if avg is None:
-            tds.append('<td class="avgcol" style="background:#fff;color:#5A6672">—</td>')
         else:
-            bg, fg = pct_pair(avg, THEME_SCALE)
-            tds.append(
-                f'<td class="avgcol" style="background:{bg};color:{fg};font-weight:800">'
-                f"{_signed_str(avg)}</td>"
+            head_th = (
+                f'<th title="{tickers}">{name} '
+                f'<span style="color:#9a8b7a;font-weight:600">({row.n})</span></th>'
             )
-        body.append(f"<tr>{''.join(tds)}</tr>")
+        body.append(f"<tr>{head_th}{_theme_row_cells(row, partial_last)}</tr>")
+        for sub in subs:
+            sub_th = (
+                f'<th title="{html.escape(sub.tickers)}">└ {html.escape(sub.name)} '
+                f'<span style="color:#9a8b7a;font-weight:600">({sub.n})</span></th>'
+            )
+            body.append(
+                f'<tr class="subrow sub-{group}">{sub_th}{_theme_row_cells(sub, partial_last)}</tr>'
+            )
     return (
         f'<table class="hm ts">{_thead(weeks, "슈퍼테마", partial_last)}'
         f"<tbody>{''.join(body)}</tbody></table>"
@@ -217,6 +305,134 @@ _DESK_FEATURES = [
 ]
 
 
+def _num(value: float | None, digits: int = 2, dash: str = "—") -> str:
+    return f"{value:,.{digits}f}" if value is not None else dash
+
+
+def render_selection_panel(panel: SelectionPanel, dashboard_url: str) -> str:
+    """검증 선정 top-N 테이블 — 각 티커는 대시보드 추천기 딥링크."""
+    action_cls = {"BUY": "buy", "HOLD": "hold", "AVOID": "avoid"}
+    body: list[str] = []
+    for row in panel.rows:
+        link = dashboard_deeplink(dashboard_url, ticker=row.ticker, market="us")
+        badge = action_cls.get(row.action, "hold")
+        body.append(
+            "<tr" + (' class="topn"' if row.in_top_n else "") + ">"
+            f"<td>{row.rank if row.rank is not None else '—'}</td>"
+            f'<td><a href="{html.escape(link)}">{html.escape(row.ticker)}</a></td>'
+            f'<td><span class="badge {badge}">{html.escape(row.action)}</span></td>'
+            f"<td>{html.escape(row.band)} {row.score:.0f}</td>"
+            f"<td>{_num(row.price)}</td>"
+            f"<td>{_num(row.target_entry)}</td>"
+            f"<td>{_num(row.stop_loss)}</td>"
+            f"<td>{_num(row.target_exit)}</td></tr>"
+        )
+    head = (
+        "<tr><th>순위</th><th>티커</th><th>액션</th><th>신뢰도</th>"
+        "<th>현재가</th><th>진입(변동성밴드)</th><th>손절</th><th>목표</th></tr>"
+    )
+    return f'<table class="panel"><thead>{head}</thead><tbody>{"".join(body)}</tbody></table>'
+
+
+def render_oos_panel(panel: OOSPanel) -> str:
+    """forward-OOS 원장 — 리밸 회차별 포트 vs 벤치. 폐쇄/인터임을 구분 표기."""
+    body: list[str] = []
+    for row in panel.rows:
+        status = (
+            '<span class="badge closed">폐쇄</span>'
+            if row.closed
+            else '<span class="badge open-mtm">진행 (MTM)</span>'
+        )
+        mark = row.mark_date.isoformat() if row.mark_date else "—"
+        exc = row.excess_pct
+        exc_color = UP_COLOR if (exc or 0) >= 0 else DOWN_COLOR
+        body.append(
+            "<tr>"
+            f"<td>{html.escape(row.rebal_date)}</td>"
+            f"<td>{html.escape(mark)}</td>"
+            f"<td>{row.n_names}</td>"
+            f"<td>{_signed_str(row.port_pct) + '%' if row.port_pct is not None else '—'}</td>"
+            f"<td>{_signed_str(row.bench_pct) + '%' if row.bench_pct is not None else '—'}</td>"
+            f'<td style="color:{exc_color};font-weight:700">'
+            f"{_signed_str(exc) + '%p' if exc is not None else '—'}</td>"
+            f"<td>{status}</td></tr>"
+        )
+    head = (
+        f"<tr><th>리밸일</th><th>마킹일</th><th>종목</th><th>포트</th>"
+        f"<th>{html.escape(panel.benchmark)}</th><th>초과</th><th>상태</th></tr>"
+    )
+    if panel.n_closed:
+        summary = (
+            f"폐쇄 기간 n={panel.n_closed} 누적: 포트 {_signed_str(panel.cum_port_pct or 0.0)}% · "
+            f"{html.escape(panel.benchmark)} {_signed_str(panel.cum_bench_pct or 0.0)}% · "
+            f"초과 <b>{_signed_str(panel.cum_excess_pct or 0.0)}%p</b>"
+        )
+    else:
+        summary = "폐쇄 기간 n=0 — 아직 통계적 판단 구간 아님 (첫 기간은 다음 리밸에 폐쇄)"
+    return (
+        f'<table class="panel"><thead>{head}</thead><tbody>{"".join(body)}</tbody></table>'
+        f'<div class="hint" style="margin:10px 0 0">{summary}</div>'
+    )
+
+
+def render_forecast_panel(panel: ForecastPanel) -> str:
+    """거시 예측 카드 — 금리 확률 바 + CPI/PPI nowcast, 사후채점 트랙레코드 병기."""
+    cards: list[str] = []
+    for rate in panel.rates:
+        label = RATE_REGION_LABELS.get(rate.region, rate.region.upper())
+        flag = "🇺🇸" if rate.region == "us" else "🇰🇷"
+        lines: list[str] = []
+        for key, korean in (("cut", "인하"), ("hold", "동결"), ("hike", "인상")):
+            prob = rate.probs.get(key, 0.0)
+            is_modal = key == rate.modal
+            bar_color = "var(--green)" if is_modal else "#c3ccd6"
+            lines.append(
+                f'<div class="pline{" modal" if is_modal else ""}"><span class="lbl">{korean}</span>'
+                f'<span class="bar"><i style="width:{prob * 100:.0f}%;background:{bar_color}"></i></span>'
+                f'<span class="val">{prob * 100:.0f}%</span></div>'
+            )
+        track = (
+            f"채점 n={rate.n_scored} · 적중 {rate.hit_rate * 100:.0f}% · "
+            f"Brier {rate.mean_brier:.3f}"
+            if rate.n_scored and rate.hit_rate is not None and rate.mean_brier is not None
+            else "사후채점 기록 없음"
+        )
+        stale = "" if rate.pending else " · <b>지난 회의 기록</b>"
+        cards.append(
+            f'<div class="fcard"><h3>{flag} {html.escape(label)} {html.escape(rate.meeting)}</h3>'
+            f'<div class="sub">현재 {_num(rate.current_rate)}% · 기록 {html.escape(rate.recorded_at)}{stale}</div>'
+            f"{''.join(lines)}"
+            f'<div class="foot">{track}</div></div>'
+        )
+    for macro in panel.macros:
+        flag = "🇺🇸" if macro.region == "us" else "🇰🇷"
+        pi = (
+            f" (PI80 {_signed_str(macro.pi80[0])}~{_signed_str(macro.pi80[1])})"
+            if macro.pi80
+            else ""
+        )
+        track_parts: list[str] = [f"채점 n={macro.n_scored}"]
+        if macro.mae is not None:
+            track_parts.append(f"MAE {macro.mae:.2f}%p")
+        if macro.pi80_coverage is not None:
+            track_parts.append(f"PI80 적중 {macro.pi80_coverage * 100:.0f}%")
+        yoy = (
+            f'<div class="numline">YoY nowcast <b>{_signed_str(macro.forecast_yoy)}%</b></div>'
+            if macro.forecast_yoy is not None
+            else ""
+        )
+        skill = f" · skill {macro.skill_pct:.0f}%" if macro.skill_pct is not None else ""
+        cards.append(
+            f'<div class="fcard"><h3>{flag} {html.escape(macro.label)} · {html.escape(macro.target)}</h3>'
+            f'<div class="sub">기록 {html.escape(macro.recorded_at)}{skill}'
+            f"{'' if macro.pending else ' · <b>지난 발표 기록</b>'}</div>"
+            f'<div class="numline">MoM nowcast <b>{_signed_str(macro.forecast_mom) if macro.forecast_mom is not None else "—"}%</b>{html.escape(pi)}</div>'
+            f"{yoy}"
+            f'<div class="foot">{" · ".join(track_parts) if macro.n_scored else "사후채점 기록 없음"}</div></div>'
+        )
+    return f'<div class="cards">{"".join(cards)}</div>'
+
+
 def render_page(
     *,
     as_of: date,
@@ -229,6 +445,10 @@ def render_page(
     dashboard_url: str = "http://localhost:8501",
     partial_last: bool = False,
     catalog_as_of: date | None = None,
+    us_sub_rows: Mapping[str, Sequence[ThemeRow]] | None = None,
+    selection: SelectionPanel | None = None,
+    oos: OOSPanel | None = None,
+    forecasts: ForecastPanel | None = None,
 ) -> str:
     chip_html = render_ticker_chips(chips)
     ticker = (
@@ -244,14 +464,65 @@ def render_page(
     kr_section = (
         f"""
 <section id="kr-themes"><div class="wrap">
-  <div class="sec-h"><h2>🇰🇷 국장 (KR) — 테마 ETF 주간 수익률</h2><span>· 주별 5거래일</span></div>
-  <div class="hint">개별 종목 수집 전까지 대표 <b>테마 ETF 프록시</b> 기준. 각 셀: 그 주 ETF의
-  5거래일 수익률(%). <b>따뜻한 색 = 상승(자금 유입)</b>, <b>차가운 색 = 하락(자금 유출)</b>.{wtd_note}</div>
+  <div class="sec-h"><h2>🇰🇷 국장 (KR) — 테마 주간 수익률</h2><span>· 주별 5거래일 · ETF 프록시 + 대표 개별종목</span></div>
+  <div class="hint">각 셀: 그 주 테마 매핑 심볼(테마 ETF + 대표 개별종목)들의 평균
+  5거래일 수익률(%). <b>따뜻한 색 = 상승(자금 유입)</b>, <b>차가운 색 = 하락(자금 유출)</b>.
+  행 이름에 마우스를 올리면 심볼 리스트.{wtd_note}</div>
   <div class="card heat">{render_theme_table(kr_rows, weeks, partial_last)}</div>
 </div></section>"""
         if kr_rows
         else ""
     )
+    selection_section = ""
+    if selection is not None and selection.rows:
+        pbo_note = (
+            f"방향은 robust, 크기는 fragile (PBO {selection.pbo:.2f}). "
+            if selection.pbo is not None
+            else "방향은 robust, 크기는 fragile. "
+        )
+        sel_hint = (
+            f"walk-forward 검증 전략(<b>{html.escape(selection.strategy_id)}</b>)의 신호 재활용 "
+            f"랭킹 — 예측이 아니라 랭킹. {pbo_note}"
+            f"가격/펀더멘털 <b>핀 스냅샷 {selection.asof:%Y-%m-%d}</b> 기준, "
+            f"유니버스 {selection.universe_size}종목. 강조 행 = 전략 보유 top-{selection.top_n}. "
+            f"티커 클릭 → 대시보드 추천기에서 평가."
+        )
+        selection_section = f"""
+<section id="selection"><div class="wrap">
+  <div class="sec-h"><h2>검증 선정 — top {selection.top_n}</h2><span>· scan_universe · 핀 스냅샷</span></div>
+  <div class="hint">{sel_hint}</div>
+  <div class="card">{render_selection_panel(selection, dashboard_url)}</div>
+</div></section>"""
+    oos_section = ""
+    if oos is not None and oos.rows:
+        t0 = oos.rows[0].rebal_date
+        bt_note = (
+            f"백테스트 기대 초과 <b>{oos.backtest_excess_ann * 100:+.1f}%/yr</b>"
+            f"(수수료 반영, validated_strategies.json) 대비 대조가 목적."
+            if oos.backtest_excess_ann is not None
+            else "백테스트 기대치와의 대조가 목적."
+        )
+        oos_hint = (
+            f"사전등록 페이퍼 원장 (<b>{html.escape(oos.strategy_id)}</b>, T0 {html.escape(t0)}, "
+            f"21영업일 리밸). 마크 = 조정종가, 포트 수익 = 마크된 심볼만 가중 재정규화. "
+            f"<b>진행(MTM) 행은 폐쇄 전 노이즈</b> — 판단은 폐쇄 기간 누적으로. "
+            f"{bt_note}"
+        )
+        oos_section = f"""
+<section id="oos"><div class="wrap">
+  <div class="sec-h"><h2>forward-OOS 원장 — 전략 vs {html.escape(oos.benchmark)}</h2><span>· n={oos.n_entries} 리밸 · 폐쇄 {oos.n_closed}</span></div>
+  <div class="hint">{oos_hint}</div>
+  <div class="card">{render_oos_panel(oos)}</div>
+</div></section>"""
+    forecast_section = ""
+    if forecasts is not None and (forecasts.rates or forecasts.macros):
+        forecast_section = f"""
+<section id="forecast"><div class="wrap">
+  <div class="sec-h"><h2>거시 예측 — 원장 사후채점 포함</h2><span>· trading-copilot 원장 (파일 읽기, 재계산 없음)</span></div>
+  <div class="hint">기준금리 확률과 CPI/PPI nowcast 는 <b>기록 시점</b> 값이며, 트랙레코드(적중률·Brier·MAE·PI80)는
+  발표 후 사후채점 원장에서 집계. 표본이 작을 때는 참고용.</div>
+  {render_forecast_panel(forecasts)}
+</div></section>"""
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -271,6 +542,9 @@ def render_page(
       <a href="#" class="active">마켓</a>
       <a href="#macro">거시 레짐</a>
       <a href="#us-themes">테마 흐름</a>
+      {'<a href="#selection">검증 선정</a>' if selection_section else ""}
+      {'<a href="#oos">OOS 원장</a>' if oos_section else ""}
+      {'<a href="#forecast">거시 예측</a>' if forecast_section else ""}
       <a href="{html.escape(dashboard_url)}" class="cta">대시보드 열기</a>
     </div>
   </nav>
@@ -301,10 +575,14 @@ def render_page(
   <div class="sec-h"><h2>🇺🇸 미장 (US) — 테마별 종목 평균 수익률</h2><span>· 주별 5거래일 · 로컬 카탈로그{f" (최신 종가 {catalog_as_of.isoformat()} — 이후 주는 빈 칸, `trader ingest` 로 갱신)" if catalog_as_of else ""}</span></div>
   <div class="hint">각 셀: 그 주 해당 슈퍼테마 매핑 종목들의 평균 5거래일 수익률(%).
   <b>따뜻한 색 = 상승(자금 유입)</b>, <b>차가운 색 = 하락(자금 유출)</b>.
-  각 테마 옆 (n) = 데이터가 잡힌 매핑 종목 수, 행 이름에 마우스를 올리면 종목 리스트.{wtd_note}</div>
-  <div class="card heat">{render_theme_table(us_rows, weeks, partial_last)}</div>
+  각 테마 옆 (n) = 데이터가 잡힌 매핑 종목 수, 행 이름에 마우스를 올리면 종목 리스트.
+  <b>▶ 표시 테마는 클릭하면 하위산업으로 펼쳐진다.</b>{wtd_note}</div>
+  <div class="card heat">{render_theme_table(us_rows, weeks, partial_last, sub_rows=us_sub_rows, group_prefix="us")}</div>
 </div></section>
 {kr_section}
+{selection_section}
+{oos_section}
+{forecast_section}
 <footer><div class="wrap">
   <div>데이터: Yahoo Finance · FRED(공개 CSV) · 로컬 DuckDB 카탈로그 — 지연/무보증 데이터.</div>
   <div>정보 제공 목적으로 생성된 페이지이며 투자 조언이 아닙니다. 생성 {generated_at:%Y-%m-%d %H:%M:%S}.</div>
