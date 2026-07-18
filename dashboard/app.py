@@ -3136,9 +3136,11 @@ def _deeplink_updates(
 
 def _activate_tab_js(label: str) -> None:
     """st.tabs 에는 프로그램적 탭 선택이 없다 — 같은 오리진 iframe 에서 부모 문서의
-    탭 버튼을 클릭한다. 실패해도 무해 (기본 탭이 열릴 뿐, 티커는 이미 프리필됨)."""
-    import streamlit.components.v1 as components
+    탭 버튼을 클릭한다. 실패해도 무해 (기본 탭이 열릴 뿐, 티커는 이미 프리필됨).
 
+    렌더링: Streamlit 1.56+ 는 st.iframe(raw HTML → srcdoc, components.v1.html 의 직접
+    대체이자 deprecation 경고 없음), 그 이하(pyproject 의 >=1.40 계약)는 components.v1.html
+    폴백. 둘 다 같은 오리진 srcdoc 이라 부모 문서 접근 동작 동일."""
     script = (
         f"<script>const want={json.dumps(label)};let n=0;"
         "const t=setInterval(function(){n++;"
@@ -3148,7 +3150,12 @@ def _activate_tab_js(label: str) -> None:
         "if(btn){btn.click();clearInterval(t);return}}catch(e){clearInterval(t);return}"
         "if(n>20)clearInterval(t)},150);</script>"
     )
-    components.html(script, height=0)
+    if hasattr(st, "iframe"):  # 1.56+ — st.iframe 은 height=0 거부(양의 정수만) → 1px 로 비가시
+        st.iframe(script, height=1)
+    else:  # 1.40–1.55 호환 (해당 버전에선 components.v1.html 이 아직 권장 API)
+        import streamlit.components.v1 as components
+
+        components.html(script, height=0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
