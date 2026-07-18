@@ -345,10 +345,13 @@ class TestBuildMarketMap:
             now=datetime(2026, 7, 10, 9, 0),
             fetch_closes=fake_closes,
             fetch_fred=fake_fred,
+            kr_validated_csv=tmp_path / "no-kr.csv",  # ETF 프록시 경로를 검증 (catalog CSV 없음)
+            with_flows=False,  # naver 수급 fetch 스킵
         )
         assert stats["weeks"] == 4
         assert stats["us_themes"] >= 1  # NVDA/MSFT → AI 테마
-        assert stats["kr_themes"] == 1  # 091160.KS 만 데이터 존재
+        assert stats["kr_source"] == "etf-proxy"
+        assert stats["kr_themes"] == 1  # 091160.KS 만 데이터 존재 (ETF 프록시)
         assert stats["chips"] == 1  # ^KS11 만
         assert stats["macro_rows"] == 10  # 9 지표 + 섹터 로테이션
         assert "KOSPI" in html and "수익률곡선" in html and "섹터 로테이션" in html

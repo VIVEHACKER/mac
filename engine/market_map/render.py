@@ -20,6 +20,7 @@ from engine.market_map.compute import (
 )
 from engine.market_map.panels import (
     RATE_REGION_LABELS,
+    FlowPanel,
     ForecastPanel,
     OOSPanel,
     SelectionPanel,
@@ -375,6 +376,33 @@ def render_oos_panel(panel: OOSPanel) -> str:
     )
 
 
+def _won_eok(value: float) -> str:
+    """원 → 억원 부호 표기 (십억 이상은 조원)."""
+    eok = value / 1e8
+    if abs(eok) >= 10000:
+        return f"{'+' if eok >= 0 else '−'}{abs(eok) / 10000:,.2f}조"
+    return f"{'+' if eok >= 0 else '−'}{abs(eok):,.0f}억"
+
+
+def render_flow_panel(panel: FlowPanel) -> str:
+    """KR 수급 — 대표주 외국인/기관 기간 순매수. naver 추정(medium) 배지 필수."""
+    body: list[str] = []
+    for row in panel.rows:
+        f_color = UP_COLOR if row.foreign_net >= 0 else DOWN_COLOR
+        i_color = UP_COLOR if row.institution_net >= 0 else DOWN_COLOR
+        c_color = UP_COLOR if row.combined_net >= 0 else DOWN_COLOR
+        body.append(
+            "<tr>"
+            f"<td>{html.escape(row.name)} "
+            f'<span style="color:#9aa7b5">{html.escape(row.code)}</span></td>'
+            f'<td style="color:{f_color};font-weight:700">{_won_eok(row.foreign_net)}</td>'
+            f'<td style="color:{i_color};font-weight:700">{_won_eok(row.institution_net)}</td>'
+            f'<td style="color:{c_color};font-weight:800">{_won_eok(row.combined_net)}</td></tr>'
+        )
+    head = "<tr><th>종목</th><th>외국인</th><th>기관</th><th>합계</th></tr>"
+    return f'<table class="panel"><thead>{head}</thead><tbody>{"".join(body)}</tbody></table>'
+
+
 def render_forecast_panel(panel: ForecastPanel) -> str:
     """거시 예측 카드 — 금리 확률 바 + CPI/PPI nowcast, 사후채점 트랙레코드 병기."""
     cards: list[str] = []
@@ -449,6 +477,7 @@ def render_page(
     selection: SelectionPanel | None = None,
     oos: OOSPanel | None = None,
     forecasts: ForecastPanel | None = None,
+    flows: FlowPanel | None = None,
 ) -> str:
     chip_html = render_ticker_chips(chips)
     ticker = (
@@ -523,6 +552,15 @@ def render_page(
   발표 후 사후채점 원장에서 집계. 표본이 작을 때는 참고용.</div>
   {render_forecast_panel(forecasts)}
 </div></section>"""
+    flow_section = ""
+    if flows is not None and flows.rows:
+        flow_section = f"""
+<section id="flows"><div class="wrap">
+  <div class="sec-h"><h2>🇰🇷 수급 — 대표주 외국인·기관 순매수</h2><span>· 최근 {flows.lookback_days}거래일 · 테마 대장주</span></div>
+  <div class="hint"><b>⚠ 추정치(격리)</b> — naver 종가×거래량 기반 <b>{html.escape(flows.confidence)}</b> 신뢰도.
+  reported 값(KRX 크리덴셜)이 아니므로 정확한 금액이 아니라 <b>방향성</b> 참고용. 양수(빨강)=순매수, 음수(파랑)=순매도.</div>
+  <div class="card">{render_flow_panel(flows)}</div>
+</div></section>"""
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -545,6 +583,7 @@ def render_page(
       {'<a href="#selection">검증 선정</a>' if selection_section else ""}
       {'<a href="#oos">OOS 원장</a>' if oos_section else ""}
       {'<a href="#forecast">거시 예측</a>' if forecast_section else ""}
+      {'<a href="#flows">수급</a>' if flow_section else ""}
       <a href="{html.escape(dashboard_url)}" class="cta">대시보드 열기</a>
     </div>
   </nav>
@@ -583,6 +622,7 @@ def render_page(
 {selection_section}
 {oos_section}
 {forecast_section}
+{flow_section}
 <footer><div class="wrap">
   <div>데이터: Yahoo Finance · FRED(공개 CSV) · 로컬 DuckDB 카탈로그 — 지연/무보증 데이터.</div>
   <div>정보 제공 목적으로 생성된 페이지이며 투자 조언이 아닙니다. 생성 {generated_at:%Y-%m-%d %H:%M:%S}.</div>

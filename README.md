@@ -258,22 +258,32 @@ uv run trader recommend MSFT --target-price 520 --stop-price 390 --output out/re
 
 ## 마켓 히트맵 (market-map)
 
-돈이 어디로 흐르는지 한 장으로 — 거시 레짐 시계열 히트맵(KOSPI/VIX/DXY/EWY/HYG/TLT/10Y/수익률곡선/HY스프레드/섹터로테이션, 4주Δ risk-on·off 색상)과 테마별 자금흐름 히트맵(US는 로컬 카탈로그 유니버스를 슈퍼테마로 묶고 하위산업 드릴다운 지원, KR은 테마 ETF 프록시 + 대표 개별종목)을 surgedesk 스타일 정적 HTML로 생성한다.
+돈이 어디로 흐르는지 한 장으로 — 거시 레짐 시계열 히트맵(KOSPI/VIX/DXY/EWY/HYG/TLT/10Y/수익률곡선/HY스프레드/섹터로테이션, 4주Δ risk-on·off 색상)과 테마별 자금흐름 히트맵(US는 로컬 카탈로그 유니버스를 슈퍼테마로 묶고 하위산업 드릴다운 지원, KR은 카탈로그 기반 개별종목 12테마 ~100종목)을 surgedesk 스타일 정적 HTML로 생성한다.
 
 히트맵 아래에 기존 자산을 패널로 얹는다 (전부 fail-open — 소스가 없으면 섹션 생략):
 
 - **검증 선정** — `scan_universe` top-N 랭킹 (핀 스냅샷 기반, 네트워크 0). 티커 클릭 → 대시보드 추천기 딥링크(`?tab=recommender&ticker=…&market=us`).
 - **forward-OOS 원장** — 배포후보 페이퍼 원장 vs SPY (폐쇄 기간/인터임 MTM 구분, 표본수·산정기준 명시).
 - **거시 예측** — FOMC/금통위 {인하·동결·인상} 확률 + CPI/PPI nowcast (trading-copilot 원장 파일 읽기, 사후채점 트랙레코드 병기).
+- **KR 수급** — 테마 대장주의 외국인·기관 순매수 (naver 추정치, **medium/격리 배지** — 방향성 참고용, reported 는 KRX 크리덴셜 필요).
 
 ```bash
 uv run trader market-map                        # out/market_map.html 생성
 uv run trader market-map --weeks 12             # 최근 12주만
-uv run trader market-map --offline              # 네트워크 없이 카탈로그만 (US 테마 한정)
+uv run trader market-map --offline              # 네트워크 없이 카탈로그만 (US·KR 테마)
 uv run trader market-map --no-selection         # 검증 선정 패널 생략 (빠른 생성)
+uv run trader market-map --no-flows             # KR 수급 fetch 생략
 ```
 
-데이터: US 테마 = DuckDB 카탈로그(오프라인 가능) · 매크로/KR 테마/티커 칩 = yfinance · 수익률곡선(T10Y2Y)/HY 스프레드(BAMLH0A0HYM2) = FRED 공개 CSV(키 불필요). 수집 실패는 행/셀 단위로 비워지고 페이지는 항상 생성된다.
+데이터: US·KR 테마 = DuckDB 카탈로그(오프라인 가능) · 매크로/티커 칩 = yfinance · 수익률곡선(T10Y2Y)/HY 스프레드(BAMLH0A0HYM2) = FRED 공개 CSV(키 불필요) · KR 수급 = naver 추정(무크리덴셜). 수집 실패는 행/셀 단위로 비워지고 페이지는 항상 생성된다.
+
+### KR 유니버스 (catalog 기반 테마)
+
+pykrx 의 테마/전체티커 열거 API 는 KRX 서버 응답 문제로 깨져 있어(per-symbol OHLCV 만 정상), KR 테마 구성종목은 `data/kr_theme_universe.csv` 에 수작업 큐레이션한다. `scripts/kr_universe_ingest.py` 가 각 코드의 실제 종목명을 `pykrx get_market_ticker_name` 으로 대조해 **불일치 코드는 제외**(엉뚱한 회사가 히트맵에 새는 것 방지)하고, 통과분을 pykrx 로 카탈로그에 적재한 뒤 `data/kr_theme_universe.validated.csv` 로 출력한다. build 는 이 validated CSV 가 있으면 catalog 기반(개별종목), 없으면 ETF 프록시로 폴백한다.
+
+```bash
+uv run python -m scripts.kr_universe_ingest     # 큐레이션 검증 + 카탈로그 적재 + validated CSV 출력
+```
 
 자동 갱신: `scripts/install_market_map_cron.sh` (멱등 설치) — 토요일 풀 카탈로그 리프레시(`scripts/catalog_refresh.py --mode full`, 조정종가 이음새 리셋) + 평일 아침 map 심볼 탑업(`--mode incremental --scope map`) + 페이지 재생성. 심볼 단위 재시도/백오프/스로틀이라 yahoo 레이트리밋에 안전하다.
 

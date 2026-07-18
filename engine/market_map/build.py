@@ -7,7 +7,7 @@ fetch 계층은 전부 주입 가능(fetch_closes/fetch_fred)해서 테스트는
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from engine.market_map import compute, panels
 from engine.market_map.compute import MacroRow, ThemeRow
 from engine.market_map.render import render_page
 from engine.market_map.themes import (
+    DEFAULT_KR_VALIDATED_CSV,
     KR_THEMES,
     MACRO_SPECS,
     SECTOR_CYCLICALS,
@@ -22,6 +23,7 @@ from engine.market_map.themes import (
     TICKER_CHIPS,
     US_SUBTHEMES,
     US_THEMES,
+    load_kr_catalog_themes,
     yfinance_symbols_needed,
 )
 
@@ -36,34 +38,39 @@ _HISTORY_BUFFER_WEEKS = 7
 
 
 def _catalog_closes(
-    catalog_db: Path | str, symbols: list[str], start: date
+    catalog_db: Path | str,
+    symbols: list[str],
+    start: date,
+    markets: Sequence[str] = ("us",),
 ) -> dict[str, DailySeries]:
     """카탈로그 일별 종가 벌크 조회 — read-only 단일 커넥션/단일 쿼리.
 
     심볼당 connect(get_bars×2 connect)를 반복하면 다른 프로세스(대시보드/ingest)가
     락을 잡고 있을 때 심볼×재시도(~2초)만큼 스톨한다. 한 번 열고 실패면 즉시 비운다.
+    ``markets`` 로 US(기본) 외 KR(kospi/kosdaq)도 같은 경로로 읽는다.
     """
     import duckdb
 
     out: dict[str, DailySeries] = {}
     if not symbols or not Path(catalog_db).exists():
-        logger.warning("catalog db not found: %s — US 테마는 빈 칸", catalog_db)
+        logger.warning("catalog db not found: %s — 테마는 빈 칸", catalog_db)
         return out
     try:
         con = duckdb.connect(str(catalog_db), read_only=True)
     except Exception as exc:
-        logger.warning("catalog open failed (락 경합?) — US 테마는 빈 칸: %s", exc)
+        logger.warning("catalog open failed (락 경합?) — 테마는 빈 칸: %s", exc)
         return out
     try:
-        placeholders = ",".join("?" for _ in symbols)
+        sym_ph = ",".join("?" for _ in symbols)
+        mkt_ph = ",".join("?" for _ in markets)
         rows = con.execute(
             "SELECT symbol, ts, close FROM bars "
-            f"WHERE market = 'us' AND freq = '1d' AND ts >= ? AND symbol IN ({placeholders}) "
-            "ORDER BY symbol, ts",
-            [start, *[s.upper() for s in symbols]],
+            f"WHERE market IN ({mkt_ph}) AND freq = '1d' AND ts >= ? "
+            f"AND symbol IN ({sym_ph}) ORDER BY symbol, ts",
+            [*[m.lower() for m in markets], start, *[s.upper() for s in symbols]],
         ).fetchall()
     except Exception as exc:
-        logger.warning("catalog query failed — US 테마는 빈 칸: %s", exc)
+        logger.warning("catalog query failed — 테마는 빈 칸: %s", exc)
         return out
     finally:
         con.close()
@@ -87,6 +94,9 @@ def build_market_map(
     copilot_out: Path | str = panels.DEFAULT_COPILOT_OUT,
     with_selection: bool = True,
     strategies_root: Path | str = ".",
+    kr_validated_csv: Path | str = DEFAULT_KR_VALIDATED_CSV,
+    with_flows: bool = True,
+    fetch_flows: panels.FlowFetcher | None = None,
 ) -> tuple[str, dict[str, object]]:
     """마켓 히트맵 페이지 HTML 과 요약 통계를 만든다."""
     as_of = as_of or date.today()
@@ -178,16 +188,38 @@ def build_market_map(
         )
         if row.n > 0:
             us_rows.append(row)
+    # KR 테마 — 검증된 개별종목 유니버스(catalog, 6자리코드) 우선, 없으면 ETF 프록시(yfinance) 폴백.
+    # catalog 경로는 offline 에서도 동작하고 개별종목 n 이 커 신호가 두껍다. 단 validated CSV 는
+    # 있는데 카탈로그에 KR 봉이 아직 없으면(fresh checkout/락 실패) catalog 는 빈 결과 →
+    # 그 경우 ETF 프록시로 폴백해야 KR 섹션이 통째로 사라지지 않는다.
+    kr_catalog_themes = load_kr_catalog_themes(kr_validated_csv)
     kr_rows: list[ThemeRow] = []
-    for theme in KR_THEMES:
-        row = compute.theme_row(
-            theme.name,
-            {s: yf_series[s] for s in theme.symbols if yf_series.get(s)},
-            weeks,
-            as_of=as_of,
-        )
-        if row.n > 0:
-            kr_rows.append(row)
+    kr_source = "none"
+    if kr_catalog_themes is not None:
+        kr_codes = sorted({c for t in kr_catalog_themes for c in t.symbols})
+        kr_series = _catalog_closes(catalog_db, kr_codes, start, markets=("kospi", "kosdaq"))
+        for theme in kr_catalog_themes:
+            row = compute.theme_row(
+                theme.name,
+                {s: kr_series[s] for s in theme.symbols if s in kr_series},
+                weeks,
+                as_of=as_of,
+            )
+            if row.n > 0:
+                kr_rows.append(row)
+        if kr_rows:
+            kr_source = "catalog"
+    if not kr_rows and not offline:  # catalog 비었거나 CSV 없음 → ETF 프록시 폴백
+        kr_source = "etf-proxy"
+        for theme in KR_THEMES:
+            row = compute.theme_row(
+                theme.name,
+                {s: yf_series[s] for s in theme.symbols if yf_series.get(s)},
+                weeks,
+                as_of=as_of,
+            )
+            if row.n > 0:
+                kr_rows.append(row)
 
     # US 하위산업 드릴다운 — 부모 테마 아래 접힌 행 (데이터 잡힌 그룹만)
     us_sub_rows: dict[str, list[ThemeRow]] = {}
@@ -228,6 +260,18 @@ def build_market_map(
     )
     forecasts = panels.load_forecast_panel(copilot_out, as_of)
 
+    # KR 수급 — 대표주 외국인/기관 순매수(naver 추정). offline/미설정 시 생략.
+    flows = None
+    if with_flows and not offline:
+        bellwethers = panels.default_kr_bellwethers(kr_validated_csv)
+        if bellwethers:
+            flow_fn = fetch_flows
+            if flow_fn is None:
+                from data.ingest.krx_flows import fetch_naver_investor_flows
+
+                flow_fn = fetch_naver_investor_flows
+            flows = panels.load_flow_panel(bellwethers, flow_fn, as_of)
+
     # 상단 티커 칩 — 마지막 종가 vs 직전 종가
     chips: list[tuple[str, float, float]] = []
     for label, symbol in TICKER_CHIPS:
@@ -266,6 +310,7 @@ def build_market_map(
         selection=selection,
         oos=oos,
         forecasts=forecasts,
+        flows=flows,
     )
     stats: dict[str, object] = {
         "weeks": len(weeks),
@@ -274,6 +319,8 @@ def build_market_map(
         "us_themes": len(us_rows),
         "us_subthemes": sum(len(v) for v in us_sub_rows.values()),
         "kr_themes": len(kr_rows),
+        "kr_source": kr_source,
+        "kr_symbols": sum(r.n for r in kr_rows),
         "chips": len(chips),
         "catalog_symbols": len(catalog_series),
         "catalog_last_bar": catalog_as_of.isoformat() if catalog_as_of else None,
@@ -281,5 +328,6 @@ def build_market_map(
         "oos_entries": oos.n_entries if oos else 0,
         "oos_closed": oos.n_closed if oos else 0,
         "forecast_cards": (len(forecasts.rates) + len(forecasts.macros)) if forecasts else 0,
+        "flow_rows": len(flows.rows) if flows else 0,
     }
     return html, stats

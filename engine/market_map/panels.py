@@ -7,15 +7,22 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from data.models import FlowRecord
 
 logger = logging.getLogger(__name__)
 
 DailySeries = list[tuple[date, float]]
+FlowFetcher = Callable[[str, str, date, date], "list[FlowRecord]"]
 
 DEFAULT_OOS_LEDGER_GLOB = "out/paper-oos-ledger-*.jsonl"
 DEFAULT_COPILOT_OUT = Path("trading-copilot/out")
@@ -533,6 +540,105 @@ def _filter_asof(lines: list[dict], as_of: date) -> list[dict]:
         if ts and ts > iso:
             continue
         out.append(r)
+    return out
+
+
+# ── KR 수급 (외국인/기관 순매수, naver 추정) ─────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FlowRow:
+    code: str
+    name: str
+    foreign_net: float  # 기간 외국인 순매수 합 (원)
+    institution_net: float  # 기간 기관 순매수 합 (원)
+    combined_net: float
+
+
+@dataclass(frozen=True)
+class FlowPanel:
+    rows: list[FlowRow]  # combined_net 내림차순
+    lookback_days: int
+    confidence: str  # naver 추정 = "medium"
+    asof: date
+
+
+def load_flow_panel(
+    bellwethers: Sequence[tuple[str, str, str]],  # (code, name, market)
+    fetch_flows: FlowFetcher,
+    as_of: date,
+    *,
+    lookback_days: int = 10,
+    time_budget_s: float = 25.0,
+    monotonic: Callable[[], float] | None = None,
+) -> FlowPanel | None:
+    """대표 KR 종목들의 외국인/기관 기간 순매수. naver 추정치(medium)라 방향성 참고용.
+
+    빌드 시점 fetch (매크로/칩과 동일 패턴), 심볼 단위 fail-open. 전부 실패면 None.
+    ``time_budget_s``: 총 시간 예산 — naver 장애 시 12심볼 × 20초 timeout(≈4분) 스톨을
+    막는다. 예산 초과 시 남은 심볼은 조용히 버리지 않고 로그로 알린다.
+    """
+    import time
+    from datetime import timedelta
+
+    clock = monotonic or time.monotonic
+    started = clock()
+
+    # 버퍼는 fetch 용(주말/휴일 때문에 달력일 > 거래일). 합산은 실제 거래일 최근 N개로 제한 —
+    # 안 그러면 버퍼 전체(~17-18 거래일)를 더해 '최근 10거래일' 라벨과 어긋난다.
+    start = as_of - timedelta(days=lookback_days * 2 + 5)
+    rows: list[FlowRow] = []
+    for i, (code, name, market) in enumerate(bellwethers):
+        if i > 0 and clock() - started > time_budget_s:
+            logger.warning(
+                "flow panel time budget %.0fs 초과 — 남은 %d 심볼 스킵",
+                time_budget_s,
+                len(bellwethers) - i,
+            )
+            break
+        try:
+            recs = fetch_flows(code, market, start, as_of)
+        except Exception as exc:
+            logger.warning("flow fetch failed for %s: %s", code, exc)
+            continue
+        in_range = [r for r in recs if start <= r.ts <= as_of]
+        if not in_range:
+            continue
+        window = set(sorted({r.ts for r in in_range}, reverse=True)[:lookback_days])
+        recent = [r for r in in_range if r.ts in window]
+        fnet = sum(r.net_value for r in recent if r.investor == "foreign")
+        inet = sum(r.net_value for r in recent if r.investor == "institution")
+        rows.append(FlowRow(code, name, fnet, inet, fnet + inet))
+    if not rows:
+        return None
+    rows.sort(key=lambda r: r.combined_net, reverse=True)
+    return FlowPanel(rows=rows, lookback_days=lookback_days, confidence="medium", asof=as_of)
+
+
+def default_kr_bellwethers(csv_path: Path | str, per_theme: int = 1) -> list[tuple[str, str, str]]:
+    """검증된 KR 유니버스에서 테마별 상위 per_theme 종목(대장주) — 큐레이션 순서=시총순."""
+    path = Path(csv_path)
+    if not path.exists():
+        return []
+    seen: dict[str, int] = {}
+    out: list[tuple[str, str, str]] = []
+    try:
+        with open(path, encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                key = str(row.get("theme_key", "")).strip()
+                if seen.get(key, 0) >= per_theme:
+                    continue
+                seen[key] = seen.get(key, 0) + 1
+                out.append(
+                    (
+                        str(row.get("code", "")).strip().zfill(6),
+                        str(row.get("name", "")).strip(),
+                        str(row.get("market", "kospi")).strip(),
+                    )
+                )
+    except (OSError, ValueError) as exc:
+        logger.warning("KR bellwether CSV read failed: %s", exc)
+        return []
     return out
 
 

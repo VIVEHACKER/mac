@@ -6,7 +6,12 @@
 
 from __future__ import annotations
 
+import csv
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,55 @@ KR_THEMES: list[ThemeSpec] = [
 
 # 하위 호환 별칭 — ETF 단독 프록시 시절 이름 (build/테스트의 기존 import 유지)
 KR_THEME_ETFS = KR_THEMES
+
+# validated CSV 의 theme_key → 표시명(이모지). scripts/kr_universe_ingest.py 와 계약.
+KR_THEME_LABELS: dict[str, str] = {
+    "semi": "🤖 반도체/AI",
+    "battery": "🔋 2차전지/EV",
+    "bio": "💊 바이오",
+    "auto": "🚗 자동차",
+    "finance": "🏦 은행/금융",
+    "energy": "⚡ 에너지/화학",
+    "steel": "🏗 철강/소재",
+    "game": "🎮 게임",
+    "defense": "🛡 방산/우주",
+    "media": "🎬 미디어/엔터",
+    "ship": "🚢 조선",
+    "internet": "🌐 인터넷/플랫폼",
+}
+
+DEFAULT_KR_VALIDATED_CSV = Path("data/kr_theme_universe.validated.csv")
+
+
+def load_kr_catalog_themes(
+    csv_path: Path | str = DEFAULT_KR_VALIDATED_CSV,
+) -> list[ThemeSpec] | None:
+    """검증된 KR 유니버스 CSV → 카탈로그 6자리코드 기반 테마. 없으면 None (ETF 프록시 폴백).
+
+    scripts/kr_universe_ingest.py 가 pykrx 이름 대조를 통과한 종목만 이 CSV 에 쓴다.
+    심볼은 카탈로그 저장 규약(6자리 코드, market kospi/kosdaq)을 그대로 쓴다.
+    """
+    path = Path(csv_path)
+    if not path.exists():
+        return None
+    by_theme: dict[str, list[str]] = {}
+    try:
+        with open(path, encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                key = str(row.get("theme_key", "")).strip()
+                code = str(row.get("code", "")).strip().zfill(6)
+                if key in KR_THEME_LABELS and code.isdigit():
+                    by_theme.setdefault(key, []).append(code)
+    except (OSError, ValueError) as exc:
+        logger.warning("KR validated CSV read failed (%s) — ETF 프록시 폴백", exc)
+        return None
+    themes = [
+        ThemeSpec(KR_THEME_LABELS[key], by_theme[key])
+        for key in KR_THEME_LABELS
+        if by_theme.get(key)
+    ]
+    return themes or None
+
 
 # 🇺🇸 US 하위산업 드릴다운 — 큰 슈퍼테마를 하위 그룹으로 쪼갠다.
 # 키 = US_THEMES 의 표시명, 값의 심볼은 반드시 부모 테마 심볼의 부분집합.

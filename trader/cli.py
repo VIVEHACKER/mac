@@ -1244,6 +1244,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="검증 선정(scan_universe) 패널 생략 — 스냅샷 로드/스캔(~수 초)을 건너뛴다.",
     )
     market_map.add_argument(
+        "--no-flows",
+        action="store_true",
+        help="KR 수급(naver 추정) 패널 생략 — 대표주 순매수 fetch(~수 초)를 건너뛴다.",
+    )
+    market_map.add_argument(
         "--oos-ledger",
         type=Path,
         default=None,
@@ -4737,16 +4742,19 @@ def _run_market_map(args: argparse.Namespace) -> int:
         copilot_out=ROOT / "trading-copilot" / "out",
         with_selection=not args.no_selection,
         strategies_root=ROOT,
+        kr_validated_csv=ROOT / "data" / "kr_theme_universe.validated.csv",
+        with_flows=not args.no_flows,
     )
     out: Path = args.out
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
     print(
         f"market-map: {stats['weeks']}주 · 매크로 {stats['macro_rows_with_data']}/{stats['macro_rows']}행 "
-        f"· US 테마 {stats['us_themes']}(+하위 {stats.get('us_subthemes', 0)}) · KR 테마 {stats['kr_themes']} "
+        f"· US 테마 {stats['us_themes']}(+하위 {stats.get('us_subthemes', 0)}) "
+        f"· KR 테마 {stats['kr_themes']}({stats.get('kr_source', '?')} {stats.get('kr_symbols', 0)}종목) "
         f"· 칩 {stats['chips']} · 카탈로그 심볼 {stats['catalog_symbols']} (최신 {stats['catalog_last_bar'] or '—'}) "
         f"· 선정 {stats.get('selection_rows', 0)}행 · OOS {stats.get('oos_closed', 0)}/{stats.get('oos_entries', 0)}폐쇄 "
-        f"· 예측 {stats.get('forecast_cards', 0)}카드"
+        f"· 예측 {stats.get('forecast_cards', 0)}카드 · 수급 {stats.get('flow_rows', 0)}행"
     )
     print(f"페이지: {out}")
     return 0

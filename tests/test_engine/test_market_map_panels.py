@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from engine.market_map import build_market_map
@@ -434,6 +434,8 @@ def test_build_market_map_wires_panels(tmp_path):
         oos_ledger=ledger,
         copilot_out=copilot_out,
         with_selection=False,
+        with_flows=False,
+        kr_validated_csv=tmp_path / "no-kr.csv",
     )
     assert stats["oos_entries"] == 2 and stats["oos_closed"] == 1
     assert stats["forecast_cards"] == 1
@@ -495,6 +497,8 @@ def test_build_fetches_oos_marks_beyond_heatmap_window(tmp_path):
         oos_ledger=ledger,
         copilot_out=tmp_path / "no-copilot",
         with_selection=False,
+        with_flows=False,
+        kr_validated_csv=tmp_path / "no-kr.csv",
     )
     # 폐쇄 기간(01-09→02-06)이 살아 있어야 한다 — 창 밖이라고 사라지면 회귀
     assert stats["oos_entries"] == 2 and stats["oos_closed"] == 1
@@ -616,3 +620,246 @@ def test_forecast_panel_filters_future_records(tmp_path):
     card = panel.rates[0]
     assert card.meeting == "2026-06-17" and card.pending  # 미래 기록/채점 모두 배제
     assert card.n_scored == 0
+
+
+# ── KR catalog 테마 로더 (Gap1) ──────────────────────────────────────────────
+
+
+def test_load_kr_catalog_themes_groups_by_key(tmp_path):
+    from engine.market_map.themes import load_kr_catalog_themes
+
+    csv_path = tmp_path / "kr.validated.csv"
+    csv_path.write_text(
+        "theme_key,code,name,market\n"
+        "semi,005930,삼성전자,kospi\n"
+        "semi,000660,SK하이닉스,kospi\n"
+        "battery,373220,LG에너지솔루션,kospi\n"
+        "unknown_key,999999,X,kospi\n",  # 라벨에 없는 key → 무시
+        encoding="utf-8",
+    )
+    themes = load_kr_catalog_themes(csv_path)
+    assert themes is not None
+    by_name = {t.name: t.symbols for t in themes}
+    assert by_name["🤖 반도체/AI"] == ["005930", "000660"]
+    assert by_name["🔋 2차전지/EV"] == ["373220"]
+    assert all("🌐" not in n or True for n in by_name)  # unknown_key 테마 없음
+    assert len(themes) == 2
+
+
+def test_load_kr_catalog_themes_missing_is_none(tmp_path):
+    from engine.market_map.themes import load_kr_catalog_themes
+
+    assert load_kr_catalog_themes(tmp_path / "nope.csv") is None
+
+
+def test_build_kr_prefers_catalog_over_etf(tmp_path):
+    """검증 CSV 있으면 KR 테마를 catalog 6자리코드로 읽는다 (ETF 프록시 아님)."""
+    import duckdb
+
+    db = tmp_path / "cat.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE bars (symbol TEXT, market TEXT, source_symbol TEXT, freq TEXT, "
+        "ts DATE, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, "
+        "currency TEXT, source TEXT)"
+    )
+    # 두 주에 걸친 삼성전자 일봉 (catalog, market=kospi, 6자리코드)
+    for d, c in [
+        (date(2026, 7, 3), 80000.0),
+        (date(2026, 7, 10), 82000.0),
+        (date(2026, 7, 13), 83000.0),
+    ]:
+        con.execute(
+            "INSERT INTO bars VALUES ('005930','kospi','005930','1d',?,?,?,?,?,0,'KRW','pykrx')",
+            [d, c, c, c, c],
+        )
+    con.close()
+    csv_path = tmp_path / "kr.validated.csv"
+    csv_path.write_text(
+        "theme_key,code,name,market\nsemi,005930,삼성전자,kospi\n", encoding="utf-8"
+    )
+
+    html, stats = build_market_map(
+        weeks_count=2,
+        catalog_db=db,
+        as_of=date(2026, 7, 13),
+        fetch_closes=lambda syms, start, end=None: {},  # yfinance 안 씀
+        fetch_fred=lambda series, start: [],
+        now=datetime(2026, 7, 13, 9, 0, 0),
+        oos_ledger=None,
+        copilot_out=tmp_path / "no-copilot",
+        with_selection=False,
+        with_flows=False,
+        kr_validated_csv=csv_path,
+    )
+    assert stats["kr_source"] == "catalog"
+    assert stats["kr_themes"] == 1 and stats["kr_symbols"] == 1
+    assert "🤖 반도체/AI" in html
+
+
+def test_build_kr_falls_back_to_etf_without_csv(tmp_path):
+    html, stats = build_market_map(
+        weeks_count=2,
+        catalog_db=tmp_path / "missing.duckdb",
+        as_of=date(2026, 7, 13),
+        fetch_closes=lambda syms, start, end=None: {
+            "091160.KS": [(date(2026, 7, 3), 100.0), (date(2026, 7, 10), 102.0)]
+        },
+        fetch_fred=lambda series, start: [],
+        now=datetime(2026, 7, 13, 9, 0, 0),
+        oos_ledger=None,
+        copilot_out=tmp_path / "no-copilot",
+        with_selection=False,
+        with_flows=False,
+        kr_validated_csv=tmp_path / "absent.csv",
+    )
+    assert stats["kr_source"] == "etf-proxy"
+
+
+# ── KR 수급 FlowPanel (Gap2) ─────────────────────────────────────────────────
+
+
+class _Flow:
+    def __init__(self, investor, net_value, ts):
+        self.investor = investor
+        self.net_value = net_value
+        self.ts = ts
+
+
+def test_default_kr_bellwethers_top_per_theme(tmp_path):
+    from engine.market_map.panels import default_kr_bellwethers
+
+    csv_path = tmp_path / "v.csv"
+    csv_path.write_text(
+        "theme_key,code,name,market\n"
+        "semi,005930,삼성전자,kospi\n"
+        "semi,000660,SK하이닉스,kospi\n"  # 같은 테마 2번째 → per_theme=1이면 제외
+        "battery,373220,LG에너지솔루션,kospi\n",
+        encoding="utf-8",
+    )
+    bw = default_kr_bellwethers(csv_path, per_theme=1)
+    assert bw == [("005930", "삼성전자", "kospi"), ("373220", "LG에너지솔루션", "kospi")]
+
+
+def test_load_flow_panel_sums_and_ranks():
+    from engine.market_map.panels import load_flow_panel
+
+    def fetch(code, market, start, end):
+        # 삼성=외국인 순매수 우위, SK=순매도
+        if code == "005930":
+            return [
+                _Flow("foreign", 2e11, date(2026, 7, 16)),
+                _Flow("institution", 1e11, date(2026, 7, 16)),
+            ]
+        return [
+            _Flow("foreign", -3e11, date(2026, 7, 16)),
+            _Flow("institution", -1e11, date(2026, 7, 16)),
+        ]
+
+    panel = load_flow_panel(
+        [("005930", "삼성전자", "kospi"), ("000660", "SK하이닉스", "kospi")],
+        fetch,
+        AS_OF,
+    )
+    assert panel is not None and panel.confidence == "medium"
+    assert [r.code for r in panel.rows] == ["005930", "000660"]  # combined desc
+    assert abs(panel.rows[0].combined_net - 3e11) < 1
+    assert abs(panel.rows[1].combined_net - (-4e11)) < 1
+
+
+def test_load_flow_panel_failopen_all_fail_is_none():
+    from engine.market_map.panels import load_flow_panel
+
+    def fetch(code, market, start, end):
+        raise RuntimeError("naver down")
+
+    assert load_flow_panel([("005930", "삼성전자", "kospi")], fetch, AS_OF) is None
+
+
+def test_load_flow_panel_drops_out_of_window():
+    from engine.market_map.panels import load_flow_panel
+
+    def fetch(code, market, start, end):
+        return [_Flow("foreign", 1e11, date(2020, 1, 1))]  # 창 밖
+
+    assert load_flow_panel([("005930", "삼성전자", "kospi")], fetch, AS_OF) is None
+
+
+def test_render_flow_panel_won_formatting():
+    from engine.market_map.panels import FlowPanel, FlowRow
+    from engine.market_map.render import render_flow_panel
+
+    panel = FlowPanel(
+        rows=[FlowRow("005930", "삼성전자", 3.2e12, -1.1e11, 3.09e12)],
+        lookback_days=10,
+        confidence="medium",
+        asof=AS_OF,
+    )
+    html = render_flow_panel(panel)
+    assert "삼성전자" in html and "005930" in html
+    assert "조" in html  # 3.2조
+    assert "억" in html  # -11억 규모
+
+
+def test_build_kr_falls_back_to_etf_when_catalog_empty(tmp_path):
+    """validated CSV 있지만 카탈로그에 KR 봉 없음(fresh checkout) → ETF 프록시 폴백 (섹션 유지)."""
+    csv_path = tmp_path / "kr.validated.csv"
+    csv_path.write_text(
+        "theme_key,code,name,market\nsemi,005930,삼성전자,kospi\n", encoding="utf-8"
+    )
+    html, stats = build_market_map(
+        weeks_count=2,
+        catalog_db=tmp_path / "missing.duckdb",  # KR 봉 없음
+        as_of=date(2026, 7, 13),
+        fetch_closes=lambda syms, start, end=None: {
+            "091160.KS": [(date(2026, 7, 3), 100.0), (date(2026, 7, 10), 103.0)]
+        },
+        fetch_fred=lambda series, start: [],
+        now=datetime(2026, 7, 13, 9, 0, 0),
+        oos_ledger=None,
+        copilot_out=tmp_path / "no-copilot",
+        with_selection=False,
+        with_flows=False,
+        kr_validated_csv=csv_path,
+    )
+    assert stats["kr_source"] == "etf-proxy"  # catalog 비어 폴백
+    assert stats["kr_themes"] == 1  # 091160.KS ETF 데이터로 반도체 테마
+
+
+def test_load_flow_panel_restricts_to_last_n_trading_days():
+    from engine.market_map.panels import load_flow_panel
+
+    # 창 안에 15 거래일치 → lookback_days=3 이면 최근 3일만 합산
+    def fetch(code, market, start, end):
+        recs = []
+        for i in range(15):
+            d = date(2026, 7, 17) - timedelta(days=i)
+            recs.append(_Flow("foreign", 1e10, d))
+        return recs
+
+    panel = load_flow_panel(
+        [("005930", "삼성전자", "kospi")], fetch, date(2026, 7, 17), lookback_days=3
+    )
+    assert panel is not None
+    # 3일 × 1e10 = 3e10 (15일 전부가 아니라)
+    assert abs(panel.rows[0].foreign_net - 3e10) < 1
+
+
+def test_load_flow_panel_time_budget_stops_early():
+    from engine.market_map.panels import load_flow_panel
+
+    calls = []
+    clock = {"t": 0.0}
+
+    def fetch(code, market, start, end):
+        calls.append(code)
+        clock["t"] += 20.0  # 각 fetch 가 20초 걸린다고 가정
+        return [_Flow("foreign", 1e10, date(2026, 7, 16))]
+
+    bells = [(f"{i:06d}", f"n{i}", "kospi") for i in range(12)]
+    panel = load_flow_panel(
+        bells, fetch, date(2026, 7, 17), time_budget_s=25.0, monotonic=lambda: clock["t"]
+    )
+    # 첫 fetch(0→20s) 후 2번째 진입 시 20s<25s 통과, 2번째(20→40s) 후 3번째 진입 시 40s>25s → 중단
+    assert panel is not None
+    assert len(calls) == 2  # 예산 초과로 나머지 10개 스킵
