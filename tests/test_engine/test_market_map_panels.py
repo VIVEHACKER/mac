@@ -564,6 +564,19 @@ def test_strategy_backtest_excess_prefix_match(tmp_path):
     assert strategy_backtest_excess("unknown_strategy", tmp_path) is None
 
 
+def test_strategy_pbo_reads_config(tmp_path):
+    from engine.market_map.panels import strategy_pbo
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "validated_strategies.json").write_text(
+        json.dumps({"strategies": {"aqr_top7_cap20_trail10": {"pbo": 0.39}}}),
+        encoding="utf-8",
+    )
+    assert strategy_pbo("aqr_top7_cap20_trail10_pit110", tmp_path) == 0.39
+    assert strategy_pbo("nope", tmp_path) is None
+
+
 def test_oos_panel_no_lookahead_past_asof(tmp_path):
     """과거 as_of 재생성 시 미래 리밸이 기간을 폐쇄하면 안 된다 (no-lookahead)."""
     path = _write_ledger(tmp_path)  # 리밸 06-05, 07-02

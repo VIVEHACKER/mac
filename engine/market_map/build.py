@@ -209,7 +209,9 @@ def build_market_map(
             us_sub_rows[parent_name] = subs
 
     # 확장 패널 — 전부 fail-open (없으면 섹션 생략)
-    selection = panels.load_selection_panel() if with_selection else None
+    selection = (
+        panels.load_selection_panel(strategies_root=strategies_root) if with_selection else None
+    )
     oos_closes = {s: catalog_series.get(s) or yf_series.get(s) or [] for s in oos_syms}
     oos_strategy = (
         Path(oos_ledger).name.removeprefix("paper-oos-ledger-").removesuffix(".jsonl")

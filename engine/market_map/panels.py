@@ -51,7 +51,9 @@ class SelectionPanel:
     pbo: float | None = None  # 전략 검증의 과최적화 확률 — 정직 표기용
 
 
-def load_selection_panel(max_rows: int = 10) -> SelectionPanel | None:
+def load_selection_panel(
+    max_rows: int = 10, *, strategies_root: Path | str = "."
+) -> SelectionPanel | None:
     """핀 스냅샷 기반 scan_universe top-N. 네트워크 없음(~2-3s). 실패 시 None."""
     try:
         from scripts.evaluate_ticker import DEFAULT_FUNDAMENTALS, DEFAULT_PRICES, load_universe
@@ -88,7 +90,10 @@ def load_selection_panel(max_rows: int = 10) -> SelectionPanel | None:
     ]
     if not rows:
         return None
+    # ValidatedStrategy 는 pbo 를 노출하지 않아 config 에서 직접 읽는다 (없으면 폴백).
     pbo = getattr(strategy, "pbo", None)
+    if pbo is None:
+        pbo = strategy_pbo(strategy.strategy_id, strategies_root)
     return SelectionPanel(
         strategy_id=strategy.strategy_id,
         top_n=int(strategy.top_n),
@@ -164,8 +169,8 @@ def discover_oos_ledger(root: Path | str = ".") -> Path | None:
     return None
 
 
-def strategy_backtest_excess(strategy_id: str, root: Path | str = ".") -> float | None:
-    """전략의 백테스트 기대 초과(연, 수수료 반영) — validated_strategies.json 에서.
+def _strategy_field(strategy_id: str, field: str, root: Path | str) -> float | None:
+    """validated_strategies.json 에서 전략 지표 하나를 읽는다.
 
     원장 전략 id 는 config 키의 변형(예: ``…_pit110``)일 수 있어 최장 접두 매치.
     """
@@ -180,8 +185,18 @@ def strategy_backtest_excess(strategy_id: str, root: Path | str = ".") -> float 
             best_key = key
     if not best_key:
         return None
-    value = strategies[best_key].get("avg_excess_after_cost")
+    value = strategies[best_key].get(field)
     return float(value) if isinstance(value, (int, float)) else None
+
+
+def strategy_backtest_excess(strategy_id: str, root: Path | str = ".") -> float | None:
+    """전략의 백테스트 기대 초과(연, 수수료 반영)."""
+    return _strategy_field(strategy_id, "avg_excess_after_cost", root)
+
+
+def strategy_pbo(strategy_id: str, root: Path | str = ".") -> float | None:
+    """전략의 과최적화 확률(PBO) — '크기 fragile' 의 정직한 근거."""
+    return _strategy_field(strategy_id, "pbo", root)
 
 
 def oos_start_date(ledger_path: Path | str | None) -> date | None:
